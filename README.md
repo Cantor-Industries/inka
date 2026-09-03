@@ -127,6 +127,6 @@ Without the embedded snapshot, dex cold-starts at ~0.6 s; the snapshot brings it
 ## Current limits / roadmap
 
 - No `node:`/`npm:` module resolution (the npm trait slots are inert; non-npm code is unaffected).
-- Launcher prints `[dex]` diagnostics to stderr on every run (cosmetic; gating behind an env var is pending).
+- Successful runs are silent; set `DEX_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[dex]` prefix.
 - `dex install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.

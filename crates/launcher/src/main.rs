@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 const FOOTER_LEN: usize = 24;
 const MAGIC: &[u8] = b"DEXFOOT2";
 
+macro_rules! debug_log {
+    ($($arg:tt)*) => {
+        if std::env::var_os("DEX_DEBUG").is_some() {
+            eprintln!($($arg)*);
+        }
+    };
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Version(u64, u64, u64);
 
@@ -192,7 +200,7 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i3
             .get(b"dex_runtime_destroy")
             .expect("missing dex_runtime_destroy");
 
-        eprintln!("[dex] runtime {} reports: {reported}", lib.display());
+        debug_log!("[dex] runtime {} reports: {reported}", lib.display());
 
         let rt = create();
         let spec = CString::new(module).unwrap_or_else(|_| CString::new("main.js").unwrap());
@@ -258,8 +266,8 @@ fn main() {
         std::process::exit(3);
     };
 
-    eprintln!("[dex] resolved deno_runtime {v} at {}", path.display());
-    eprintln!("[dex] module '{}' payload {} bytes", m.module, payload.len());
+    debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
+    debug_log!("[dex] module '{}' payload {} bytes", m.module, payload.len());
     let code = load_and_run(&path, &m.module, payload, &args);
     std::process::exit(code);
 }
