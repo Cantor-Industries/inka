@@ -1,8 +1,11 @@
 // dex: companion tooling for dex artifacts.
 //
+//   dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
 //   dex install <version> [--from <dir-or-url>] [--sha256 <hex>]
 //                         [--insecure] [--home <dir>]
 //   dex list [--home <dir>]
+
+mod build;
 
 use std::env;
 use std::fmt;
@@ -39,7 +42,7 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  dex install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  dex list [--home <dir>]"
+        "usage:\n  dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  dex install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  dex list [--home <dir>]"
     );
     std::process::exit(2);
 }
@@ -60,6 +63,7 @@ fn main() {
         usage();
     }
     match args[0].as_str() {
+        "build" => build::cmd_build(&args[1..]),
         "install" => cmd_install(&args[1..]),
         "list" => cmd_list(&args[1..]),
         _ => usage(),

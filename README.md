@@ -25,8 +25,7 @@ A `dex` executable is a ~350 KB native launcher that embeds your source + a mani
 | `crates/launcher` | Thin native host: parses the appended trailer, resolves a tuple, `dlopen`s it, runs your module |
 | `crates/runtime-stub` | Tiny fake `.so` exporting the same C ABI — used to develop/test the launcher cheaply |
 | `crates/runtime-deno` | Real runtime: `deno_runtime` behind the frozen C ABI, with a V8 startup snapshot embedded at build time |
-| `crates/dex-build` | Packs `launcher + source + manifest + footer` into one artifact |
-| `crates/dex` | Companion CLI: `dex install <version>` (checksum-gated runtime distribution) and `dex list` |
+| `crates/dex` | Companion CLI: `dex build` (pack launcher + source + manifest into an artifact), `dex install <version>` (checksum-gated runtime distribution), `dex list` |
 
 ## The frozen C ABI (identical in stub and real runtime)
 
@@ -64,25 +63,26 @@ module=main.js                    # display specifier
 ## Quickstart
 
 ```sh
-cargo build --release -p dex -p dex-build -p launcher
+cargo build --release -p dex -p launcher
 
 # 1. write your program
 cat > app.js <<'EOF'
 console.log(`hello ${Deno.args[0] ?? "world"} from deno ${Deno.version.deno}`);
 EOF
 
-# 2. manifest
+# 2. manifest (same directory as the source)
 printf 'runtime=deno_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
 
-# 3. pack
-./target/release/dex-build \
-  --launcher target/release/dex-launcher \
-  --source app.js --manifest app.manifest --output myapp
-chmod +x myapp
+# 3. pack  (manifest auto-found as app.manifest; output auto-derived as "app")
+./target/release/dex build app.js
+# ...or be explicit:
+./target/release/dex build app.js --manifest app.manifest -o myapp
 
 # 4. run (needs a compatible runtime installed)
 ./myapp kook
 ```
+
+`dex build` finds the launcher automatically: `$DEX_LAUNCHER`, else `dex-launcher` next to the `dex` binary (so build `-p launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `dex.manifest` in the current directory.
 
 Install a runtime on a machine (requires a `<file>.sha256` sidecar or `--sha256 <hex>`; add `--insecure` to skip):
 
