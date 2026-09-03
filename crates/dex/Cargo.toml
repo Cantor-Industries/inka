@@ -1,0 +1,12 @@
+[package]
+name = "dex"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "dex"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"

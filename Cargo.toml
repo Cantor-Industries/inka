@@ -1,0 +1,10 @@
+[workspace]
+resolver = "2"
+members = ["crates/launcher", "crates/runtime-stub", "crates/dex-build", "crates/runtime-deno", "crates/dex"]
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true

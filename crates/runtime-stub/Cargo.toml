@@ -1,0 +1,9 @@
+[package]
+name = "runtime-stub"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "dex_runtime"
+crate-type = ["cdylib"]
