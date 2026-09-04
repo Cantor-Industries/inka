@@ -66,8 +66,8 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
                 warn_once(
                     &mut warned,
                     &format!(
-                        "import '{}' from '{}' is not a local relative file; leaving it for the runtime \
-                         (npm/jsr/vendored imports arrive in a later phase)",
+                        "import '{}' from '{}' is not a local file; leaving it for the runtime \
+                         to resolve from the package store (npm:/jsr:) or as a built-in",
                         s, rel
                     ),
                 );

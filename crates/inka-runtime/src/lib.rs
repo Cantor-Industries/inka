@@ -9,9 +9,9 @@ use std::sync::OnceLock;
 
 use deno_runtime::deno_core::url::Url;
 use deno_runtime::deno_core::{
-    FsModuleLoader, ModuleCodeString, ModuleLoadOptions, ModuleLoadResponse, ModuleLoader,
-    ModuleName, ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier,
-    ModuleType, RequestedModuleType,
+    ModuleCodeString, ModuleLoadOptions, ModuleLoadResponse, ModuleLoader, ModuleName,
+    ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier, ModuleType,
+    RequestedModuleType,
 };
 use deno_runtime::deno_fetch::dns::Resolver as FetchDnsResolver;
 use deno_runtime::deno_fs::{FileSystem, RealFs};
@@ -27,6 +27,8 @@ use deno_runtime::{FeatureChecker, WorkerLogLevel};
 use node_resolver::errors;
 use node_resolver::{InNpmPackageChecker, NpmPackageFolderResolver, UrlOrPathRef};
 use deno_error::JsErrorBox;
+use deno_semver::{Version, VersionReq};
+use serde_json::Value;
 use sys_traits::impls::RealSys;
 
 const DENO_RUNTIME_VERSION: &str = "0.266.0";
@@ -38,21 +40,455 @@ mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
 }
 
-/// A module loader for the staged multi-file tree: resolves relative imports
-/// against file specifiers (like `FsModuleLoader`) but refuses to read outside
-/// `root` and transpiles `.ts`/`.mts`/`.cts` on load.
-#[derive(Clone)]
-struct InkaModuleLoader {
-    root: PathBuf,
+const STORE_PACKAGES_DIR: &str = "packages";
+
+/// Allow-listed condition keys for package.json `exports` target selection.
+/// `types` and `require` (CommonJS) are deliberately skipped; only ESM-capable
+/// targets are used.
+const EXPORT_CONDITIONS: [&str; 3] = ["import", "node", "default"];
+
+/// One parsed `npm:`/`jsr:` specifier, normalized to its npm identity.
+struct PkgSpec {
+    /// npm package name, e.g. `zod` or `@jsr/std__assert`.
+    name: String,
+    /// Optional version requirement text as written (no leading `@`).
+    req: Option<String>,
+    /// Optional subpath (no leading `/`).
+    sub: Option<String>,
 }
 
-impl ModuleLoader for InkaModuleLoader {
+fn parse_pkg_specifier(spec: &str) -> Result<PkgSpec, String> {
+    let body = if let Some(rest) = spec.strip_prefix("npm:") {
+        rest.to_string()
+    } else if let Some(rest) = spec.strip_prefix("jsr:") {
+        // jsr:@scope/name -> npm @jsr/scope__name (jsr's npm-compatibility mirror).
+        let rest = rest.trim();
+        let (scope, after) = rest.split_once('/').ok_or_else(|| {
+            format!("invalid jsr specifier '{spec}' (expected jsr:@scope/name[...])")
+        })?;
+        let scope = scope.strip_prefix('@').unwrap_or(scope);
+        let (name, tail) = split_name_suffix(after);
+        format!("@jsr/{scope}__{name}{tail}")
+    } else {
+        return Err(format!("not a package specifier: '{spec}'"));
+    };
+    parse_npm_body(&body)
+}
+
+/// Splits `name` from the rest of a package body (`name[@req][/sub]`).
+fn split_name_suffix(after: &str) -> (&str, &str) {
+    match after.find(['@', '/']) {
+        Some(i) => (&after[..i], &after[i..]),
+        None => (after, ""),
+    }
+}
+
+fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
+    let body = body.trim();
+    let (name, rest) = if body.starts_with('@') {
+        let (scope, after) = body
+            .split_once('/')
+            .ok_or_else(|| format!("malformed scoped package '{body}'"))?;
+        let (nm, rest) = split_name_suffix(after);
+        (format!("{scope}/{nm}"), rest)
+    } else {
+        let (nm, rest) = split_name_suffix(body);
+        (nm.to_string(), rest)
+    };
+    let mut req = None;
+    let mut sub = None;
+    if let Some(tail) = rest.strip_prefix('@') {
+        let (r, s) = match tail.split_once('/') {
+            Some((r, s)) => (r, Some(s.to_string())),
+            None => (tail, None),
+        };
+        req = Some(r.to_string());
+        sub = s;
+    } else if let Some(s) = rest.strip_prefix('/') {
+        sub = Some(s.to_string());
+    }
+    Ok(PkgSpec { name, req, sub })
+}
+
+/// Store-backed module loader. Serves:
+///   - the artifact tree (or the staged single-entry tree) — local files,
+///   - vendored `npm:`/`jsr:` packages from a global self-contained store,
+///   - `node:`/`data:`/`file:` built-ins (as before),
+/// and rejects network imports outright. Reading is confined to the artifact
+/// tree and the store; nothing outside those roots is ever served.
+struct PkgLoader {
+    /// Root of the artifact tree (or the staged temp tree for single-file runs).
+    artifact_root: PathBuf,
+    /// Root of the global package store (`<store>/packages/<name>/<version>/…`).
+    store_root: Option<PathBuf>,
+}
+
+fn store_root_env() -> Option<PathBuf> {
+    std::env::var_os("INKA_STORE").map(PathBuf::from)
+}
+
+fn has_scheme(spec: &str) -> bool {
+    spec.split_once(':').is_some()
+}
+
+fn is_bare(spec: &str) -> bool {
+    !has_scheme(spec) && !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/')
+}
+
+fn referrer_file_path(referrer: &str) -> Option<PathBuf> {
+    Url::parse(referrer).ok().and_then(|u| u.to_file_path().ok())
+}
+
+/// Lists the installed versions of a package: `Vec<(dir_name, version)>`
+/// sorted ascending. A missing dir simply means "nothing installed".
+fn store_package_versions(dir: &Path) -> Result<Vec<(String, Version)>, String> {
+    let mut out = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(out),
+    };
+    for ent in entries.flatten() {
+        if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if let Ok(v) = Version::parse_standard(&name) {
+            out.push((name, v));
+        }
+    }
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    Ok(out)
+}
+
+fn version_satisfies(v: &Version, req: &str) -> bool {
+    let req = req.trim();
+    if let Ok(exact) = Version::parse_standard(req) {
+        return v == &exact;
+    }
+    match VersionReq::parse_from_npm(req) {
+        Ok(vr) => vr.tag().is_none() && vr.matches(v),
+        Err(_) => false,
+    }
+}
+
+/// Chooses the installed version dir for a package given the requested version.
+fn pick_package_version(
+    name: &str,
+    versions: &[(String, Version)],
+    req: Option<&str>,
+) -> Result<String, String> {
+    let avail: Vec<&str> = versions.iter().map(|(n, _)| n.as_str()).collect();
+    if versions.is_empty() {
+        return Err(format!(
+            "package '{name}' is not in the package store (nothing installed); \
+             run `inka pkg seed` to install it"
+        ));
+    }
+    let req = req.map(str::trim).filter(|s| !s.is_empty());
+    let matching: Vec<&(String, Version)> = match &req {
+        None => versions.iter().collect(),
+        Some(r) => versions
+            .iter()
+            .filter(|(_, v)| version_satisfies(v, r))
+            .collect(),
+    };
+    match req {
+        None => {
+            if matching.len() == 1 {
+                Ok(matching[0].0.clone())
+            } else {
+                Err(format!(
+                    "multiple versions of '{name}' are installed ({avail:?}); \
+                     import an exact version (e.g. npm:{name}@<version>)"
+                ))
+            }
+        }
+        Some(r) => {
+            if matching.is_empty() {
+                Err(format!(
+                    "no installed version of '{name}' satisfies '{r}' (have {avail:?}); \
+                     run `inka pkg seed` to install it"
+                ))
+            } else {
+                // Prefer the highest satisfying installed version.
+                Ok(matching
+                    .iter()
+                    .max_by(|a, b| a.1.cmp(&b.1))
+                    .map(|m| m.0.clone())
+                    .expect("matching is non-empty"))
+            }
+        }
+    }
+}
+
+/// Picks the importable JS target out of a `package.json` `exports` value for
+/// the requested subpath. Returns a package-relative path (may start with `./`).
+fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
+    fn pick_conditions(v: &Value) -> Result<String, String> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            Value::Array(items) => {
+                for item in items {
+                    if let Ok(s) = pick_conditions(item) {
+                        return Ok(s);
+                    }
+                }
+                Err("no usable export target".to_string())
+            }
+            Value::Object(map) => {
+                for (k, val) in map {
+                    if EXPORT_CONDITIONS.contains(&k.as_str()) {
+                        return pick_conditions(val);
+                    }
+                }
+                Err(
+                    "package has no import/default export target \
+                     (CommonJS-only packages are not supported)"
+                        .to_string(),
+                )
+            }
+            _ => Err("malformed exports target".to_string()),
+        }
+    }
+
+    let sub = subpath.trim_start_matches("./");
+    let is_map = match exports {
+        Value::Object(map) => map.keys().any(|k| k == "." || k.starts_with("./")),
+        _ => false,
+    };
+    let target = if is_map {
+        let map = exports.as_object().unwrap();
+        if sub.is_empty() {
+            match map.get(".") {
+                Some(v) => pick_conditions(v)?,
+                None => return Err("package has no '.' export".to_string()),
+            }
+        } else if let Some(v) = map.get(format!("./{sub}").as_str()) {
+            pick_conditions(v)?
+        } else {
+            // support pattern keys like "./locales/*"
+            let mut hit = None;
+            for (k, v) in map {
+                if let Some(star) = k.strip_suffix('*') {
+                    let prefix = star.strip_prefix("./").unwrap_or(star);
+                    if let Some(rem) = sub.strip_prefix(prefix) {
+                        let t = pick_conditions(v)?;
+                        hit = Some(t.replace('*', rem));
+                        break;
+                    }
+                }
+            }
+            match hit {
+                Some(t) => t,
+                None => return Err(format!("no exported subpath './{sub}' for this package")),
+            }
+        }
+    } else if sub.is_empty() {
+        // exports applies to the package root only.
+        pick_conditions(exports)?
+    } else {
+        return Err(format!("no exported subpath './{sub}' for this package"));
+    };
+    Ok(target)
+}
+
+/// Legacy (no `exports`) target resolution: `main` or file/index lookup.
+fn legacy_package_target(pkg_root: &Path, pkg: &Value, sub: &str) -> Result<String, String> {
+    let resolve_loose = |rel: &str| -> Option<String> {
+        let rel = rel.trim_start_matches("./");
+        let candidate = pkg_root.join(rel);
+        if candidate.is_file() {
+            return Some(rel.to_string());
+        }
+        const EXTS: [&str; 3] = ["js", "mjs", "json"];
+        for ext in EXTS {
+            let cand = PathBuf::from(format!("{rel}.{ext}"));
+            if pkg_root.join(&cand).is_file() {
+                return Some(format!("{rel}.{ext}"));
+            }
+        }
+        if candidate.is_dir() {
+            for idx in ["index.js", "index.mjs", "index.json"] {
+                if candidate.join(idx).is_file() {
+                    return Some(format!("{rel}/{idx}"));
+                }
+            }
+        }
+        None
+    };
+    if sub.is_empty() {
+        if let Some(main) = pkg.get("main").and_then(Value::as_str) {
+            if let Some(t) = resolve_loose(main) {
+                return Ok(t);
+            }
+        }
+        return resolve_loose("index.js").ok_or_else(|| "package has no main entry".to_string());
+    }
+    resolve_loose(sub).ok_or_else(|| format!("cannot resolve file '{sub}' in package"))
+}
+
+/// Resolves a subpath ("" = package root) inside a package directory to a
+/// concrete on-disk file, honoring `exports` with a legacy fallback.
+fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, String> {
+    let pkg_json_path = pkg_root.join("package.json");
+    let raw = std::fs::read_to_string(&pkg_json_path)
+        .map_err(|e| format!("cannot read {}: {e}", pkg_json_path.display()))?;
+    let pkg: Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("invalid package.json in {}: {e}", pkg_json_path.display()))?;
+    let sub = subpath.unwrap_or("").trim_start_matches("./");
+
+    let target = match pkg.get("exports") {
+        Some(Value::Null) | None => legacy_package_target(pkg_root, &pkg, sub)?,
+        Some(exports) => exports_target(exports, sub)?,
+    };
+    let target = target.trim_start_matches("./");
+    let file = pkg_root.join(target);
+    // never allow an export target to walk out of the package directory
+    if target.split('/').any(|c| c == "..")
+        || Path::new(target)
+            .components()
+            .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!("export target '{target}' escapes the package directory"));
+    }
+    if !file.is_file() {
+        return Err(format!(
+            "store package module not found on disk: {}",
+            file.display()
+        ));
+    }
+    Ok(file)
+}
+
+/// Resolves an `npm:`/`jsr:` specifier against the store to a concrete file.
+fn store_lookup(store: &Path, spec: &str) -> Result<PathBuf, String> {
+    let ps = parse_pkg_specifier(spec)?;
+    let packages = store.join(STORE_PACKAGES_DIR);
+    let base = packages.join(&ps.name);
+    if !base.starts_with(&packages) {
+        return Err(format!("unsafe package name in '{spec}'"));
+    }
+    let versions = store_package_versions(&base)?;
+    let dir_name = pick_package_version(&ps.name, &versions, ps.req.as_deref())?;
+    let pkg_dir = base.join(&dir_name);
+    let pkg_root = pkg_dir.join("node_modules").join(&ps.name);
+    if !pkg_root.is_dir() {
+        return Err(format!(
+            "store package {}@{} is missing its node_modules/{} tree; re-run `inka pkg seed`",
+            ps.name, dir_name, ps.name
+        ));
+    }
+    resolve_pkg_file(&pkg_root, ps.sub.as_deref())
+}
+
+/// Splits a bare specifier into `(package name, optional subpath)`.
+fn split_bare(spec: &str) -> (String, Option<String>) {
+    if spec.starts_with('@') {
+        if let Some((head, tail)) = spec.split_once('/') {
+            return match tail.split_once('/') {
+                Some((name, rest)) => (format!("{head}/{name}"), Some(rest.to_string())),
+                None => (format!("{head}/{tail}"), None),
+            };
+        }
+        (spec.to_string(), None)
+    } else {
+        match spec.split_once('/') {
+            Some((n, rest)) => (n.to_string(), Some(rest.to_string())),
+            None => (spec.to_string(), None),
+        }
+    }
+}
+
+/// Node-style resolution of a bare specifier originating inside the store
+/// (a vendored package importing one of its installed dependencies).
+fn store_bare_lookup(store: &Path, spec: &str, referrer: &Path) -> Result<PathBuf, String> {
+    let (name, sub) = split_bare(spec);
+    let mut dir = referrer
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| store.to_path_buf());
+    loop {
+        let cand = dir.join("node_modules").join(&name);
+        if cand.is_dir() {
+            return resolve_pkg_file(&cand, sub.as_deref());
+        }
+        let Some(parent) = dir.parent() else { break };
+        if !parent.starts_with(store) {
+            break;
+        }
+        dir = parent.to_path_buf();
+    }
+    Err(format!(
+        "cannot resolve '{spec}' from the store (not an installed dependency); \
+         run `inka pkg seed` to install it"
+    ))
+}
+
+fn file_url_response(path: &Path) -> ModuleResolveResponse {
+    match ModuleSpecifier::from_file_path(path) {
+        Ok(u) => Ok(u),
+        Err(_) => Err(JsErrorBox::generic(format!(
+            "cannot form a file URL for {}",
+            path.display()
+        ))),
+    }
+}
+
+impl ModuleLoader for PkgLoader {
     fn resolve(
         &self,
         specifier: &str,
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
+        // Vendored package specifiers resolve from the store.
+        if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
+            let store = match &self.store_root {
+                Some(s) => s.clone(),
+                None => {
+                    return Err(JsErrorBox::generic(
+                        "this runtime has no package store configured (INKA_STORE is unset); \
+                         run `inka pkg seed` to install vendored packages"
+                            .to_string(),
+                    ))
+                }
+            };
+            return match store_lookup(&store, specifier) {
+                Ok(path) => file_url_response(&path),
+                Err(e) => Err(JsErrorBox::generic(e)),
+            };
+        }
+        // Hard offline: no remote module fetching, ever.
+        if specifier.starts_with("http://") || specifier.starts_with("https://") {
+            return Err(JsErrorBox::generic(format!(
+                "network module imports are disabled ('{specifier}'); \
+                 vendor the package with `inka pkg seed` instead"
+            )));
+        }
+        // Bare imports are only valid from inside the store (a vendored
+        // package importing one of its installed dependencies).
+        if is_bare(specifier) {
+            let store = match &self.store_root {
+                Some(s) => s.clone(),
+                None => {
+                    return Err(JsErrorBox::generic(format!(
+                        "bare import '{specifier}' is not supported; prefix it with npm: or jsr:"
+                    )))
+                }
+            };
+            let ref_path = referrer_file_path(referrer).unwrap_or_default();
+            if !ref_path.starts_with(&store) {
+                return Err(JsErrorBox::generic(format!(
+                    "bare import '{specifier}' from a module outside the package store \
+                     is not supported; prefix it with npm: or jsr:"
+                )));
+            }
+            return match store_bare_lookup(&store, specifier, &ref_path) {
+                Ok(path) => file_url_response(&path),
+                Err(e) => Err(JsErrorBox::generic(e)),
+            };
+        }
+        // Relative / file / node: / data: specifiers resolve as before.
         deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
     }
 
@@ -63,12 +499,17 @@ impl ModuleLoader for InkaModuleLoader {
         options: ModuleLoadOptions,
     ) -> ModuleLoadResponse {
         let specifier = module_specifier.clone();
-        let root = self.root.clone();
+        let artifact_root = self.artifact_root.clone();
+        let store_root = self.store_root.clone();
         let fut = async move {
             let mut path = module_url_to_path(&specifier)?;
-            if !path.starts_with(&root) {
+            let in_artifact = path.starts_with(&artifact_root);
+            let in_store = store_root
+                .as_ref()
+                .is_some_and(|s| path.starts_with(s));
+            if !in_artifact && !in_store {
                 return Err(JsErrorBox::generic(format!(
-                    "refusing to load module outside the artifact tree: {specifier}"
+                    "refusing to load module outside the artifact tree and package store: {specifier}"
                 )));
             }
             // Deno-style resolution: an extensionless specifier like "./math"
@@ -87,9 +528,13 @@ impl ModuleLoader for InkaModuleLoader {
                     path = p;
                 }
             }
-            if !path.starts_with(&root) {
+            let in_artifact = path.starts_with(&artifact_root);
+            let in_store = store_root
+                .as_ref()
+                .is_some_and(|s| path.starts_with(s));
+            if !in_artifact && !in_store {
                 return Err(JsErrorBox::generic(format!(
-                    "refusing to load module outside the artifact tree: {specifier}"
+                    "refusing to load module outside the artifact tree and package store: {specifier}"
                 )));
             }
             let bytes = std::fs::read(&path).map_err(|source| {
@@ -444,48 +889,10 @@ fn transpile_ts_source(
     Ok(js.as_bytes().to_vec())
 }
 
-fn run_inner(
-    module: &str,
-    source: &[u8],
-    args: &[String],
-    perm_dsl: Option<&str>,
-) -> Result<i32, String> {
-    let permissions = permissions_from_dsl(perm_dsl.unwrap_or(""))?;
-    let nonce = format!("{}-{}", std::process::id(), args.len());
-
-    // For TypeScript entries we need a real file-URL specifier so the runtime
-    // transpiler can classify the media type and name the module; the actual
-    // file we execute is always the transpiled JavaScript below.
-    let js = if ts_family(module) {
-        let fake_ts = std::env::temp_dir().join(format!("inka-{nonce}.ts"));
-        let spec = ModuleSpecifier::from_file_path(&fake_ts)
-            .map_err(|_| "failed to derive specifier for TypeScript module".to_string())?;
-        transpile_ts_source(module, source, &spec)?
-    } else {
-        source.to_vec()
-    };
-
-    let path = std::env::temp_dir().join(format!("inka-{nonce}.js"));
-    std::fs::write(&path, &js).map_err(|e| format!("failed to stage module: {e}"))?;
-
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
-
-    let result = rt.block_on(async {
-        let url = ModuleSpecifier::from_file_path(&path)
-            .map_err(|_| "failed to derive file url for staged module".to_string())?;
-        run_module_async(&url, args, permissions, Rc::new(FsModuleLoader)).await
-    });
-
-    let _ = std::fs::remove_file(&path);
-    result
-}
-
-/// Runs an entry module from a staged multi-file tree (`dir`/`entry`), using
-/// `InkaModuleLoader` so relative imports between the files resolve.
-fn run_dir_inner(
+/// Runs an entry module from a tree (`dir`/`entry`) through the store-aware
+/// `PkgLoader`. Used by both multi-file artifacts and the staged single-entry
+/// trees that `run_inner` builds.
+fn run_tree(
     dir: &str,
     entry: &str,
     args: &[String],
@@ -512,9 +919,57 @@ fn run_dir_inner(
     rt.block_on(async {
         let url = ModuleSpecifier::from_file_path(&file)
             .map_err(|_| format!("failed to derive file url for {entry}"))?;
-        let loader: Rc<dyn ModuleLoader> = Rc::new(InkaModuleLoader { root });
+        let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
+            artifact_root: root,
+            store_root: store_root_env(),
+        });
         run_module_async(&url, args, permissions, loader).await
     })
+}
+
+fn run_inner(
+    module: &str,
+    source: &[u8],
+    args: &[String],
+    perm_dsl: Option<&str>,
+) -> Result<i32, String> {
+    let nonce = format!("{}-{}", std::process::id(), args.len());
+
+    // Stage the single entry as its own one-file tree so it goes through the
+    // same store-aware loader path as multi-file artifacts (so npm:/jsr:
+    // imports work identically in both). TS entries are transpiled to JS first.
+    let dir = std::env::temp_dir().join(format!("inka-{nonce}"));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to stage module tree: {e}"))?;
+
+    let entry = "main.js";
+    let bytes = if ts_family(module) {
+        let fake_ts = dir.join("entry.ts");
+        let spec = ModuleSpecifier::from_file_path(&fake_ts)
+            .map_err(|_| "failed to derive specifier for TypeScript module".to_string())?;
+        transpile_ts_source(module, source, &spec)?
+    } else {
+        source.to_vec()
+    };
+    if let Err(e) = std::fs::write(dir.join(entry), &bytes) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err(format!("failed to stage module: {e}"));
+    }
+
+    let dir_str = dir.to_string_lossy().into_owned();
+    let result = run_tree(&dir_str, entry, args, perm_dsl);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Runs an entry module from a staged multi-file artifact tree (`dir`/`entry`),
+/// resolving relative imports and vendored packages via `PkgLoader`.
+fn run_dir_inner(
+    dir: &str,
+    entry: &str,
+    args: &[String],
+    perm_dsl: Option<&str>,
+) -> Result<i32, String> {
+    run_tree(dir, entry, args, perm_dsl)
 }
 
 // ---- version ---------------------------------------------------------------

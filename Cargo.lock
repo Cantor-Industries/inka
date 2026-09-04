@@ -4378,6 +4378,7 @@ dependencies = [
  "deno_runtime",
  "deno_semver",
  "node_resolver",
+ "serde_json",
  "sys_traits",
  "tokio",
 ]
