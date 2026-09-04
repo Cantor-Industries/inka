@@ -139,17 +139,17 @@ re-learning it the hard way.
 - Repo: `/home/kook/inka`. Branch `master` (reset to `8c467cc`); Phase-2 work on
   `phase2-experiments`; future attempts on **`phase2-rework`** (this file lives
   here).
-- Heavy cargo builds (runtime-deno / vendored libdeno) must use the big disk:
+- Heavy cargo builds (inka-runtime / vendored libdeno) must use the big disk:
   ```
   export CARGO_HOME=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/inka-cargo-home
   export CARGO_TARGET_DIR=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/inka-build/target
-  cargo build --release -p runtime-deno
+  cargo build --release -p inka-runtime
   ```
   Then install the tuple:
   ```
   cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.inka-runtime/libinka_runtime-0.265.0.so
   ```
-  (launcher/inka build with default env; fast.)
+  (inka-launcher/inka build with default env; fast.)
 - deno CLI for pre-warm: `~/.deno/bin/deno` (2.9.6); use `DENO_BIN` or PATH.
 - **Offline simulation that actually works:** a dead proxy makes every network
   attempt fail instantly and loudly:

@@ -4363,6 +4363,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "inka-launcher"
+version = "0.0.0"
+dependencies = [
+ "libloading 0.8.9",
+]
+
+[[package]]
+name = "inka-runtime"
+version = "0.0.0"
+dependencies = [
+ "deno_core",
+ "deno_error",
+ "deno_runtime",
+ "deno_semver",
+ "node_resolver",
+ "sys_traits",
+ "tokio",
+]
+
+[[package]]
+name = "inka-runtime-stub"
+version = "0.0.0"
+
+[[package]]
 name = "inotify"
 version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4609,13 +4633,6 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags",
  "libc",
-]
-
-[[package]]
-name = "launcher"
-version = "0.0.0"
-dependencies = [
- "libloading 0.8.9",
 ]
 
 [[package]]
@@ -6390,23 +6407,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "thiserror 2.0.20",
 ]
-
-[[package]]
-name = "runtime-deno"
-version = "0.0.0"
-dependencies = [
- "deno_core",
- "deno_error",
- "deno_runtime",
- "deno_semver",
- "node_resolver",
- "sys_traits",
- "tokio",
-]
-
-[[package]]
-name = "runtime-stub"
-version = "0.0.0"
 
 [[package]]
 name = "rusqlite"

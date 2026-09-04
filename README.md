@@ -12,9 +12,9 @@ So there are exactly three things in play:
 
 | Piece | What it is | Where it lives | Size |
 |---|---|---|---|
-| **Launcher** | A small native program compiled from Rust (`crates/launcher`) | **copied inside every artifact** | ~355 KB |
+| **Launcher** | A small native program compiled from Rust (`crates/inka-launcher`) | **copied inside every artifact** | ~355 KB |
 | **Manifest** | A few lines of text describing the artifact | appended inside the artifact | ~50 B |
-| **Runtime** | `libinka_runtime-<version>.so` — the real Deno engine (from `crates/runtime-deno`) | installed *once* per machine | ~96 MB |
+| **Runtime** | `libinka_runtime-<version>.so` — the real Deno engine (from `crates/inka-runtime`) | installed *once* per machine | ~96 MB |
 
 ### The artifact file is just a concatenation
 
@@ -85,9 +85,9 @@ The mental flip versus what you're used to: *the file you distribute is not the 
 
 | Crate | Role |
 |---|---|
-| `crates/launcher` | Thin native host: parses the appended trailer, resolves a tuple, `dlopen`s it, runs your module |
-| `crates/runtime-stub` | Tiny fake `.so` exporting the same C ABI — used to develop/test the launcher cheaply |
-| `crates/runtime-deno` | Real runtime: `deno_runtime` behind the frozen C ABI, with a V8 startup snapshot embedded at build time |
+| `crates/inka-launcher` | Thin native host: parses the appended trailer, resolves a tuple, `dlopen`s it, runs your module |
+| `crates/inka-runtime-stub` | Tiny fake `.so` exporting the same C ABI — used to develop/test the launcher cheaply |
+| `crates/inka-runtime` | Real runtime: `deno_runtime` behind the frozen C ABI, with a V8 startup snapshot embedded at build time |
 | `crates/inka` | Companion CLI: `inka build` (pack launcher + source + manifest into an artifact), `inka install <version>` (checksum-gated runtime distribution), `inka list` |
 
 ## The frozen C ABI (identical in stub and real runtime)
@@ -169,7 +169,7 @@ Two notes:
 ## Quickstart
 
 ```sh
-cargo build --release -p inka -p launcher
+cargo build --release -p inka -p inka-launcher
 
 # 1. write your program
 cat > app.js <<'EOF'
@@ -188,7 +188,7 @@ printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
 ./myapp kook
 ```
 
-`inka build` finds the launcher automatically: `$INKA_LAUNCHER`, else `inka-launcher` next to the `inka` binary (so build `-p launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `inka.manifest` in the current directory.
+`inka build` finds the launcher automatically: `$INKA_LAUNCHER`, else `inka-launcher` next to the `inka` binary (so build `-p inka-launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `inka.manifest` in the current directory.
 
 ### Local imports & multi-file apps
 
@@ -233,10 +233,10 @@ inka list
 
 ## Building the real runtime
 
-`crates/runtime-deno` requires the heavy Deno dependency tree (V8, wgpu, …) and a one-time ~10–15 min build plus a snapshot-generation step. Point it at a roomy disk if your system drive is full:
+`crates/inka-runtime` requires the heavy Deno dependency tree (V8, wgpu, …) and a one-time ~10–15 min build plus a snapshot-generation step. Point it at a roomy disk if your system drive is full:
 
 ```sh
-CARGO_TARGET_DIR=/big/disk/inka-target cargo build --release -p runtime-deno
+CARGO_TARGET_DIR=/big/disk/inka-target cargo build --release -p inka-runtime
 ```
 
 Install the result as a tuple:

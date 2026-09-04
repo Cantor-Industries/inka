@@ -8,11 +8,11 @@ RTDIR="${INKA_RUNTIME_HOME:-$HOME/.inka-runtime}"
 mkdir -p "$RTDIR"
 
 echo "== build tooling (launcher, stub 0.0.0, inka) =="
-cargo build --release -p launcher -p runtime-stub -p inka
+cargo build --release -p inka-launcher -p inka-runtime-stub -p inka
 
 echo "== install runtime tuples =="
 cp target/release/libinka_runtime_stub.so "$RTDIR/libinka_runtime-0.0.0.so"
-INKA_STUB_VERSION=0.1.0 cargo build --release -p runtime-stub
+INKA_STUB_VERSION=0.1.0 cargo build --release -p inka-runtime-stub
 cp target/release/libinka_runtime_stub.so "$RTDIR/libinka_runtime-0.1.0.so"
 
 echo "== pack demo artifacts (inka build) =="

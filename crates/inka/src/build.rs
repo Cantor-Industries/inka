@@ -424,7 +424,7 @@ fn find_launcher() -> PathBuf {
         }
     }
     err(&format!(
-        "cannot find the '{LAUNCHER_BIN}' launcher (build it with `cargo build --release -p launcher`, \
+        "cannot find the '{LAUNCHER_BIN}' launcher (build it with `cargo build --release -p inka-launcher`, \
          keep it next to this inka binary, or set INKA_LAUNCHER)"
     ))
 }
