@@ -2828,15 +2828,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dex"
-version = "0.0.0"
-dependencies = [
- "deno_ast",
- "sha2",
- "url",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4360,6 +4351,15 @@ dependencies = [
  "hashbrown 0.17.1",
  "serde",
  "serde_core",
+]
+
+[[package]]
+name = "inka"
+version = "0.0.0"
+dependencies = [
+ "deno_ast",
+ "sha2",
+ "url",
 ]
 
 [[package]]

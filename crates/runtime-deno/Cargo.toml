@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [lib]
-name = "dex_runtime_deno"
+name = "inka_runtime"
 crate-type = ["cdylib"]
 
 [dependencies]

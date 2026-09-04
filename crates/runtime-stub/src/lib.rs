@@ -4,23 +4,23 @@ use std::sync::OnceLock;
 fn version_cstr() -> &'static CStr {
     static V: OnceLock<CString> = OnceLock::new();
     V.get_or_init(|| {
-        let v = option_env!("DEX_STUB_VERSION").unwrap_or("0.0.0");
-        CString::new(format!("dex-stub-runtime {v}")).expect("nul in version")
+        let v = option_env!("INKA_STUB_VERSION").unwrap_or("0.0.0");
+        CString::new(format!("inka-stub-runtime {v}")).expect("nul in version")
     })
 }
 
 #[no_mangle]
-pub extern "C" fn dex_runtime_version() -> *const c_char {
+pub extern "C" fn inka_runtime_version() -> *const c_char {
     version_cstr().as_ptr()
 }
 
 #[no_mangle]
-pub extern "C" fn dex_runtime_create() -> *mut c_void {
+pub extern "C" fn inka_runtime_create() -> *mut c_void {
     Box::into_raw(Box::new(())) as *mut c_void
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_run_module(
+pub unsafe extern "C" fn inka_runtime_run_module(
     _rt: *mut c_void,
     specifier: *const c_char,
     source: *const c_char,
@@ -50,19 +50,19 @@ pub unsafe extern "C" fn dex_runtime_run_module(
         std::slice::from_raw_parts(source as *const u8, source_len)
     };
 
-    let echo = std::env::var_os("DEX_STUB_ECHO").is_some();
+    let echo = std::env::var_os("INKA_STUB_ECHO").is_some();
     if echo {
-        eprintln!("[dex-stub] run_module(specifier='{spec}', source={} bytes, argc={argc})", src.len());
+        eprintln!("[inka-stub] run_module(specifier='{spec}', source={} bytes, argc={argc})", src.len());
         if !argv.is_null() && argc > 0 {
             for i in 0..argc as isize {
                 let p = *argv.offset(i);
                 if !p.is_null() {
                     let s = CStr::from_ptr(p).to_string_lossy();
-                    eprintln!("[dex-stub] argv[{i}] = {s}");
+                    eprintln!("[inka-stub] argv[{i}] = {s}");
                 }
             }
         }
-        eprintln!("[dex-stub] ---- module source ----");
+        eprintln!("[inka-stub] ---- module source ----");
         use std::io::Write;
         let mut out = std::io::stdout().lock();
         let _ = out.write_all(src);
@@ -73,7 +73,7 @@ pub unsafe extern "C" fn dex_runtime_run_module(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_destroy(rt: *mut c_void) {
+pub unsafe extern "C" fn inka_runtime_destroy(rt: *mut c_void) {
     if !rt.is_null() {
         drop(Box::from_raw(rt as *mut ()));
     }

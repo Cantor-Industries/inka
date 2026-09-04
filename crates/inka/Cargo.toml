@@ -1,17 +1,17 @@
 [package]
-name = "dex"
+name = "inka"
 version = "0.0.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "dex"
+name = "inka"
 path = "src/main.rs"
 
 [features]
 default = ["transpile"]
 # Build-time TypeScript -> JavaScript compilation (deno_ast). Disable with
-# --no-default-features to keep `dex` small; `--transpile` then errors.
+# --no-default-features to keep `inka` small; `--transpile` then errors.
 transpile = ["dep:deno_ast"]
 
 [dependencies]

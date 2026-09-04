@@ -1,9 +1,9 @@
-// dex: companion tooling for dex artifacts.
+// inka: companion tooling for inka artifacts.
 //
-//   dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
-//   dex install <version> [--from <dir-or-url>] [--sha256 <hex>]
-//                         [--insecure] [--home <dir>]
-//   dex list [--home <dir>]
+//   inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
+//   inka install <version> [--from <dir-or-url>] [--sha256 <hex>]
+//                          [--insecure] [--home <dir>]
+//   inka list [--home <dir>]
 
 mod build;
 mod embed;
@@ -17,7 +17,7 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
-const FILENAME_PREFIX: &str = "libdeno_runtime-";
+const FILENAME_PREFIX: &str = "libinka_runtime-";
 const FILENAME_SUFFIX: &str = ".so";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -44,7 +44,7 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  dex install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  dex list [--home <dir>]"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]"
     );
     std::process::exit(2);
 }
@@ -53,10 +53,10 @@ fn runtime_dir(home_override: Option<&str>) -> PathBuf {
     if let Some(h) = home_override {
         return PathBuf::from(h);
     }
-    if let Ok(h) = env::var("DENO_RUNTIME_HOME") {
+    if let Ok(h) = env::var("INKA_RUNTIME_HOME") {
         return PathBuf::from(h);
     }
-    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".deno-runtime")
+    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".inka-runtime")
 }
 
 fn main() {
@@ -106,9 +106,9 @@ fn cmd_install(args: &[String]) {
     });
     let file_name = format!("{FILENAME_PREFIX}{ver}{FILENAME_SUFFIX}");
 
-    let source = from.or_else(|| env::var("DEX_RT_SOURCE").ok());
+    let source = from.or_else(|| env::var("INKA_RT_SOURCE").ok());
     let Some(source) = source else {
-        eprintln!("error: no runtime source given (use --from <dir-or-url> or DEX_RT_SOURCE)");
+        eprintln!("error: no runtime source given (use --from <dir-or-url> or INKA_RT_SOURCE)");
         std::process::exit(2);
     };
 
@@ -118,7 +118,7 @@ fn cmd_install(args: &[String]) {
         std::process::exit(1);
     });
 
-    println!("[dex] installing deno_runtime {ver} from {source}");
+    println!("[inka] installing inka_runtime {ver} from {source}");
 
     let (bytes, sidecar_sha) = match fetch_with_sidecar(&source, &file_name) {
         Ok(x) => x,
@@ -157,16 +157,16 @@ fn cmd_install(args: &[String]) {
             eprintln!("  actual   {actual}");
             std::process::exit(1);
         }
-        println!("[dex] checksum ok ({})", &actual[..12]);
+        println!("[inka] checksum ok ({})", &actual[..12]);
     } else {
-        println!("[dex] checksum skipped (--insecure)  sha256={actual}");
+        println!("[inka] checksum skipped (--insecure)  sha256={actual}");
     }
 
     let target = target_dir.join(&file_name);
     install_atomically(&target, &bytes);
 
     println!(
-        "[dex] installed {} ({})",
+        "[inka] installed {} ({})",
         target.display(),
         bytes.len()
     );
@@ -264,7 +264,7 @@ fn cmd_list(args: &[String]) {
         return;
     }
     for (v, p) in found {
-        println!("deno_runtime {v:<10} {}", p.display());
+        println!("inka_runtime {v:<10} {}", p.display());
     }
 }
 

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/launcher", "crates/runtime-stub", "crates/runtime-deno", "crates/dex"]
+members = ["crates/launcher", "crates/runtime-stub", "crates/runtime-deno", "crates/inka"]
 
 [profile.release]
 opt-level = "z"

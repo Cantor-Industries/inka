@@ -1,4 +1,4 @@
-// dex runtime-deno snapshot build script.
+// inka runtime snapshot build script.
 // Adapted from libdeno's build.rs (MIT), which is itself adapted from
 // deno's cli/snapshot/build.rs. Creates a V8 snapshot with all runtime
 // extension JS compiled in and emits residual lazy-load source tables.

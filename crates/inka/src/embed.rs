@@ -1,4 +1,4 @@
-// dex build embed engine: collects the file set that goes into a dex artifact.
+// inka build embed engine: collects the file set that goes into an inka artifact.
 //
 //   closure  (default): walk static imports from the entry and embed exactly
 //                       the referenced files.
@@ -18,7 +18,7 @@ pub enum Mode {
     Directory,
 }
 
-const IGNORE_DIRS: [&str; 5] = [".git", "target", "node_modules", ".dex", "dist"];
+const IGNORE_DIRS: [&str; 5] = [".git", "target", "node_modules", ".inka", "dist"];
 
 pub fn rel_from_cwd(cwd: &Path, p: &Path) -> Result<String, String> {
     let abs = if p.is_absolute() {
@@ -31,7 +31,7 @@ pub fn rel_from_cwd(cwd: &Path, p: &Path) -> Result<String, String> {
     let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let rel = canon.strip_prefix(&canon_cwd).map_err(|_| {
         format!(
-            "source '{}' is outside the current working directory; run dex build from the project root",
+            "source '{}' is outside the current working directory; run inka build from the project root",
             abs.display()
         )
     })?;

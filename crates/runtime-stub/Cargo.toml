@@ -5,5 +5,5 @@ edition = "2021"
 publish = false
 
 [lib]
-name = "dex_runtime"
+name = "inka_runtime_stub"
 crate-type = ["cdylib"]

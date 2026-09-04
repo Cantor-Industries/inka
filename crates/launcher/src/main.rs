@@ -4,12 +4,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FOOTER_LEN: usize = 24;
-const MAGIC_V1: &[u8] = b"DEXFOOT2"; // single embedded source
-const MAGIC_V2: &[u8] = b"DEXFOOT3"; // multi-file archive
+const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
+const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
-        if std::env::var_os("DEX_DEBUG").is_some() {
+        if std::env::var_os("INKA_DEBUG").is_some() {
             eprintln!($($arg)*);
         }
     };
@@ -69,7 +69,7 @@ fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
             let files = parse_archive(&bytes[pstart..mstart])?;
             Ok(Trailer::Archive { files, manifest })
         }
-        _ => Err("trailer magic not found (not a dex artifact?)".into()),
+        _ => Err("trailer magic not found (not an inka artifact?)".into()),
     }
 }
 
@@ -116,7 +116,7 @@ fn validate_rel_path(path: &str) -> Result<(), String> {
 /// Materialize the embedded archive under a fresh temp dir, mirroring paths.
 fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
     let nonce = format!("{}-{}", std::process::id(), files.len());
-    let root = std::env::temp_dir().join(format!("dex-{nonce}"));
+    let root = std::env::temp_dir().join(format!("inka-{nonce}"));
     let _ = fs::remove_dir_all(&root);
     for (path, data) in files {
         let target = root.join(path);
@@ -157,7 +157,7 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
         match key {
             "runtime" => {
                 let rest = val
-                    .strip_prefix("deno_runtime")
+                    .strip_prefix("inka_runtime")
                     .unwrap_or(val)
                     .trim_start();
                 if let Some(x) = rest.strip_prefix(">=") {
@@ -192,18 +192,18 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
 
 fn runtime_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    if let Some(h) = env::var_os("DENO_RUNTIME_HOME") {
+    if let Some(h) = env::var_os("INKA_RUNTIME_HOME") {
         out.push(PathBuf::from(h));
     }
     if let Some(h) = env::var_os("HOME") {
-        out.push(PathBuf::from(h).join(".deno-runtime"));
+        out.push(PathBuf::from(h).join(".inka-runtime"));
     }
-    out.push(PathBuf::from("/usr/local/lib/deno-runtime"));
+    out.push(PathBuf::from("/usr/local/lib/inka-runtime"));
     out
 }
 
 fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
-    if let Some(p) = env::var_os("DEX_RUNTIME") {
+    if let Some(p) = env::var_os("INKA_RUNTIME") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return Some((Version(0, 0, 0), p));
@@ -217,7 +217,7 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
         let Ok(rd) = fs::read_dir(dir) else { continue };
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
-            let Some(stripped) = name.strip_prefix("libdeno_runtime-") else {
+            let Some(stripped) = name.strip_prefix("libinka_runtime-") else {
                 continue;
             };
             let Some(vstr) = stripped.strip_suffix(".so") else {
@@ -249,11 +249,11 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
 
 fn required_string(m: &Manifest) -> String {
     if let Some(e) = m.exact {
-        format!("deno_runtime == {e}")
+        format!("inka_runtime == {e}")
     } else if let Some(x) = m.min {
-        format!("deno_runtime >= {x}")
+        format!("inka_runtime >= {x}")
     } else {
-        "deno_runtime any".into()
+        "inka_runtime any".into()
     }
 }
 
@@ -267,7 +267,7 @@ fn load_and_run(
     let library = match unsafe { libloading::Library::new(lib) } {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[dex] failed to load {}: {e}", lib.display());
+            eprintln!("[inka] failed to load {}: {e}", lib.display());
             std::process::exit(1);
         }
     };
@@ -299,17 +299,17 @@ fn load_and_run(
 
     unsafe {
         let ver: libloading::Symbol<FnVersion> = library
-            .get(b"dex_runtime_version")
-            .expect("missing dex_runtime_version");
+            .get(b"inka_runtime_version")
+            .expect("missing inka_runtime_version");
         let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
 
         let create: libloading::Symbol<FnCreate> =
-            library.get(b"dex_runtime_create").expect("missing dex_runtime_create");
+            library.get(b"inka_runtime_create").expect("missing inka_runtime_create");
         let destroy: libloading::Symbol<FnDestroy> = library
-            .get(b"dex_runtime_destroy")
-            .expect("missing dex_runtime_destroy");
+            .get(b"inka_runtime_destroy")
+            .expect("missing inka_runtime_destroy");
 
-        debug_log!("[dex] runtime {} reports: {reported}", lib.display());
+        debug_log!("[inka] runtime {} reports: {reported}", lib.display());
 
         let rt = create();
         let spec = CString::new(module).unwrap_or_else(|_| CString::new("main.js").unwrap());
@@ -325,7 +325,7 @@ fn load_and_run(
         let mut err_msg: *mut c_char = std::ptr::null_mut();
 
         let call = |rt, spec, exit_code, err_msg| {
-            if let Ok(perm_sym) = library.get::<FnRunPerm>(b"dex_runtime_run_module_perm") {
+            if let Ok(perm_sym) = library.get::<FnRunPerm>(b"inka_runtime_run_module_perm") {
                 perm_sym(
                     rt,
                     spec,
@@ -340,16 +340,16 @@ fn load_and_run(
             } else {
                 if !perms.is_empty() {
                     eprintln!(
-                        "[dex] artifact declares permissions but runtime {} lacks support \
-                         (dex_runtime_run_module_perm); refusing to run allow-all",
+                        "[inka] artifact declares permissions but runtime {} lacks support \
+                         (inka_runtime_run_module_perm); refusing to run allow-all",
                         lib.display()
                     );
                     destroy(rt);
                     std::process::exit(4);
                 }
                 let legacy: libloading::Symbol<FnRun> = library
-                    .get(b"dex_runtime_run_module")
-                    .expect("missing dex_runtime_run_module");
+                    .get(b"inka_runtime_run_module")
+                    .expect("missing inka_runtime_run_module");
                 legacy(
                     rt,
                     spec,
@@ -366,12 +366,12 @@ fn load_and_run(
         let rc = call(rt, spec.as_ptr(), &mut exit_code, &mut err_msg);
 
         if !err_msg.is_null() {
-            eprintln!("[dex] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+            eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
         }
         destroy(rt);
 
         if rc != 0 {
-            eprintln!("[dex] runtime call failed (rc={rc})");
+            eprintln!("[inka] runtime call failed (rc={rc})");
             std::process::exit(rc);
         }
         exit_code
@@ -388,7 +388,7 @@ fn load_and_run_dir(
     let library = match unsafe { libloading::Library::new(lib) } {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[dex] failed to load {}: {e}", lib.display());
+            eprintln!("[inka] failed to load {}: {e}", lib.display());
             std::process::exit(1);
         }
     };
@@ -416,18 +416,18 @@ fn load_and_run_dir(
         argv_ptrs.push(std::ptr::null());
 
         let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
-            library.get(b"dex_runtime_create").expect("missing dex_runtime_create");
+            library.get(b"inka_runtime_create").expect("missing inka_runtime_create");
         let destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = library
-            .get(b"dex_runtime_destroy")
-            .expect("missing dex_runtime_destroy");
+            .get(b"inka_runtime_destroy")
+            .expect("missing inka_runtime_destroy");
         let run_dir: libloading::Symbol<FnRunDir> = match library
-            .get(b"dex_runtime_run_module_dir")
+            .get(b"inka_runtime_run_module_dir")
         {
             Ok(s) => s,
             Err(_) => {
                 eprintln!(
-                    "[dex] this artifact is multi-file but runtime {} does not support it \
-                     (missing dex_runtime_run_module_dir); install a newer runtime",
+                    "[inka] this artifact is multi-file but runtime {} does not support it \
+                     (missing inka_runtime_run_module_dir); install a newer runtime",
                     lib.display()
                 );
                 std::process::exit(4);
@@ -449,12 +449,12 @@ fn load_and_run_dir(
         );
 
         if !err_msg.is_null() {
-            eprintln!("[dex] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+            eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
         }
         destroy(rt);
 
         if rc != 0 {
-            eprintln!("[dex] runtime call failed (rc={rc})");
+            eprintln!("[inka] runtime call failed (rc={rc})");
             std::process::exit(rc);
         }
         exit_code
@@ -470,7 +470,7 @@ fn main() {
     let trailer = match parse_trailer(&bytes) {
         Ok(x) => x,
         Err(e) => {
-            eprintln!("[dex] {e}");
+            eprintln!("[inka] {e}");
             std::process::exit(2);
         }
     };
@@ -482,30 +482,30 @@ fn main() {
     let dirs = runtime_dirs();
 
     let Some((v, path)) = resolve_runtime(&m, &dirs) else {
-        eprintln!("[dex] no compatible runtime found");
-        eprintln!("[dex] required: {}", required_string(&m));
+        eprintln!("[inka] no compatible runtime found");
+        eprintln!("[inka] required: {}", required_string(&m));
         if let Some(t) = m.tested {
-            eprintln!("[dex] capped at tested-against {t}");
+            eprintln!("[inka] capped at tested-against {t}");
         }
         for d in &dirs {
-            eprintln!("[dex]   searched: {}", d.display());
+            eprintln!("[inka]   searched: {}", d.display());
         }
         std::process::exit(3);
     };
 
     let code = match trailer {
         Trailer::Single { source, manifest: _ } => {
-            debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
-            debug_log!("[dex] module '{}' payload {} bytes", m.module, source.len());
+            debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
+            debug_log!("[inka] module '{}' payload {} bytes", m.module, source.len());
             load_and_run(&path, &m.module, source, &args, &m.perms)
         }
         Trailer::Archive { files, manifest: _ } => {
-            debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
-            debug_log!("[dex] module '{}' archive {} files", m.module, files.len());
+            debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
+            debug_log!("[inka] module '{}' archive {} files", m.module, files.len());
             let root = match extract_tree(&files) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("[dex] failed to extract artifact tree: {e}");
+                    eprintln!("[inka] failed to extract artifact tree: {e}");
                     std::process::exit(1);
                 }
             };

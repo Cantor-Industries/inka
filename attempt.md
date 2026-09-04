@@ -33,7 +33,7 @@ re-learning it the hard way.
 ## 2. Original goals & decisions locked with the user (Phase-2 brief)
 
 - **Vendored built-ins** = a curated set that ships with the runtime install
-  (`~/.deno-runtime/pkg/<deno-version>/`), imported by normal `npm:`/`jsr:`
+  (`~/.inka-runtime/pkg/<deno-version>/`), imported by normal `npm:`/`jsr:`
   names, zero-install, **not embedded inside the .so**.
 - **Everything else** uses standard npm/jsr, but **offline-first/pre-warm only**:
   the runtime never fetches; packages must be installed into the store ahead of
@@ -49,16 +49,16 @@ re-learning it the hard way.
 ## 3. State at the start of Phase 2 (what Phase 1 left us)
 
 - Thin artifact = Rust launcher (~355 KB) embedding source/manifest (trailer
-  v1 `DEXFOOT2`, v2 `DEXFOOT3` multi-file archive) + a shared runtime `.so`.
+  v1 `INKFOOT2`, v2 `INKFOOT3` multi-file archive) + a shared runtime `.so`.
 - Runtime was a hand-rolled cdylib over `deno_runtime 0.266.0` (`crates/
   runtime-deno`): MainWorker + snapshot build script + custom `ModuleLoader`
   + permissions (deny-by-default, additive `_perm`/`_dir` ABI symbols).
-- `dex build` (closure / `--embed-dir`), `dex install`, checksums, TS single +
-  multi-file, `DEX_DEBUG`.
+- `inka build` (closure / `--embed-dir`), `inka install`, checksums, TS single +
+  multi-file, `INKA_DEBUG`.
 
 ## 4. Chronology of the attempt (condensed)
 
-1. Planned a custom `dex-store` crate: adopt `deno_graph`/`deno_npm*` to build
+1. Planned a custom `inka-store` crate: adopt `deno_graph`/`deno_npm*` to build
    the loader. Version-alignment research against the deno repo tag for
    `deno_runtime 0.266.0` = **deno v2.9.6** (full pin list in §9).
 2. Read libdeno's `module_loader.rs`/`services.rs`/`permissions.rs` closely.
@@ -68,7 +68,7 @@ re-learning it the hard way.
    depend on it** (replacing our hand-rolled engine).
 3. Pivot executed on commit `ed67e41`:
    - `crates/runtime-deno` became a thin cdylib calling `libdeno::run`;
-     removed our custom engine, snapshot build, `dex-store`.
+     removed our custom engine, snapshot build, `inka-store`.
    - Vendored `vendor/libdeno` (deno 2.9.5 / deno_runtime 0.265.0, MIT),
      trimmed to build files.
    - Patched its `permissions.rs` to add `--deny-*` and deny-by-default
@@ -76,7 +76,7 @@ re-learning it the hard way.
    - Tuple relabeled `0.265.0`. Baseline re-verified (single/multi JS+TS,
      dir-mode dynamic import, permissions).
 4. 2a store work (`46251d1`):
-   - `dex pkg seed|install|list` (shells to the `deno` CLI; network only here);
+   - `inka pkg seed|install|list` (shells to the `deno` CLI; network only here);
    - launcher points `DENO_DIR` and a store `proj/` at the engine;
    - runtime: store `proj` as resolution cwd, auto-grants store reads +
      `--allow-import` for the registries;
@@ -136,20 +136,20 @@ re-learning it the hard way.
 
 ## 7. Environment / commands cheat-sheet
 
-- Repo: `/home/kook/dex`. Branch `master` (reset to `8c467cc`); Phase-2 work on
+- Repo: `/home/kook/inka`. Branch `master` (reset to `8c467cc`); Phase-2 work on
   `phase2-experiments`; future attempts on **`phase2-rework`** (this file lives
   here).
 - Heavy cargo builds (runtime-deno / vendored libdeno) must use the big disk:
   ```
-  export CARGO_HOME=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/dex-cargo-home
-  export CARGO_TARGET_DIR=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/dex-build/target
+  export CARGO_HOME=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/inka-cargo-home
+  export CARGO_TARGET_DIR=/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/inka-build/target
   cargo build --release -p runtime-deno
   ```
   Then install the tuple:
   ```
-  cp $CARGO_TARGET_DIR/release/libdex_runtime_deno.so ~/.deno-runtime/libdeno_runtime-0.265.0.so
+  cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.inka-runtime/libinka_runtime-0.265.0.so
   ```
-  (launcher/dex build with default env; fast.)
+  (launcher/inka build with default env; fast.)
 - deno CLI for pre-warm: `~/.deno/bin/deno` (2.9.6); use `DENO_BIN` or PATH.
 - **Offline simulation that actually works:** a dead proxy makes every network
   attempt fail instantly and loudly:
@@ -157,9 +157,9 @@ re-learning it the hard way.
   HTTPS_PROXY=http://127.0.0.1:1 HTTP_PROXY=http://127.0.0.1:1 ALL_PROXY=http://127.0.0.1:1 ./app
   ```
 - Store that was produced (for reference on the branch):
-  `~/.deno-runtime/pkg/0.265.0/{deno,proj}` where `deno/` is a DENO_DIR and
+  `~/.inka-runtime/pkg/0.265.0/{deno,proj}` where `deno/` is a DENO_DIR and
   `proj/` holds `node_modules/` (BYONM). Launcher sets `DENO_DIR` and
-  `DEX_PKG_PROJ`; runtime uses store `proj` as resolution cwd.
+  `INKA_PKG_PROJ`; runtime uses store `proj` as resolution cwd.
 - Re-measured startup is ~0.2 s dominated by engine boot, which swamps parse
   cost at this scale — relevant if 2b is ever reconsidered.
 
@@ -177,12 +177,12 @@ M0 probe (scratch dirs, dead-proxy):
 - Does libdeno honor the `deno.lock` in its resolution cwd (check vendored
   code + behavior), and what is the minimal store-project shape it accepts?
 
-M1 store generation: `dex pkg seed/install` writes
+M1 store generation: `inka pkg seed/install` writes
 `pkg/<ver>/proj/{deno.json, deno.lock, node_modules}` + `DENO_DIR` +
 `MANIFEST.sha256`, using the deno CLI (network at install time only).
 
 M2 runtime enforcement: resolution cwd = store project; failures that would
-require the registry become a clean `run "dex pkg install <spec>"` error; no
+require the registry become a clean `run "inka pkg install <spec>"` error; no
 network attempted. Keep deny-by-default + auto store grants.
 
 M3 verification: full dead-proxy matrix + regressions; commit per milestone.
@@ -192,7 +192,7 @@ Policy to confirm with the user in the fresh chat:
   jsr is a clear error, not a fetch; or invest in import-map injection later.
 - Optional hard egress safety net during store-mode runs (dead `HTTPS_PROXY`
   injection) as belt-and-braces.
-- `dex pkg` keeps the `deno` CLI + network at install time (yes) and freezes
+- `inka pkg` keeps the `deno` CLI + network at install time (yes) and freezes
   added versions into the store lock (recommended).
 
 ## 9. Appendix

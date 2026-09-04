@@ -1,13 +1,13 @@
-// dex build: pack one or more source files + a manifest onto the launcher.
+// inka build: pack one or more source files + a manifest onto the launcher.
 //
-//   dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
+//   inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
 //             [--transpile] [--embed-dir]
 //
 // Defaults:
 //   source    first positional argument (or -s/--source)
 //   output    source path with its final extension stripped (app.js -> app)
-//   manifest  --manifest, else <source-stem>.manifest then dex.manifest in cwd
-//   launcher  $DEX_LAUNCHER, else <dir of dex binary>/dex-launcher
+//   manifest  --manifest, else <source-stem>.manifest then inka.manifest in cwd
+//   launcher  $INKA_LAUNCHER, else <dir of inka binary>/inka-launcher
 //   embed     import closure by default; --embed-dir embeds the whole cwd tree
 
 use std::env;
@@ -16,25 +16,25 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const FOOTER_LEN: usize = 24;
-const MAGIC_V1: &[u8] = b"DEXFOOT2"; // single embedded source
-const MAGIC_V2: &[u8] = b"DEXFOOT3"; // multi-file archive
-const LAUNCHER_BIN: &str = "dex-launcher";
+const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
+const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
+const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>] [--transpile] [--embed-dir]\n\
+        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>] [--transpile] [--embed-dir]\n\
          \n\
          packs <source> (and the files it imports) onto the launcher into a single executable.\n\
          \n\
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-         \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then dex.manifest, in the current directory)\n\
+         \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then inka.manifest, in the current directory)\n\
          \x20     --transpile       compile TypeScript to JavaScript now (single-file builds; default: the runtime transpiles at load)\n\
          \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
          \x20 -h, --help            show this help\n\
          \n\
-         launcher is found at $DEX_LAUNCHER or next to the dex binary."
+         launcher is found at $INKA_LAUNCHER or next to the inka binary."
     );
     std::process::exit(0);
 }
@@ -119,7 +119,7 @@ pub fn cmd_build(args: &[String]) {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "?".into());
             err(&format!(
-                "no manifest found (looked for '{stem}.manifest' and 'dex.manifest' in {})",
+                "no manifest found (looked for '{stem}.manifest' and 'inka.manifest' in {})",
                 env::current_dir()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|_| "the current directory".into())
@@ -400,7 +400,7 @@ fn find_default_manifest(source: &Path) -> Option<PathBuf> {
     if stem_manifest.is_file() {
         return Some(stem_manifest);
     }
-    let generic = cwd.join("dex.manifest");
+    let generic = cwd.join("inka.manifest");
     if generic.is_file() {
         return Some(generic);
     }
@@ -408,12 +408,12 @@ fn find_default_manifest(source: &Path) -> Option<PathBuf> {
 }
 
 fn find_launcher() -> PathBuf {
-    if let Ok(p) = env::var("DEX_LAUNCHER") {
+    if let Ok(p) = env::var("INKA_LAUNCHER") {
         let p = PathBuf::from(p);
         if p.is_file() {
             return p;
         }
-        err(&format!("DEX_LAUNCHER points to a missing file: {}", p.display()));
+        err(&format!("INKA_LAUNCHER points to a missing file: {}", p.display()));
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -425,6 +425,6 @@ fn find_launcher() -> PathBuf {
     }
     err(&format!(
         "cannot find the '{LAUNCHER_BIN}' launcher (build it with `cargo build --release -p launcher`, \
-         keep it next to this dex binary, or set DEX_LAUNCHER)"
+         keep it next to this inka binary, or set INKA_LAUNCHER)"
     ))
 }

@@ -1,4 +1,4 @@
-// Build-time TypeScript -> JavaScript transpilation for `dex build --transpile`.
+// Build-time TypeScript -> JavaScript transpilation for `inka build --transpile`.
 // Uses the same compiler (deno_ast) that the runtime embeds, so output matches
 // what runtime transpile would produce.
 
@@ -53,5 +53,5 @@ pub fn ts_to_js(text: &str, source_name: &str) -> Result<String, String> {
 
 #[cfg(not(feature = "transpile"))]
 pub fn ts_to_js(_text: &str, _source_name: &str) -> Result<String, String> {
-    Err("this dex build was compiled without TypeScript support (recompile with default features or enable the 'transpile' feature)".into())
+    Err("this inka build was compiled without TypeScript support (recompile with default features or enable the 'transpile' feature)".into())
 }

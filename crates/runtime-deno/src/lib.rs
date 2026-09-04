@@ -1,4 +1,5 @@
-// dex runtime-deno: a cdylib embedding deno_runtime behind the frozen dex C ABI.
+// inka runtime: a cdylib embedding the Deno runtime (deno_runtime crate)
+// behind the frozen inka C ABI.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
@@ -41,11 +42,11 @@ mod runtime_snapshot {
 /// against file specifiers (like `FsModuleLoader`) but refuses to read outside
 /// `root` and transpiles `.ts`/`.mts`/`.cts` on load.
 #[derive(Clone)]
-struct DexModuleLoader {
+struct InkaModuleLoader {
     root: PathBuf,
 }
 
-impl ModuleLoader for DexModuleLoader {
+impl ModuleLoader for InkaModuleLoader {
     fn resolve(
         &self,
         specifier: &str,
@@ -190,7 +191,7 @@ impl NpmPackageFolderResolver for NoNpmFolder {
         _specifier: &str,
         _referrer: &UrlOrPathRef,
     ) -> Result<PathBuf, errors::PackageFolderResolveError> {
-        unreachable!("npm package resolution is not supported in this dex runtime build")
+        unreachable!("npm package resolution is not supported in this inka runtime build")
     }
 
     fn resolve_types_package_folder(
@@ -349,7 +350,7 @@ fn build_options_permissions(
     for (cat, _) in &spec.deny {
         if find(&spec.allow, cat).is_none() && !spec.all {
             eprintln!(
-                "[dex] warning: deny-{cat} has no effect without allow-{cat} or permissions=all \
+                "[inka] warning: deny-{cat} has no effect without allow-{cat} or permissions=all \
                  (deny-by-default is already in force)"
             );
         }
@@ -401,7 +402,7 @@ async fn run_module_async(
         return Err(format!("{e}"));
     }
     if let Err(e) = worker.dispatch_load_event() {
-        eprintln!("[dex] load event error: {e}");
+        eprintln!("[inka] load event error: {e}");
     }
     if let Err(e) = worker.run_event_loop(false).await {
         return Err(format!("{e}"));
@@ -456,7 +457,7 @@ fn run_inner(
     // transpiler can classify the media type and name the module; the actual
     // file we execute is always the transpiled JavaScript below.
     let js = if ts_family(module) {
-        let fake_ts = std::env::temp_dir().join(format!("dex-{nonce}.ts"));
+        let fake_ts = std::env::temp_dir().join(format!("inka-{nonce}.ts"));
         let spec = ModuleSpecifier::from_file_path(&fake_ts)
             .map_err(|_| "failed to derive specifier for TypeScript module".to_string())?;
         transpile_ts_source(module, source, &spec)?
@@ -464,7 +465,7 @@ fn run_inner(
         source.to_vec()
     };
 
-    let path = std::env::temp_dir().join(format!("dex-{nonce}.js"));
+    let path = std::env::temp_dir().join(format!("inka-{nonce}.js"));
     std::fs::write(&path, &js).map_err(|e| format!("failed to stage module: {e}"))?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -483,7 +484,7 @@ fn run_inner(
 }
 
 /// Runs an entry module from a staged multi-file tree (`dir`/`entry`), using
-/// `DexModuleLoader` so relative imports between the files resolve.
+/// `InkaModuleLoader` so relative imports between the files resolve.
 fn run_dir_inner(
     dir: &str,
     entry: &str,
@@ -511,7 +512,7 @@ fn run_dir_inner(
     rt.block_on(async {
         let url = ModuleSpecifier::from_file_path(&file)
             .map_err(|_| format!("failed to derive file url for {entry}"))?;
-        let loader: Rc<dyn ModuleLoader> = Rc::new(DexModuleLoader { root });
+        let loader: Rc<dyn ModuleLoader> = Rc::new(InkaModuleLoader { root });
         run_module_async(&url, args, permissions, loader).await
     })
 }
@@ -521,25 +522,25 @@ fn run_dir_inner(
 fn version_cstr() -> &'static CStr {
     static V: OnceLock<CString> = OnceLock::new();
     V.get_or_init(|| {
-        CString::new(format!("deno_runtime-{DENO_RUNTIME_VERSION}"))
+        CString::new(format!("inka_runtime-{DENO_RUNTIME_VERSION}"))
             .expect("nul in version string")
     })
 }
 
 #[no_mangle]
-pub extern "C" fn dex_runtime_version() -> *const c_char {
+pub extern "C" fn inka_runtime_version() -> *const c_char {
     version_cstr().as_ptr()
 }
 
 // ---- handle ----------------------------------------------------------------
 
 #[no_mangle]
-pub extern "C" fn dex_runtime_create() -> *mut c_void {
+pub extern "C" fn inka_runtime_create() -> *mut c_void {
     Box::into_raw(Box::new(())) as *mut c_void
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_destroy(rt: *mut c_void) {
+pub unsafe extern "C" fn inka_runtime_destroy(rt: *mut c_void) {
     if !rt.is_null() {
         drop(Box::from_raw(rt as *mut ()));
     }
@@ -615,9 +616,9 @@ unsafe fn run_from_raw(
 }
 
 /// Legacy run entry point (same signature as the original ABI). Behaves like
-/// `dex_runtime_run_module_perm` with empty permissions: deny-by-default.
+/// `inka_runtime_run_module_perm` with empty permissions: deny-by-default.
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_run_module(
+pub unsafe extern "C" fn inka_runtime_run_module(
     _rt: *mut c_void,
     specifier: *const c_char,
     source: *const c_char,
@@ -635,7 +636,7 @@ pub unsafe extern "C" fn dex_runtime_run_module(
 /// Permission-aware run entry point. `perms` is a newline-joined string of
 /// manifest permission lines (or null/empty for deny-by-default).
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_run_module_perm(
+pub unsafe extern "C" fn inka_runtime_run_module_perm(
     _rt: *mut c_void,
     specifier: *const c_char,
     source: *const c_char,
@@ -660,9 +661,9 @@ pub unsafe extern "C" fn dex_runtime_run_module_perm(
 
 /// Multi-file run entry point: executes `entry` (a path relative to the
 /// extracted `dir_path`) from a staged artifact tree, resolving its relative
-/// imports. `perms` behaves like `dex_runtime_run_module_perm`.
+/// imports. `perms` behaves like `inka_runtime_run_module_perm`.
 #[no_mangle]
-pub unsafe extern "C" fn dex_runtime_run_module_dir(
+pub unsafe extern "C" fn inka_runtime_run_module_dir(
     _rt: *mut c_void,
     dir_path: *const c_char,
     entry: *const c_char,
