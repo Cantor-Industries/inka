@@ -4358,6 +4358,8 @@ name = "inka"
 version = "0.0.0"
 dependencies = [
  "deno_ast",
+ "serde",
+ "serde_json",
  "sha2",
  "url",
 ]

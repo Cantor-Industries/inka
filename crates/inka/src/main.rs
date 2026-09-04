@@ -7,6 +7,7 @@
 
 mod build;
 mod embed;
+mod pkg;
 mod transpile;
 
 use std::env;
@@ -44,12 +45,12 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka pkg tar|seed|list (vendored-package store; see `inka pkg --help`)"
     );
     std::process::exit(2);
 }
 
-fn runtime_dir(home_override: Option<&str>) -> PathBuf {
+pub(crate) fn runtime_dir(home_override: Option<&str>) -> PathBuf {
     if let Some(h) = home_override {
         return PathBuf::from(h);
     }
@@ -68,6 +69,7 @@ fn main() {
         "build" => build::cmd_build(&args[1..]),
         "install" => cmd_install(&args[1..]),
         "list" => cmd_list(&args[1..]),
+        "pkg" => pkg::cmd_pkg(&args[1..]),
         _ => usage(),
     }
 }
@@ -194,7 +196,7 @@ use std::os::unix::fs::PermissionsExt;
 
 /// Fetch `<base>/<file>` plus `<base>/<file>.sha256` when available.
 /// `base` may be a local directory path or an http(s) URL.
-fn fetch_with_sidecar(base: &str, file: &str) -> Result<(Vec<u8>, Option<String>), String> {
+pub(crate) fn fetch_with_sidecar(base: &str, file: &str) -> Result<(Vec<u8>, Option<String>), String> {
     let is_url = base.starts_with("http://") || base.starts_with("https://");
     let main = fetch_one(base, file, is_url)?;
     let sidecar = fetch_optional(base, &format!("{file}.sha256"), is_url)?;
@@ -270,7 +272,7 @@ fn cmd_list(args: &[String]) {
 
 // ---- helpers ---------------------------------------------------------------
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
     for b in bytes {
         s.push_str(&format!("{b:02x}"));

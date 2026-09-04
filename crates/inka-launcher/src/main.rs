@@ -493,6 +493,19 @@ fn main() {
         std::process::exit(3);
     };
 
+    // Default the vendored-package store to a `store/` directory next to the
+    // resolved runtime (e.g. ~/.inka-runtime/store), unless the caller already
+    // pointed INKA_STORE somewhere.
+    if env::var_os("INKA_STORE").is_none() {
+        if let Some(dir) = path.parent() {
+            let candidate = dir.join("store");
+            if candidate.is_dir() {
+                env::set_var("INKA_STORE", &candidate);
+                debug_log!("[inka] package store {}", candidate.display());
+            }
+        }
+    }
+
     let code = match trailer {
         Trailer::Single { source, manifest: _ } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
