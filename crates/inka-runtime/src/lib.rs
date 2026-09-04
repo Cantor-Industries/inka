@@ -157,10 +157,17 @@ struct PkgLoader {
     artifact_root: PathBuf,
     /// Root of the global package store (`<store>/packages/<name>/<version>/…`).
     store_root: Option<PathBuf>,
+    /// True when the artifact's `.ts/.mts/.cts` payloads were transpiled at
+    /// build time (`--transpile`); such files are served as plain JS.
+    precompiled: bool,
 }
 
 fn store_root_env() -> Option<PathBuf> {
     std::env::var_os("INKA_STORE").map(PathBuf::from)
+}
+
+fn precompiled_flag() -> bool {
+    std::env::var_os("INKA_PRECOMPILED").is_some()
 }
 
 fn has_scheme(spec: &str) -> bool {
@@ -594,6 +601,7 @@ impl ModuleLoader for PkgLoader {
         let specifier = module_specifier.clone();
         let artifact_root = self.artifact_root.clone();
         let store_root = self.store_root.clone();
+        let precompiled = self.precompiled;
         let fut = async move {
             let mut path = module_url_to_path(&specifier)?;
             let in_artifact = path.starts_with(&artifact_root);
@@ -671,24 +679,33 @@ impl ModuleLoader for PkgLoader {
             }
 
             // Transpile TS-family files (decided by the resolved file's
-            // extension, which also covers extensionless specifiers).
+            // extension, which also covers extensionless specifiers). A
+            // precompiled archive already carries JS under .ts/.mts/.cts
+            // payload names, so those are served as-is (no runtime transpile).
             let file_ts = path
                 .extension()
                 .map(|e| e.to_string_lossy().to_ascii_lowercase())
                 .is_some_and(|e| e == "ts" || e == "mts" || e == "cts");
             let code: ModuleSourceCode = if module_type == ModuleType::JavaScript && file_ts {
-                // TypeScript source: transpile to JS before handing it to V8.
-                let text = String::from_utf8_lossy(&bytes).into_owned();
-                let file_url = ModuleSpecifier::from_file_path(&path)
-                    .unwrap_or_else(|_| specifier.clone());
-                let name = ModuleName::from(file_url.as_str().to_string());
-                let source = ModuleCodeString::from(text);
-                let (js, _map) = maybe_transpile_source(name, source).map_err(|e| {
-                    JsErrorBox::generic(format!(
-                        "failed to transpile TypeScript module {specifier}: {e}"
-                    ))
-                })?;
-                ModuleSourceCode::String(js)
+                if precompiled {
+                    if std::env::var_os("INKA_DEBUG").is_some() {
+                        eprintln!("[inka] precompiled module (no transpile): {specifier}");
+                    }
+                    ModuleSourceCode::Bytes(bytes.into_boxed_slice().into())
+                } else {
+                    // TypeScript source: transpile to JS before handing it to V8.
+                    let text = String::from_utf8_lossy(&bytes).into_owned();
+                    let file_url = ModuleSpecifier::from_file_path(&path)
+                        .unwrap_or_else(|_| specifier.clone());
+                    let name = ModuleName::from(file_url.as_str().to_string());
+                    let source = ModuleCodeString::from(text);
+                    let (js, _map) = maybe_transpile_source(name, source).map_err(|e| {
+                        JsErrorBox::generic(format!(
+                            "failed to transpile TypeScript module {specifier}: {e}"
+                        ))
+                    })?;
+                    ModuleSourceCode::String(js)
+                }
             } else {
                 ModuleSourceCode::Bytes(bytes.into_boxed_slice().into())
             };
@@ -1015,6 +1032,7 @@ fn run_tree(
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
             store_root: store_root_env(),
+            precompiled: precompiled_flag(),
         });
         run_module_async(&url, args, permissions, loader).await
     })

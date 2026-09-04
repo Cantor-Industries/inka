@@ -205,7 +205,7 @@ Embedding is automatic. When imports exist, `inka build` walks the import graph 
 - **Import closure (default):** static imports/exports, literal `import("./x.js")`, and `.json` are discovered from the entry (via `deno_ast`) and embedded, preserving the cwd-relative tree. A non-literal dynamic `import(...)` can't be seen statically → a warning suggests `--embed-dir`.
 - **`--embed-dir`:** embed the whole current-directory tree (skipping `.git`, `target`, `node_modules`, `.inka`, `dist`) for projects that use computed dynamic imports.
 
-TS is transpiled per file at run time by the tuple (so extensionless `./math` → `math.ts` etc. resolve like Deno). Bundled-module reads are part of the program and don't count against the `read` permission; `Deno.readTextFileSync` and other file/network ops remain permission-gated. `--transpile` currently applies to single-file builds only.
+TS is transpiled per file at run time by the tuple by default (so extensionless `./math` → `math.ts` etc. resolve like Deno). With `--transpile`, modules are compiled at build time instead (single- and multi-file). Bundled-module reads are part of the program and don't count against the `read` permission; `Deno.readTextFileSync` and other file/network ops remain permission-gated.
 
 ### TypeScript
 
@@ -220,7 +220,7 @@ Single-file TypeScript entries are supported as-is — no extra steps:
 Two ways to compile TS → JS:
 
 - **Runtime transpile (default):** the artifact keeps your `.ts` source; the shared runtime `.so` transpiles it at load using the tuple's own TS compiler (so TS semantics track the runtime, not your machine).
-- **Build-time transpile:** `inka build app.ts --transpile` compiles to JS while packing, so the artifact ships pure JavaScript.
+- **Build-time transpile:** `inka build app.ts --transpile` compiles to JS while packing, so the artifact ships pure JavaScript. Multi-file apps work too (`demo/main.ts` importing `./lib.ts` etc.): each `.ts/.mts/.cts` module is transpiled to JS at build time but keeps its original path in the archive (Deno-style, no import rewriting); the archive trailer (`INKFOOT4`) tells the runtime to serve those modules as plain JS without re-transpiling. Relative and extensionless imports keep resolving as usual, and literal/computed dynamic imports still work.
 
 `inka build` normalizes the manifest for you: if it has no `module=` line, one matching the source is appended (`.ts` preserved for runtime transpile, `.js` after `--transpile`); an explicit `module=` that contradicts the packed code's language prints a warning.
 
@@ -306,7 +306,7 @@ Without the embedded snapshot, inka cold-starts at ~0.6 s; the snapshot brings i
 ## Current limits / roadmap
 
 - `node:` built-ins resolve with or without the prefix (`vm` ≡ `node:vm`); bare `npm:`/`jsr:` package names resolve **only** against the local package store (`inka pkg seed`), and `http(s):` module imports are rejected — the engine is offline by construction.
-- `.tsx`/`.jsx` are not supported yet; `--transpile` applies to single-file builds only (multi-file is transpiled by the runtime).
+- `.tsx`/`.jsx` are not supported yet; `--transpile` works for single- and multi-file `.ts/.mts/.cts` (JSX entries error).
 - Successful runs are silent; set `INKA_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[inka]` prefix.
 - `inka install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.

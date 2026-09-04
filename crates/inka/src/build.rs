@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 const FOOTER_LEN: usize = 24;
 const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
 const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
+const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS already transpiled
 const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
@@ -30,7 +31,7 @@ fn help() -> ! {
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
          \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then inka.manifest, in the current directory)\n\
-         \x20     --transpile       compile TypeScript to JavaScript now (single-file builds; default: the runtime transpiles at load)\n\
+         \x20     --transpile       compile TypeScript to JavaScript now (single- and multi-file; default: the runtime transpiles at load)\n\
          \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
          \x20 -h, --help            show this help\n\
          \n\
@@ -151,12 +152,6 @@ pub fn cmd_build(args: &[String]) {
     .unwrap_or_else(|e| err(&e));
 
     let is_multi = files.len() > 1;
-    if transpile && is_multi {
-        err(
-            "--transpile is not yet supported for multi-file builds; multi-file artifacts are \
-             transpiled by the runtime at load time",
-        );
-    }
 
     let launcher = find_launcher();
     let launcher_bytes = fs::read(&launcher)
@@ -165,13 +160,42 @@ pub fn cmd_build(args: &[String]) {
     let mut out = Vec::new();
 
     if is_multi {
+        if transpile && jsx_family(&entry_rel) {
+            err(&format!(
+                "--transpile does not support '{entry_rel}' yet (only .ts/.mts/.cts)"
+            ));
+        }
+
+        // Build-time transpile: replace each .ts/.mts/.cts module's bytes with
+        // its transpiled JS while keeping the original archive path (Deno-style).
+        // The archive then carries INKFOOT4 so the runtime serves those modules
+        // as plain JavaScript without re-transpiling.
+        let (files, n_transpiled, precompiled) = if transpile {
+            let mut n = 0usize;
+            let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
+            for (rel, bytes) in &files {
+                if ts_family(rel) {
+                    let text = String::from_utf8_lossy(bytes).into_owned();
+                    let js = crate::transpile::ts_to_js(&text, rel).unwrap_or_else(|e| err(&e));
+                    n += 1;
+                    out.push((rel.clone(), js.into_bytes()));
+                } else {
+                    out.push((rel.clone(), bytes.clone()));
+                }
+            }
+            (out, n, n > 0)
+        } else {
+            (files, 0, false)
+        };
+        let magic = if precompiled { MAGIC_V3 } else { MAGIC_V2 };
+
         let archive = encode_archive(&files);
         let manifest_payload = set_module_line(&manifest_bytes, &entry_rel);
         out.reserve(launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN);
         out.extend_from_slice(&launcher_bytes);
         out.extend_from_slice(&archive);
         out.extend_from_slice(&manifest_payload);
-        out.extend_from_slice(MAGIC_V2);
+        out.extend_from_slice(magic);
         out.extend_from_slice(&(archive.len() as u64).to_le_bytes());
         out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
         fs::write(&output, &out)
@@ -189,7 +213,14 @@ pub fn cmd_build(args: &[String]) {
             manifest.display(),
             manifest_payload.len(),
         );
-        println!("  entry: {entry_rel}  ({} files embedded)", files.len());
+        if precompiled {
+            println!(
+                "  entry: {entry_rel}  ({} files embedded, {n_transpiled} transpiled to JS)",
+                files.len()
+            );
+        } else {
+            println!("  entry: {entry_rel}  ({} files embedded)", files.len());
+        }
         return;
     }
 

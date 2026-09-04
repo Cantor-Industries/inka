@@ -276,3 +276,11 @@ importable bare (`vm` ≡ `node:vm`, `process` ≡ `node:process`, incl. `name/s
 aliases like `fs/promises`); Node semantics apply — core wins over node_modules.
 `npm:`/`jsr:` + `@version` remain the way to pin an exact version. The `inka build`
 warning for non-local imports was removed (they're real at run time now).
+
+### --transpile for multi-file (Deno-style precompile)
+`inka build --transpile` now works for multi-file apps: each `.ts/.mts/.cts`
+module is transpiled to JS at build time but keeps its original archive path (no
+import rewriting). Such artifacts carry a new trailer magic `INKFOOT4`; the
+launcher sets `INKA_PRECOMPILED=1` and the runtime serves those modules as plain
+JS (skips `maybe_transpile_source`). Runtime-transpile artifacts (default) still
+use `INKFOOT3`. JSX/TSX entries with `--transpile` error (unsupported).

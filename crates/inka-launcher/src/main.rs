@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 const FOOTER_LEN: usize = 24;
 const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
 const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
+const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS pre-transpiled to JS
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -43,6 +44,9 @@ enum Trailer<'a> {
     Archive {
         files: Vec<(String, Vec<u8>)>,
         manifest: &'a [u8],
+        /// True when the archive's `.ts/.mts/.cts` payloads are already
+        /// transpiled to JavaScript (built with `--transpile`).
+        precompiled: bool,
     },
 }
 
@@ -65,9 +69,13 @@ fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
             source: &bytes[pstart..mstart],
             manifest,
         }),
-        MAGIC_V2 => {
+        MAGIC_V2 | MAGIC_V3 => {
             let files = parse_archive(&bytes[pstart..mstart])?;
-            Ok(Trailer::Archive { files, manifest })
+            Ok(Trailer::Archive {
+                files,
+                manifest,
+                precompiled: magic == MAGIC_V3,
+            })
         }
         _ => Err("trailer magic not found (not an inka artifact?)".into()),
     }
@@ -512,9 +520,19 @@ fn main() {
             debug_log!("[inka] module '{}' payload {} bytes", m.module, source.len());
             load_and_run(&path, &m.module, source, &args, &m.perms)
         }
-        Trailer::Archive { files, manifest: _ } => {
+        Trailer::Archive {
+            files,
+            precompiled,
+            ..
+        } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
             debug_log!("[inka] module '{}' archive {} files", m.module, files.len());
+            // A precompiled archive already carries JS for its .ts/.mts/.cts
+            // payloads; tell the runtime so it serves them without transpiling.
+            if precompiled {
+                env::set_var("INKA_PRECOMPILED", "1");
+                debug_log!("[inka] precompiled archive (no runtime TS transpile)");
+            }
             let root = match extract_tree(&files) {
                 Ok(r) => r,
                 Err(e) => {
