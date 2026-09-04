@@ -2,9 +2,71 @@
 
 Tiny single-file executables for JavaScript/TypeScript that run on a **shared, tuple-versioned Deno runtime** instead of bundling one into every binary.
 
-A `dex` executable is a ~350 KB native launcher that embeds your source + a manifest. At run time it `dlopen`s the best matching `libdeno_runtime-<version>.so` installed on the system, hands it your code, and forwards argv/stdin/stdout/exit codes.
+## How it works: the launcher, the manifest, and the embed model
+
+Normal "compiled" JS binaries (`deno compile`, `bun build --compile`) work by **fusing the JS engine into the file**. Result: a ~100 MB "Hello World". The engine (V8 + snapshot + ICU) is huge, and every artifact carries its own copy.
+
+The dex idea: **don't put the engine in the file.** Put a *tiny host* in the file, and have the engine be one shared library installed once per machine that any dex file can load.
+
+So there are exactly three things in play:
+
+| Piece | What it is | Where it lives | Size |
+|---|---|---|---|
+| **Launcher** | A small native program compiled from Rust (`crates/launcher`) | **copied inside every artifact** | ~355 KB |
+| **Manifest** | A few lines of text describing the artifact | appended inside the artifact | ~50 B |
+| **Runtime** | `libdeno_runtime-<version>.so` — the real Deno engine (from `crates/runtime-deno`) | installed *once* per machine | ~96 MB |
+
+### The artifact file is just a concatenation
+
+`dex build app.js` glues bytes together and writes one file. Inside the artifact the bytes are, in order:
+
+```
+[ launcher executable bytes ]   ← the compiled Rust launcher
+[ your source (app.js bytes) ]  ← the program
+[ your manifest bytes        ]  ← what it needs and may do
+[ footer: "DEXFOOT2" + length of source + length of manifest ]
+```
+
+The footer is the last 24 bytes: an 8-byte magic string (`DEXFOOT2`) plus two 8-byte lengths. That is the only "clever" part — it is how the launcher finds its data when it runs.
+
+Why does this work? Because an executable doesn't have to be *only* machine code. The OS runs the code at the start of the file and ignores trailing garbage. Appending text to a compiled binary is safe. That is the entire "embed" model: **the source and manifest are just extra bytes stuck onto the end of the launcher.**
+
+### What the launcher does when you run `./app`
+
+It has no idea what your program does — it is a generic host. At startup it:
+
+1. **Finds itself** via `/proc/self/exe` (the path of the running file) and reads its own bytes.
+2. **Locates the trailer** — reads the last 24 bytes, checks the magic, gets the two lengths, and slices out the source and the manifest from the middle.
+3. **Reads the manifest** to learn what runtime version it needs (`runtime=…`), what to call the entry file (`module=…`), whether to pin roll-forward (`tested-against=…`), and what permissions to grant (`permissions=…`, `allow-*`, `deny-*`).
+4. **Searches for a runtime** on the machine (`$DENO_RUNTIME_HOME` → `~/.deno-runtime` → `/usr/local/lib/deno-runtime`), scans for `libdeno_runtime-*.so` files, parses versions out of the filenames, and picks the newest one that satisfies the manifest (≥ floor, ≤ `tested-against`).
+5. **`dlopen`s that `.so`** (like loading a plugin) and calls a fixed C function, handing it the embedded source, the command-line args, and the permissions string.
+6. **Stays alive as the host process.** The runtime starts V8 (fast — it has a pre-baked snapshot), creates a Deno worker, stages the source, transpiles it if it is `.ts`, executes it, and runs the event loop until the program finishes.
+7. **Returns the exit code.** stdin/stdout/stderr are inherited, so `console.log` and friends just work.
+
+The launcher never executes your code. It is a courier: it carries the source to the engine and reports back the exit code. Your code is interpreted/JIT-compiled **at run time by the runtime**, not at build time (unless you pass `--transpile`).
+
+### Why the manifest exists
+
+The runtime is versioned and shared, but different artifacts may need different things from it. The manifest is the artifact's **declaration of intent**, read by the launcher at run time:
+
+```
+runtime=deno_runtime>=0.266.0     # I need at least this engine
+tested-against=0.266.0            # optional: never auto-run on something newer
+module=app.js                     # display name for my entry source
+allow-read=/etc,./data            # grant these file reads (deny everything else)
+```
+
+Without a manifest the launcher wouldn't know which of the possibly-several installed `.so` files to load, or under what permissions.
+
+### What this buys
+
+- **Small files.** The artifact is ~355 KB because it only carries *transport* (launcher) + *cargo* (source + manifest). The ~96 MB engine is a per-machine shared library, loaded by whatever file you run.
+- **Runtime upgrades don't touch your files.** Install `libdeno_runtime-0.267.0.so` on the machine and every artifact whose manifest says `>= 0.266.0` automatically starts using it — same source, same launcher, new engine underneath. Your code was never compiled against an engine, so nothing needs rebuilding.
+- **Policy travels with the file** (permissions are embedded at build time) while **the engine stays shared**.
 
 **The core guarantee:** your app artifact is *never rebuilt or re-shipped* when the runtime updates. You install a newer runtime once per machine; every dex executable on that machine keeps running against it.
+
+The mental flip versus what you're used to: *the file you distribute is not the program.* The program is your source text; the file is a self-describing envelope that picks an engine off the shelf at run time and hands it your code.
 
 ```
 ┌────────────── your artifact (single file, ~0.35 MB) ──────────────┐
