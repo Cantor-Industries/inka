@@ -172,6 +172,26 @@ fn cmd_install(args: &[String]) {
         target.display(),
         bytes.len()
     );
+
+    // Ship the runtime release's vendored store payload (if any) into the store
+    // next to the runtime home, so artifacts can load curated packages at once.
+    let store_target = match env::var_os("INKA_STORE") {
+        Some(s) => PathBuf::from(s),
+        None => runtime_dir(home.as_deref()).join("store"),
+    };
+    match pkg::seed_release_store(&source, &store_target) {
+        Ok(Some(n)) if n > 0 => {
+            println!(
+                "[inka] installed {n} store package(s) into {}",
+                store_target.display()
+            );
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("error: store payload: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 fn install_atomically(target: &Path, bytes: &[u8]) {

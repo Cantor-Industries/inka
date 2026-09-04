@@ -170,6 +170,7 @@ fn cmd_tar(args: &[String]) {
         out = std::env::current_dir().unwrap_or_default().join(out);
     }
     fs::create_dir_all(&out).unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", out.display())));
+    let mut manifest = load_manifest(&out);
 
     for spec in &specs {
         let parsed = parse_cli_spec(spec).unwrap_or_else(|e| fail(&e));
@@ -228,15 +229,32 @@ fn cmd_tar(args: &[String]) {
         });
 
         let sha = sha256_of_file(&tar_file);
+        let short = sha[..12].to_string();
         fs::write(out.join(format!("{}.sha256", file_base(&parsed))), format!("{sha}\n"))
             .unwrap_or_else(|e| fail(&format!("cannot write checksum sidecar: {e}")));
 
+        upsert_entry(
+            &mut manifest,
+            SeedEntry {
+                name: parsed.name.clone(),
+                version: parsed.version.clone(),
+                file: file_base(&parsed),
+                sha256: sha,
+            },
+        );
+
         let _ = fs::remove_dir_all(&work);
         println!(
-            "[inka] pkg tar: wrote {} ({} bytes, sha256 {})",
+            "[inka] pkg tar: wrote {} ({} bytes, sha256 {short})",
             tar_file.display(),
             fs::metadata(&tar_file).map(|m| m.len()).unwrap_or(0),
-            &sha[..12]
+        );
+    }
+    save_manifest(&out, &manifest).unwrap_or_else(|e| fail(&e));
+    if !specs.is_empty() {
+        println!(
+            "[inka] pkg tar: wrote store payload manifest {}",
+            seed_manifest_path(&out).display()
         );
     }
 }
@@ -252,7 +270,7 @@ fn seed_manifest_path(store: &Path) -> PathBuf {
     store.join(SEED_MANIFEST)
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct SeedEntry {
     name: String,
     version: String,
@@ -270,6 +288,27 @@ fn load_manifest(store: &Path) -> SeedManifest {
     match fs::read_to_string(&p) {
         Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
         Err(_) => SeedManifest::default(),
+    }
+}
+
+fn save_manifest(store: &Path, manifest: &SeedManifest) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(manifest).map_err(|e| format!("manifest encode: {e}"))?;
+    let mp = seed_manifest_path(store);
+    let tmp = store.join(".seed-manifest.json.tmp");
+    fs::write(&tmp, &json).map_err(|e| format!("cannot write {}: {e}", mp.display()))?;
+    fs::rename(&tmp, &mp).map_err(|e| format!("cannot finalize {}: {e}", mp.display()))
+}
+
+fn upsert_entry(manifest: &mut SeedManifest, entry: SeedEntry) {
+    if let Some(existing) = manifest
+        .seeded
+        .iter_mut()
+        .find(|e| e.name == entry.name && e.version == entry.version)
+    {
+        existing.file = entry.file;
+        existing.sha256 = entry.sha256;
+    } else {
+        manifest.seeded.push(entry);
     }
 }
 
@@ -345,25 +384,62 @@ fn cmd_seed(args: &[String]) {
         let _ = fs::remove_file(&tmp);
 
         let sha = expected.clone().unwrap_or(actual.clone());
-        if let Some(existing) = manifest.seeded.iter_mut().find(|e| e.name == spec.name && e.version == spec.version) {
-            existing.file = file.clone();
-            existing.sha256 = sha;
-        } else {
-            manifest.seeded.push(SeedEntry {
+        upsert_entry(
+            &mut manifest,
+            SeedEntry {
                 name: spec.name.clone(),
                 version: spec.version.clone(),
                 file: file.clone(),
                 sha256: sha,
-            });
-        }
+            },
+        );
         println!("[inka] pkg seed: installed {}@{}", spec.name, spec.version);
     }
 
-    let json = serde_json::to_string_pretty(&manifest).unwrap_or_else(|e| fail(&format!("manifest encode: {e}")));
-    let mp = seed_manifest_path(&store);
-    let tmp = mp.with_extension("json.tmp");
-    fs::write(&tmp, &json).unwrap_or_else(|e| fail(&format!("cannot write {}: {e}", mp.display())));
-    fs::rename(&tmp, &mp).unwrap_or_else(|e| fail(&format!("cannot finalize {}: {e}", mp.display())));
+    save_manifest(&store, &manifest).unwrap_or_else(|e| fail(&e));
+}
+
+/// Seeds the store from a runtime release's vendored payload found under
+/// `<source>/store/` (described by a `seed-manifest.json`). Returns `Ok(None)`
+/// when the release has no store payload at all.
+pub(crate) fn seed_release_store(source: &str, store: &Path) -> Result<Option<usize>, String> {
+    let (mbytes, _) = match fetch_with_sidecar(source, "store/seed-manifest.json") {
+        Ok(x) => x,
+        Err(_) => return Ok(None), // older release / no vendored payload
+    };
+    let payload: SeedManifest =
+        serde_json::from_slice(&mbytes).map_err(|e| format!("invalid store payload manifest: {e}"))?;
+    if payload.seeded.is_empty() {
+        return Ok(Some(0));
+    }
+    fs::create_dir_all(store).map_err(|e| format!("cannot create store {}: {e}", store.display()))?;
+    let mut local = load_manifest(store);
+    let mut n = 0usize;
+    for e in &payload.seeded {
+        let rel = format!("store/{}", e.file);
+        let (bytes, _) = fetch_with_sidecar(source, &rel)
+            .map_err(|err| format!("failed to fetch store package {rel}: {err}"))?;
+        let actual = hex(&Sha256::digest(&bytes));
+        if actual != e.sha256 {
+            return Err(format!(
+                "checksum mismatch for store package {}: expected {}, actual {}",
+                e.file, e.sha256, actual
+            ));
+        }
+        let tmp = store.join(format!(".{}.tmp{}", e.file, std::process::id()));
+        fs::write(&tmp, &bytes).map_err(|err| format!("cannot write {}: {err}", tmp.display()))?;
+        let mut cmd = Command::new("tar");
+        cmd.args(["-xzf"]).arg(&tmp).arg("-C").arg(store);
+        if let Err(err) = run_ok(&mut cmd, "tar extract") {
+            let _ = fs::remove_file(&tmp);
+            return Err(err);
+        }
+        let _ = fs::remove_file(&tmp);
+        upsert_entry(&mut local, e.clone());
+        n += 1;
+    }
+    save_manifest(store, &local)?;
+    Ok(Some(n))
 }
 
 // ---- list -------------------------------------------------------------------
