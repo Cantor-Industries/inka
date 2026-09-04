@@ -93,28 +93,24 @@ fn build_services(permissions: PermissionsContainer) -> DrtServices {
 
 // ---- permissions ------------------------------------------------------------
 // Manifest permission lines are forwarded by the launcher as a newline-joined
-// string: `permissions=none`, `allow-<cat>=<list>`, `deny-<cat>=<list>`.
+// string: `permissions=all|none`, `allow-<cat>=<list>`, `deny-<cat>=<list>`.
 //
-// Policy:
-//   - empty DSL            -> allow everything (today's default)
-//   - permissions=none     -> deny everything
-//   - any allow-* key      -> allow-list mode: unmentioned categories denied
-//   - only deny-* keys     -> allow everything except the denies
+// Policy (deny-by-default):
+//   - empty DSL / permissions=none -> deny everything
+//   - permissions=all             -> allow everything
+//   - allow-<cat>                 -> grant that category; unmentioned denied
+//   - deny-<cat>                  -> trims an allowed category (allow-* or
+//                                    permissions=all); no-op + warning otherwise
 // Lists are comma/whitespace separated; `*` means "all" in that category.
 
 const PERM_CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
 
 #[derive(Default)]
 struct PermSpec {
-    none: bool,
+    /// `permissions=all` — everything allowed (then trimmed by any deny-*).
+    all: bool,
     allow: Vec<(String, Vec<String>)>,
     deny: Vec<(String, Vec<String>)>,
-}
-
-impl PermSpec {
-    fn has_any(&self) -> bool {
-        self.none || !self.allow.is_empty() || !self.deny.is_empty()
-    }
 }
 
 fn parse_perm_dsl(dsl: &str) -> Result<PermSpec, String> {
@@ -131,9 +127,13 @@ fn parse_perm_dsl(dsl: &str) -> Result<PermSpec, String> {
         let value = value.trim();
         if key == "permissions" {
             match value {
-                "none" => spec.none = true,
-                "all" | "" => {}
-                other => return Err(format!("unknown permissions mode '{other}' (expected 'none')")),
+                "all" => spec.all = true,
+                "none" | "" => {}
+                other => {
+                    return Err(format!(
+                        "unknown permissions mode '{other}' (expected 'all' or 'none')"
+                    ))
+                }
             }
             continue;
         }
@@ -182,7 +182,7 @@ fn permissions_from_dsl(dsl: &str) -> Result<PermissionsContainer, String> {
     let parser: Arc<dyn PermissionDescriptorParser> =
         Arc::new(RuntimePermissionDescriptorParser::new(RealSys));
     let spec = parse_perm_dsl(dsl)?;
-    let perms = if !spec.has_any() {
+    let perms = if spec.all && spec.deny.is_empty() {
         Permissions::allow_all()
     } else {
         build_options_permissions(parser.as_ref(), &spec)?
@@ -194,25 +194,29 @@ fn build_options_permissions(
     parser: &dyn PermissionDescriptorParser,
     spec: &PermSpec,
 ) -> Result<Permissions, String> {
-    let any_allow = !spec.allow.is_empty();
-
-    // For every category, decide the allow/deny options:
-    //   allow-list mode: absent allow -> denied (None)
-    //   deny-only mode : absent allow -> global allow (empty vec)
-    //   permissions=none            -> denied (None)
+    // Deny-by-default: a category is allowed only if listed in allow-*, or
+    // globally when `permissions=all` (which is then trimmed by deny-*).
     let cat_allow = |cat: &str| -> Option<Vec<String>> {
-        if spec.none {
-            return None;
-        }
         match find(&spec.allow, cat) {
             Some(items) => Some(expand(items)),
-            None if any_allow => None,
-            None => Some(Vec::new()), // deny-only (or nothing) stays allow-all
+            None if spec.all => Some(Vec::new()), // global allow under permissions=all
+            None => None,                         // deny-by-default
         }
     };
     let cat_deny = |cat: &str| -> Option<Vec<String>> {
         find(&spec.deny, cat).map(|items| expand(items))
     };
+
+    // A deny with no allow in that category cannot trim anything under
+    // deny-by-default; surface it so the manifest author isn't misled.
+    for (cat, _) in &spec.deny {
+        if find(&spec.allow, cat).is_none() && !spec.all {
+            eprintln!(
+                "[dex] warning: deny-{cat} has no effect without allow-{cat} or permissions=all \
+                 (deny-by-default is already in force)"
+            );
+        }
+    }
 
     let opts = PermissionsOptions {
         prompt: false,
@@ -438,7 +442,8 @@ unsafe fn run_from_raw(
     }
 }
 
-/// Legacy run entry point: no permissions, always allow-all.
+/// Legacy run entry point (same signature as the original ABI). Behaves like
+/// `dex_runtime_run_module_perm` with empty permissions: deny-by-default.
 #[no_mangle]
 pub unsafe extern "C" fn dex_runtime_run_module(
     _rt: *mut c_void,
