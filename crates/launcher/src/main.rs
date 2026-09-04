@@ -56,6 +56,9 @@ struct Manifest {
     exact: Option<Version>,
     tested: Option<Version>,
     module: String,
+    /// Canonical permission lines (`permissions=…`, `allow-*=…`, `deny-*=…`)
+    /// forwarded verbatim to the runtime.
+    perms: String,
 }
 
 fn parse_manifest(bytes: &[u8]) -> Manifest {
@@ -89,6 +92,18 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
             }
             "tested-against" => m.tested = parse_version(val),
             "module" => m.module = val.to_string(),
+            "permissions" => {
+                if !m.perms.is_empty() {
+                    m.perms.push('\n');
+                }
+                m.perms.push_str(&format!("permissions={val}"));
+            }
+            _ if key.starts_with("allow-") || key.starts_with("deny-") => {
+                if !m.perms.is_empty() {
+                    m.perms.push('\n');
+                }
+                m.perms.push_str(&format!("{key}={val}"));
+            }
             _ => {}
         }
     }
@@ -162,7 +177,13 @@ fn required_string(m: &Manifest) -> String {
     }
 }
 
-fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i32 {
+fn load_and_run(
+    lib: &Path,
+    module: &str,
+    payload: &[u8],
+    args: &[String],
+    perms: &str,
+) -> i32 {
     let library = match unsafe { libloading::Library::new(lib) } {
         Ok(l) => l,
         Err(e) => {
@@ -183,6 +204,17 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i3
         *mut c_int,
         *mut *mut c_char,
     ) -> c_int;
+    type FnRunPerm = unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        *const c_char,
+        usize,
+        c_int,
+        *const *const c_char,
+        *mut c_int,
+        *mut *mut c_char,
+        *const c_char,
+    ) -> c_int;
     type FnDestroy = unsafe extern "C" fn(*mut c_void);
 
     unsafe {
@@ -193,9 +225,6 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i3
 
         let create: libloading::Symbol<FnCreate> =
             library.get(b"dex_runtime_create").expect("missing dex_runtime_create");
-        let run_mod: libloading::Symbol<FnRun> = library
-            .get(b"dex_runtime_run_module")
-            .expect("missing dex_runtime_run_module");
         let destroy: libloading::Symbol<FnDestroy> = library
             .get(b"dex_runtime_destroy")
             .expect("missing dex_runtime_destroy");
@@ -204,6 +233,7 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i3
 
         let rt = create();
         let spec = CString::new(module).unwrap_or_else(|_| CString::new("main.js").unwrap());
+        let perms_c = CString::new(perms).unwrap_or_else(|_| CString::new("").unwrap());
         let argv: Vec<CString> = args
             .iter()
             .map(|a| CString::new(a.as_str()).expect("nul byte in arg"))
@@ -213,16 +243,47 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String]) -> i3
 
         let mut exit_code: c_int = 0;
         let mut err_msg: *mut c_char = std::ptr::null_mut();
-        let rc = run_mod(
-            rt,
-            spec.as_ptr(),
-            payload.as_ptr() as *const c_char,
-            payload.len(),
-            argv.len() as c_int,
-            argv_ptrs.as_ptr(),
-            &mut exit_code,
-            &mut err_msg,
-        );
+
+        let call = |rt, spec, exit_code, err_msg| {
+            if let Ok(perm_sym) = library.get::<FnRunPerm>(b"dex_runtime_run_module_perm") {
+                perm_sym(
+                    rt,
+                    spec,
+                    payload.as_ptr() as *const c_char,
+                    payload.len(),
+                    argv.len() as c_int,
+                    argv_ptrs.as_ptr(),
+                    exit_code,
+                    err_msg,
+                    perms_c.as_ptr(),
+                )
+            } else {
+                if !perms.is_empty() {
+                    eprintln!(
+                        "[dex] artifact declares permissions but runtime {} lacks support \
+                         (dex_runtime_run_module_perm); refusing to run allow-all",
+                        lib.display()
+                    );
+                    destroy(rt);
+                    std::process::exit(4);
+                }
+                let legacy: libloading::Symbol<FnRun> = library
+                    .get(b"dex_runtime_run_module")
+                    .expect("missing dex_runtime_run_module");
+                legacy(
+                    rt,
+                    spec,
+                    payload.as_ptr() as *const c_char,
+                    payload.len(),
+                    argv.len() as c_int,
+                    argv_ptrs.as_ptr(),
+                    exit_code,
+                    err_msg,
+                )
+            }
+        };
+
+        let rc = call(rt, spec.as_ptr(), &mut exit_code, &mut err_msg);
 
         if !err_msg.is_null() {
             eprintln!("[dex] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
@@ -268,6 +329,6 @@ fn main() {
 
     debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
     debug_log!("[dex] module '{}' payload {} bytes", m.module, payload.len());
-    let code = load_and_run(&path, &m.module, payload, &args);
+    let code = load_and_run(&path, &m.module, payload, &args, &m.perms);
     std::process::exit(code);
 }

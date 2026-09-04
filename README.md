@@ -36,8 +36,15 @@ int  dex_runtime_run_module(void*, const char* specifier,
                             const char* source, size_t len,
                             int argc, char** argv,
                             int* exit_code, char** err_msg);
+int  dex_runtime_run_module_perm(void*, const char* specifier,   /* additive */
+                            const char* source, size_t len,
+                            int argc, char** argv,
+                            int* exit_code, char** err_msg,
+                            const char* perms);
 void dex_runtime_destroy(void*);
 ```
+
+`dex_runtime_run_module_perm` is the additive, permission-aware entry point; `perms` is a newline-joined string of permission lines (null/empty = allow-all). The legacy `dex_runtime_run_module` is kept for older runtimes and always allow-all. If an artifact declares permissions but the installed runtime lacks the `_perm` symbol, the launcher **fails closed** (exit 4) instead of silently running allow-all.
 
 Everything else (Deno.\*, Web APIs, the event loop) lives inside the `.so` and is invisible to the ABI.
 
@@ -59,6 +66,31 @@ module=main.js                    # display specifier
 - No cap → newest installed tuple ≥ floor wins (roll-forward).
 - With cap → newest installed tuple ≤ cap that is ≥ floor.
 - No match → clear error naming the requirement and search paths (exit 3).
+
+## Permissions
+
+Permissions are baked into the artifact at `dex build` via the manifest — the executable is always launched plain (`./app ...`), never with `--allow-*` flags, and prompting is disabled. Categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`.
+
+```
+runtime=deno_runtime>=0.266.0
+allow-read=/etc,./data        # list of descriptors, or * for all
+deny-read=./data/secret.txt   # deny overrides allow
+```
+
+Policy:
+
+- **No permission keys** → allow everything (default, backward compatible).
+- `permissions=none` → deny everything (one-line sandbox).
+- Any `allow-*` key present → allow-list mode: categories without an allow entry are denied (`--allow-read=x` semantics).
+- Only `deny-*` keys present → allow everything except the listed denies.
+- `*` in a list means "all of that category".
+
+Descriptor syntax and enforcement match Deno exactly (`Deno.permissions` works, violations surface as `NotCapable`/`PermissionDenied`). Deny-only allows are subtracted from the allow-all default; deny entries override allow entries.
+
+Two notes:
+
+- **Fail-closed:** if an artifact declares permissions but the installed runtime predates the `_perm` ABI, launching errors (exit 4) rather than silently running allow-all.
+- **Relative paths resolve at run time** against the process cwd (Deno semantics). Resolving them against the artifact's build location is a noted future option.
 
 ## Quickstart
 
