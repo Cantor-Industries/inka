@@ -8,5 +8,13 @@ publish = false
 name = "dex"
 path = "src/main.rs"
 
+[features]
+default = ["transpile"]
+# Build-time TypeScript -> JavaScript compilation (deno_ast). Disable with
+# --no-default-features to keep `dex` small; `--transpile` then errors.
+transpile = ["dep:deno_ast"]
+
 [dependencies]
 sha2 = "0.10"
+url = "2"
+deno_ast = { version = "=0.53.3", features = ["transpiling"], optional = true }

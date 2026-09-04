@@ -6,6 +6,7 @@
 //   dex list [--home <dir>]
 
 mod build;
+mod transpile;
 
 use std::env;
 use std::fmt;

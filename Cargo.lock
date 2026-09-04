@@ -2831,7 +2831,9 @@ dependencies = [
 name = "dex"
 version = "0.0.0"
 dependencies = [
+ "deno_ast",
  "sha2",
+ "url",
 ]
 
 [[package]]

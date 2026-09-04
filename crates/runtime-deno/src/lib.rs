@@ -7,7 +7,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 use deno_runtime::deno_core::url::Url;
-use deno_runtime::deno_core::{FsModuleLoader, ModuleLoader, ModuleSpecifier};
+use deno_runtime::deno_core::{FsModuleLoader, ModuleCodeString, ModuleLoader, ModuleName,
+    ModuleSpecifier};
 use deno_runtime::deno_fetch::dns::Resolver as FetchDnsResolver;
 use deno_runtime::deno_fs::{FileSystem, RealFs};
 use deno_runtime::deno_permissions::{
@@ -15,6 +16,7 @@ use deno_runtime::deno_permissions::{
 };
 use deno_runtime::deno_web::{BlobStore, InMemoryBroadcastChannel};
 use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
+use deno_runtime::transpile::maybe_transpile_source;
 use deno_runtime::{FeatureChecker, WorkerLogLevel};
 
 use node_resolver::errors;
@@ -131,10 +133,46 @@ async fn run_module_async(
     Ok(exit_code)
 }
 
-fn run_inner(source: &[u8], args: &[String]) -> Result<i32, String> {
+fn ts_family(name: &str) -> bool {
+    let ext = name.rsplit('.').next().map(|e| e.to_ascii_lowercase());
+    matches!(ext.as_deref(), Some("ts" | "mts" | "cts"))
+}
+
+/// Transpile a single-file TypeScript entry to JavaScript before staging.
+/// Plain JS (and anything whose name is not TS-family) passes through unchanged.
+fn transpile_ts_source(
+    module: &str,
+    source: &[u8],
+    specifier: &ModuleSpecifier,
+) -> Result<Vec<u8>, String> {
+    if !ts_family(module) {
+        return Ok(source.to_vec());
+    }
+    let text = String::from_utf8_lossy(source).into_owned();
+    let name = ModuleName::from(specifier.as_str().to_string());
+    let code = ModuleCodeString::from(text);
+    let (js, _map) = maybe_transpile_source(name, code)
+        .map_err(|e| format!("failed to transpile TypeScript module '{module}': {e}"))?;
+    Ok(js.as_bytes().to_vec())
+}
+
+fn run_inner(module: &str, source: &[u8], args: &[String]) -> Result<i32, String> {
     let nonce = format!("{}-{}", std::process::id(), args.len());
+
+    // For TypeScript entries we need a real file-URL specifier so the runtime
+    // transpiler can classify the media type and name the module; the actual
+    // file we execute is always the transpiled JavaScript below.
+    let js = if ts_family(module) {
+        let fake_ts = std::env::temp_dir().join(format!("dex-{nonce}.ts"));
+        let spec = ModuleSpecifier::from_file_path(&fake_ts)
+            .map_err(|_| "failed to derive specifier for TypeScript module".to_string())?;
+        transpile_ts_source(module, source, &spec)?
+    } else {
+        source.to_vec()
+    };
+
     let path = std::env::temp_dir().join(format!("dex-{nonce}.js"));
-    std::fs::write(&path, source).map_err(|e| format!("failed to stage module: {e}"))?;
+    std::fs::write(&path, &js).map_err(|e| format!("failed to stage module: {e}"))?;
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -209,7 +247,7 @@ pub unsafe extern "C" fn dex_runtime_run_module(
         *err_msg = std::ptr::null_mut();
     }
 
-    let _specifier = if specifier.is_null() {
+    let specifier = if specifier.is_null() {
         String::new()
     } else {
         CStr::from_ptr(specifier).to_string_lossy().into_owned()
@@ -232,13 +270,12 @@ pub unsafe extern "C" fn dex_runtime_run_module(
         }
     }
 
-    match run_inner(src, &args) {
+    match run_inner(&specifier, src, &args) {
         Ok(code) => {
             *exit_code = code;
             0
         }
         Err(e) => {
-            eprintln!("[dex] {e}");
             *exit_code = 1;
             set_err_msg(err_msg, e);
             1

@@ -84,6 +84,23 @@ printf 'runtime=deno_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
 
 `dex build` finds the launcher automatically: `$DEX_LAUNCHER`, else `dex-launcher` next to the `dex` binary (so build `-p launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `dex.manifest` in the current directory.
 
+### TypeScript
+
+Single-file TypeScript entries are supported as-is — no extra steps:
+
+```sh
+# app.ts (types, interfaces, generics, top-level await all fine)
+./target/release/dex build app.ts        # -> ./app  (module=app.ts is set for you)
+./app kook
+```
+
+Two ways to compile TS → JS:
+
+- **Runtime transpile (default):** the artifact keeps your `.ts` source; the shared runtime `.so` transpiles it at load using the tuple's own TS compiler (so TS semantics track the runtime, not your machine).
+- **Build-time transpile:** `dex build app.ts --transpile` compiles to JS while packing, so the artifact ships pure JavaScript.
+
+`dex build` normalizes the manifest for you: if it has no `module=` line, one matching the source is appended (`.ts` preserved for runtime transpile, `.js` after `--transpile`); an explicit `module=` that contradicts the packed code's language prints a warning.
+
 Install a runtime on a machine (requires a `<file>.sha256` sidecar or `--sha256 <hex>`; add `--insecure` to skip):
 
 ```sh
@@ -127,6 +144,7 @@ Without the embedded snapshot, dex cold-starts at ~0.6 s; the snapshot brings it
 ## Current limits / roadmap
 
 - No `node:`/`npm:` module resolution (the npm trait slots are inert; non-npm code is unaffected).
+- TypeScript support is single-file: the artifact embeds one entry module, so relative imports of sibling files are not yet supported (multi-file embedding + a runtime module loader is on the roadmap). `.tsx`/`.jsx` are not supported yet.
 - Successful runs are silent; set `DEX_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[dex]` prefix.
 - `dex install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.
