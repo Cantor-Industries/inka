@@ -225,3 +225,45 @@ flags (deny-by-default in patched libdeno); `allow-<cat>=…` → `--allow-<cat>
 Lockfile-pinned store so resolution never consults a registry (see §8). This
 file's goal is that the fresh chat starts here rather than at "build the
 loader again from scratch."
+
+## 10. Resolution landed: the self-contained tar store (supersedes §8)
+
+Implemented on `phase2-rework` (commits `9d58731`…`84c7def`), replacing the §8
+libdeno/CLI-resolution restart brief. Unlike the failed phase-2 pivot, this does
+**not** inherit Deno-CLI resolution — the engine is a hand-rolled loader and the
+store is the only source of truth, so the "asks the registry even when cached"
+invariant cannot arise.
+
+### Mechanism
+- Store root default `$INKA_STORE`, else `~/.inka-runtime/store`; launcher sets
+  it for you when a `store/` dir sits next to the resolved `.so`.
+- Layout: `store/packages/<npm-name>/<version>/node_modules/<npm-name>/…` — one
+  **self-contained closure** per installed version (the real package-manager
+  resolution of that package, hoisted deps included).
+- jsr rides jsr's npm-mirror identity: `jsr:@scope/name` → `@jsr/scope__name`.
+- Distribution = tarballs that are already built: `inka pkg tar <spec>…`
+  (network-only) runs `npm install` once and tars the closure, so pre/postinstall
+  already executed when the tar was made. Consumers (runtime installs, `inka pkg
+  seed`) only download → sha256-verify → extract; nothing installs or runs on
+  the machine. `inka install` seeds a `<release>/store/` payload when present.
+- Runtime loader (`PkgLoader` in `crates/inka-runtime`) dispatches `npm:`/`jsr:`
+  to the store, bare imports from inside the store via a node_modules walk,
+  serves file/relative/node: as before, and rejects `http(s):` outright.
+
+### Version policy
+Exact specifiers recommended. Unpinned/range imports resolve only when the
+store has a unique (or best, for ranges) satisfying version; absent → clean
+`run "inka pkg seed"` error. Never a network call from the engine.
+
+### Verified (dead `HTTPS_PROXY`)
+`npm:zod`, `jsr:@std/assert@1.0.0`, jsr subpath (`/assert`), transitive bare
+`@jsr/std__internal`, single- and multi-file, exact/range/unpinned/ambiguous and
+missing-version error paths, `node:vm` intact, permission paths, http-import
+rejection, and the full `pkg tar` → `pkg seed` / `install`-payload →
+artifact-run flow into a fresh `--home`.
+
+### Known limits
+CJS/`require()` dependencies not served (loader picks import/default conditions
+only); curated set is pure-ESM. Store updates are additive — installing a newer
+version leaves the older one in place (unpinned imports then become ambiguous by
+design). No authenticity signing yet (sha256 integrity only).

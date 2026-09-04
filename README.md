@@ -88,7 +88,7 @@ The mental flip versus what you're used to: *the file you distribute is not the 
 | `crates/inka-launcher` | Thin native host: parses the appended trailer, resolves a tuple, `dlopen`s it, runs your module |
 | `crates/inka-runtime-stub` | Tiny fake `.so` exporting the same C ABI — used to develop/test the launcher cheaply |
 | `crates/inka-runtime` | Real runtime: `deno_runtime` behind the frozen C ABI, with a V8 startup snapshot embedded at build time |
-| `crates/inka` | Companion CLI: `inka build` (pack launcher + source + manifest into an artifact), `inka install <version>` (checksum-gated runtime distribution), `inka list` |
+| `crates/inka` | Companion CLI: `inka build` (pack launcher + source + manifest into an artifact), `inka install <version>` (checksum-gated runtime distribution), `inka list`, and `inka pkg` (tar/seed/list the vendored-package store) |
 
 ## The frozen C ABI (identical in stub and real runtime)
 
@@ -231,6 +231,38 @@ inka install 0.266.0 --from https://your-registry.example/runtimes
 inka list
 ```
 
+## Vendored packages (offline `npm:`/`jsr:`)
+
+Artifacts can import real registry packages by their normal specifiers and get the **local** copy — never the network:
+
+```js
+import { z } from "npm:zod";
+import { assertEquals } from "jsr:@std/assert@1.0.0";
+```
+
+Resolution happens at run time against a **package store** (a directory of self-contained package closures on the machine), not by installing anything at run time. `node:` built-ins keep working as before.
+
+Store layout:
+
+```
+<store>/
+  seed-manifest.json                      # what was seeded + sha256
+  packages/<npm-name>/<version>/node_modules/<npm-name>/…   # one closure per version
+```
+
+`<store>` defaults to `$INKA_STORE`, else a `store/` directory next to the chosen runtime (e.g. `~/.inka-runtime/store`); the launcher sets it for you when it exists, so plain `./app` runs work with no env.
+
+Packages ship as tarballs that are already "built": each tar is a real package-manager resolution of one package **plus its dependency closure**, with any preinstall/postinstall already run at tar-build time. Consumers only download → verify → extract; nothing is installed or scripted on the machine. jsr is served through jsr's npm-mirror identity (`jsr:@scope/name` → `@jsr/scope__name`), so one mechanism covers both registries.
+
+Commands (`crates/inka`):
+
+- `inka pkg tar <spec>…` — network-only (release/dev). Resolves `npm:name@version` / `jsr:@scope/name@version` closures with a package manager and writes `.tar.gz` + sha256 sidecars, plus a payload `seed-manifest.json` next to them.
+- `inka pkg seed --from <dir-or-url>` — fetch → sha256-verify → extract into the store. With no specs it seeds the curated zero-install set (currently `zod`, `@std/assert`); pass specs to add more.
+- `inka pkg list` — show installed `name@version`.
+- `inka install <version> --from <release>` — when the release carries a `store/` payload, installs it into the store too, so curated packages arrive together with the runtime (zero extra step for end users).
+
+Version policy: exact specifiers (`jsr:@std/assert@1.0.0`) are the norm. An unpinned/range import resolves only when the store holds a unique (or best) satisfying version; anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
+
 ## Building the real runtime
 
 `crates/inka-runtime` requires the heavy Deno dependency tree (V8, wgpu, …) and a one-time ~10–15 min build plus a snapshot-generation step. Point it at a roomy disk if your system drive is full:
@@ -266,7 +298,7 @@ Without the embedded snapshot, inka cold-starts at ~0.6 s; the snapshot brings i
 
 ## Current limits / roadmap
 
-- No `node:`/`npm:` module resolution yet (external/bare imports warn at build and fail at run time; npm/jsr + the vendored built-in store is the next phase).
+- `node:` built-ins resolve (they ride the runtime's snapshot); `npm:`/`jsr:` imports resolve **only** against the local package store (`inka pkg seed`), and `http(s):` module imports are rejected — the engine is offline by construction.
 - `.tsx`/`.jsx` are not supported yet; `--transpile` applies to single-file builds only (multi-file is transpiled by the runtime).
 - Successful runs are silent; set `INKA_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[inka]` prefix.
 - `inka install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
