@@ -62,16 +62,9 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
                 if !files.contains_key(&target) {
                     queue.push(target);
                 }
-            } else {
-                warn_once(
-                    &mut warned,
-                    &format!(
-                        "import '{}' from '{}' is not a local file; leaving it for the runtime \
-                         to resolve from the package store (npm:/jsr:) or as a built-in",
-                        s, rel
-                    ),
-                );
             }
+            // non-local specifiers (bare / npm: / jsr: / node:) are left for the
+            // runtime to resolve against the package store or built-ins — silence.
         }
     }
 
@@ -85,13 +78,6 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
         out.push((k, v));
     }
     Ok(out)
-}
-
-fn warn_once(flag: &mut bool, msg: &str) {
-    if !*flag {
-        eprintln!("warning: {msg}");
-        *flag = true;
-    }
 }
 
 /// Scan one source file for import specifiers: static imports/export-from via

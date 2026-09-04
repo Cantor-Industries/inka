@@ -267,3 +267,12 @@ CJS/`require()` dependencies not served (loader picks import/default conditions
 only); curated set is pure-ESM. Store updates are additive — installing a newer
 version leaves the older one in place (unpinned imports then become ambiguous by
 design). No authenticity signing yet (sha256 integrity only).
+
+### Bare resolution (post-landing refinement)
+Bare specifiers now resolve with no `npm:`/`jsr:` prefix: `import { z } from "zod"`,
+`import { assertEquals } from "@std/assert"` (scoped bare names try the npm identity
+first, then the jsr-mirror identity `@jsr/scope__name`). Node built-ins are also
+importable bare (`vm` ≡ `node:vm`, `process` ≡ `node:process`, incl. `name/sub`
+aliases like `fs/promises`); Node semantics apply — core wins over node_modules.
+`npm:`/`jsr:` + `@version` remain the way to pin an exact version. The `inka build`
+warning for non-local imports was removed (they're real at run time now).

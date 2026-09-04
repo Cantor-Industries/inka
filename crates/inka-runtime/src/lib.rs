@@ -47,6 +47,42 @@ const STORE_PACKAGES_DIR: &str = "packages";
 /// targets are used.
 const EXPORT_CONDITIONS: [&str; 3] = ["import", "node", "default"];
 
+/// Bare specifiers that map to Node built-ins, so `import … from "vm"`
+/// behaves like `node:vm` (Node semantics: core wins over node_modules).
+fn node_builtin_spec(spec: &str) -> Option<String> {
+    const SIMPLE: &[&str] = &[
+        "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
+        "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
+        "events", "fs", "http", "http2", "https", "inspector", "module", "net",
+        "os", "path", "perf_hooks", "process", "punycode", "querystring",
+        "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls",
+        "trace_events", "tty", "url", "util", "v8", "vm", "wasi",
+        "worker_threads", "zlib",
+    ];
+    const SUB: &[(&str, &str)] = &[
+        ("assert/strict", "node:assert/strict"),
+        ("dns/promises", "node:dns/promises"),
+        ("fs/promises", "node:fs/promises"),
+        ("path/posix", "node:path/posix"),
+        ("path/win32", "node:path/win32"),
+        ("readline/promises", "node:readline/promises"),
+        ("stream/consumers", "node:stream/consumers"),
+        ("stream/promises", "node:stream/promises"),
+        ("stream/web", "node:stream/web"),
+        ("timers/promises", "node:timers/promises"),
+        ("util/types", "node:util/types"),
+    ];
+    for (key, node) in SUB {
+        if *key == spec {
+            return Some((*node).to_string());
+        }
+    }
+    if SIMPLE.contains(&spec) {
+        return Some(format!("node:{spec}"));
+    }
+    None
+}
+
 /// One parsed `npm:`/`jsr:` specifier, normalized to its npm identity.
 struct PkgSpec {
     /// npm package name, e.g. `zod` or `@jsr/std__assert`.
@@ -131,10 +167,6 @@ fn has_scheme(spec: &str) -> bool {
     spec.split_once(':').is_some()
 }
 
-fn is_bare(spec: &str) -> bool {
-    !has_scheme(spec) && !spec.starts_with("./") && !spec.starts_with("../") && !spec.starts_with('/')
-}
-
 fn referrer_file_path(referrer: &str) -> Option<PathBuf> {
     Url::parse(referrer).ok().and_then(|u| u.to_file_path().ok())
 }
@@ -171,6 +203,17 @@ fn version_satisfies(v: &Version, req: &str) -> bool {
     }
 }
 
+/// A concrete pin suggestion for an error message, phrased for whatever the
+/// user actually wrote: jsr mirror identities render as `jsr:@scope/name@ver`.
+fn exact_hint(npm_name: &str, ver: &str) -> String {
+    if let Some(rest) = npm_name.strip_prefix("@jsr/") {
+        if let Some((scope, pkg)) = rest.split_once("__") {
+            return format!("jsr:@{scope}/{pkg}@{ver}");
+        }
+    }
+    format!("npm:{npm_name}@{ver}")
+}
+
 /// Chooses the installed version dir for a package given the requested version.
 fn pick_package_version(
     name: &str,
@@ -199,7 +242,8 @@ fn pick_package_version(
             } else {
                 Err(format!(
                     "multiple versions of '{name}' are installed ({avail:?}); \
-                     import an exact version (e.g. npm:{name}@<version>)"
+                     import an exact version (e.g. {})",
+                    exact_hint(name, avail[0])
                 ))
             }
         }
@@ -360,25 +404,66 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
     Ok(file)
 }
 
+/// Resolves a package (npm identity) + optional version req + subpath against
+/// the store to a concrete file. Shared by `npm:`/`jsr:` and bare imports.
+fn resolve_store_package(
+    store: &Path,
+    npm_name: &str,
+    req: Option<&str>,
+    sub: Option<&str>,
+) -> Result<PathBuf, String> {
+    let packages = store.join(STORE_PACKAGES_DIR);
+    let base = packages.join(npm_name);
+    if !base.starts_with(&packages) {
+        return Err(format!("unsafe package name '{npm_name}'"));
+    }
+    let versions = store_package_versions(&base)?;
+    let dir_name = pick_package_version(npm_name, &versions, req)?;
+    let pkg_dir = base.join(&dir_name);
+    let pkg_root = pkg_dir.join("node_modules").join(npm_name);
+    if !pkg_root.is_dir() {
+        return Err(format!(
+            "store package {npm_name}@{dir_name} is missing its node_modules/{npm_name} tree; \
+             re-run `inka pkg seed`"
+        ));
+    }
+    resolve_pkg_file(&pkg_root, sub)
+}
+
 /// Resolves an `npm:`/`jsr:` specifier against the store to a concrete file.
 fn store_lookup(store: &Path, spec: &str) -> Result<PathBuf, String> {
     let ps = parse_pkg_specifier(spec)?;
-    let packages = store.join(STORE_PACKAGES_DIR);
-    let base = packages.join(&ps.name);
-    if !base.starts_with(&packages) {
-        return Err(format!("unsafe package name in '{spec}'"));
+    resolve_store_package(store, &ps.name, ps.req.as_deref(), ps.sub.as_deref())
+}
+
+/// Store identities to try for a bare specifier: the npm identity first, then
+/// — for a scoped `@scope/name` — jsr's npm-mirror identity (`@jsr/scope__name`).
+fn bare_store_identities(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if let Some(body) = name.strip_prefix('@') {
+        if let Some((scope, pkg)) = body.split_once('/') {
+            if scope != "jsr" {
+                out.push(format!("@jsr/{scope}__{pkg}"));
+            }
+        }
     }
-    let versions = store_package_versions(&base)?;
-    let dir_name = pick_package_version(&ps.name, &versions, ps.req.as_deref())?;
-    let pkg_dir = base.join(&dir_name);
-    let pkg_root = pkg_dir.join("node_modules").join(&ps.name);
-    if !pkg_root.is_dir() {
-        return Err(format!(
-            "store package {}@{} is missing its node_modules/{} tree; re-run `inka pkg seed`",
-            ps.name, dir_name, ps.name
-        ));
+    out
+}
+
+/// Resolves a bare specifier from artifact/user code against the store's
+/// top-level packages (npm identity, then jsr mirror). Versions are unpinned:
+/// a unique installed version is required.
+fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
+    let (name, sub) = split_bare(spec);
+    for ident in bare_store_identities(&name) {
+        let base = store.join(STORE_PACKAGES_DIR).join(&ident);
+        if !store_package_versions(&base)?.is_empty() {
+            return resolve_store_package(store, &ident, None, sub.as_deref());
+        }
     }
-    resolve_pkg_file(&pkg_root, ps.sub.as_deref())
+    Err(format!(
+        "package '{name}' is not in the package store; run `inka pkg seed` to install it"
+    ))
 }
 
 /// Splits a bare specifier into `(package name, optional subpath)`.
@@ -441,7 +526,7 @@ impl ModuleLoader for PkgLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
-        // Vendored package specifiers resolve from the store.
+        // ---- explicit npm:/jsr: (the way to pin an exact version) ------
         if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
             let store = match &self.store_root {
                 Some(s) => s.clone(),
@@ -458,38 +543,46 @@ impl ModuleLoader for PkgLoader {
                 Err(e) => Err(JsErrorBox::generic(e)),
             };
         }
-        // Hard offline: no remote module fetching, ever.
-        if specifier.starts_with("http://") || specifier.starts_with("https://") {
-            return Err(JsErrorBox::generic(format!(
-                "network module imports are disabled ('{specifier}'); \
-                 vendor the package with `inka pkg seed` instead"
-            )));
-        }
-        // Bare imports are only valid from inside the store (a vendored
-        // package importing one of its installed dependencies).
-        if is_bare(specifier) {
-            let store = match &self.store_root {
-                Some(s) => s.clone(),
-                None => {
-                    return Err(JsErrorBox::generic(format!(
-                        "bare import '{specifier}' is not supported; prefix it with npm: or jsr:"
-                    )))
-                }
-            };
-            let ref_path = referrer_file_path(referrer).unwrap_or_default();
-            if !ref_path.starts_with(&store) {
+        // ---- schemes (file:/node:/data:/…) and remote imports ----------
+        if has_scheme(specifier) {
+            if specifier.starts_with("http://") || specifier.starts_with("https://") {
                 return Err(JsErrorBox::generic(format!(
-                    "bare import '{specifier}' from a module outside the package store \
-                     is not supported; prefix it with npm: or jsr:"
+                    "network module imports are disabled ('{specifier}'); \
+                     vendor the package with `inka pkg seed` instead"
                 )));
             }
-            return match store_bare_lookup(&store, specifier, &ref_path) {
-                Ok(path) => file_url_response(&path),
-                Err(e) => Err(JsErrorBox::generic(e)),
-            };
+            return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
         }
-        // Relative / file / node: / data: specifiers resolve as before.
-        deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+        // ---- no scheme: relative or bare ----
+        if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
+            return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
+        }
+        // Bare Node built-ins resolve without the `node:` prefix (core wins).
+        if let Some(node_spec) = node_builtin_spec(specifier) {
+            return deno_core::resolve_import(&node_spec, referrer).map_err(JsErrorBox::from_err);
+        }
+        // Bare package name -> the store (npm identity, then jsr mirror).
+        let store = match &self.store_root {
+            Some(s) => s.clone(),
+            None => {
+                return Err(JsErrorBox::generic(format!(
+                    "bare import '{specifier}' cannot be resolved: no package store configured \
+                     (INKA_STORE is unset); run `inka pkg seed` to install it"
+                )))
+            }
+        };
+        let ref_path = referrer_file_path(referrer).unwrap_or_default();
+        let result = if ref_path.starts_with(&store) {
+            // inside a vendored package: resolve its installed dependency closure
+            store_bare_lookup(&store, specifier, &ref_path)
+        } else {
+            // artifact/user code: resolve against the store's top-level packages
+            store_bare_top(&store, specifier)
+        };
+        match result {
+            Ok(path) => file_url_response(&path),
+            Err(e) => Err(JsErrorBox::generic(e)),
+        }
     }
 
     fn load(

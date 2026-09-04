@@ -233,11 +233,18 @@ inka list
 
 ## Vendored packages (offline `npm:`/`jsr:`)
 
-Artifacts can import real registry packages by their normal specifiers and get the **local** copy — never the network:
+Artifacts can import real registry packages by name and get the **local** copy — never the network. No prefix needed: the runtime resolves a bare specifier against the store, matching npm and jsr packages alike (`@std/assert` is jsr, and jsr is served via its npm-mirror identity):
 
 ```js
-import { z } from "npm:zod";
-import { assertEquals } from "jsr:@std/assert@1.0.0";
+import { z } from "zod";
+import { assertEquals } from "@std/assert";
+```
+
+Node built-ins also need no `node:` prefix — `vm` and `node:vm`, `process` and `node:process` are interchangeable:
+
+```js
+import vm from "vm";
+import process from "process";
 ```
 
 Resolution happens at run time against a **package store** (a directory of self-contained package closures on the machine), not by installing anything at run time. `node:` built-ins keep working as before.
@@ -261,7 +268,7 @@ Commands (`crates/inka`):
 - `inka pkg list` — show installed `name@version`.
 - `inka install <version> --from <release>` — when the release carries a `store/` payload, installs it into the store too, so curated packages arrive together with the runtime (zero extra step for end users).
 
-Version policy: exact specifiers (`jsr:@std/assert@1.0.0`) are the norm. An unpinned/range import resolves only when the store holds a unique (or best) satisfying version; anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
+Version policy: bare imports pick the store's unique installed version. When several versions are installed (or to pin exactly), use the prefixed specifier form — `npm:zod@3.23.0`, `jsr:@std/assert@1.0.0` — which is always accepted too; a range (`npm:zod@^3`) resolves to the best satisfying installed version. Anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
 
 ## Building the real runtime
 
@@ -298,7 +305,7 @@ Without the embedded snapshot, inka cold-starts at ~0.6 s; the snapshot brings i
 
 ## Current limits / roadmap
 
-- `node:` built-ins resolve (they ride the runtime's snapshot); `npm:`/`jsr:` imports resolve **only** against the local package store (`inka pkg seed`), and `http(s):` module imports are rejected — the engine is offline by construction.
+- `node:` built-ins resolve with or without the prefix (`vm` ≡ `node:vm`); bare `npm:`/`jsr:` package names resolve **only** against the local package store (`inka pkg seed`), and `http(s):` module imports are rejected — the engine is offline by construction.
 - `.tsx`/`.jsx` are not supported yet; `--transpile` applies to single-file builds only (multi-file is transpiled by the runtime).
 - Successful runs are silent; set `INKA_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[inka]` prefix.
 - `inka install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
