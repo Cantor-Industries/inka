@@ -1,13 +1,14 @@
-// dex build: pack a source file + manifest onto the launcher into a single
-// executable artifact.
+// dex build: pack one or more source files + a manifest onto the launcher.
 //
 //   dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
+//             [--transpile] [--embed-dir]
 //
 // Defaults:
 //   source    first positional argument (or -s/--source)
 //   output    source path with its final extension stripped (app.js -> app)
 //   manifest  --manifest, else <source-stem>.manifest then dex.manifest in cwd
 //   launcher  $DEX_LAUNCHER, else <dir of dex binary>/dex-launcher
+//   embed     import closure by default; --embed-dir embeds the whole cwd tree
 
 use std::env;
 use std::fs;
@@ -15,20 +16,22 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const FOOTER_LEN: usize = 24;
-const MAGIC: &[u8] = b"DEXFOOT2";
+const MAGIC_V1: &[u8] = b"DEXFOOT2"; // single embedded source
+const MAGIC_V2: &[u8] = b"DEXFOOT3"; // multi-file archive
 const LAUNCHER_BIN: &str = "dex-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>] [--transpile]\n\
+        "usage: dex build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>] [--transpile] [--embed-dir]\n\
          \n\
-         packs <source> onto the launcher into a single executable.\n\
+         packs <source> (and the files it imports) onto the launcher into a single executable.\n\
          \n\
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
          \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then dex.manifest, in the current directory)\n\
-         \x20     --transpile       compile TypeScript to JavaScript now (default: the runtime transpiles at load)\n\
+         \x20     --transpile       compile TypeScript to JavaScript now (single-file builds; default: the runtime transpiles at load)\n\
+         \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
          \x20 -h, --help            show this help\n\
          \n\
          launcher is found at $DEX_LAUNCHER or next to the dex binary."
@@ -46,6 +49,7 @@ pub fn cmd_build(args: &[String]) {
     let mut output_flag: Option<PathBuf> = None;
     let mut manifest_flag: Option<PathBuf> = None;
     let mut transpile = false;
+    let mut embed_dir = false;
     let mut positional: Vec<PathBuf> = Vec::new();
 
     let mut it = args.iter();
@@ -55,6 +59,7 @@ pub fn cmd_build(args: &[String]) {
             "-o" | "--output" => output_flag = Some(next_val(&mut it, a)),
             "--manifest" => manifest_flag = Some(next_val(&mut it, a)),
             "--transpile" => transpile = true,
+            "--embed-dir" => embed_dir = true,
             "-h" | "--help" => help(),
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{other}'");
@@ -124,19 +129,82 @@ pub fn cmd_build(args: &[String]) {
     if !manifest.is_file() {
         err(&format!("manifest file not found: {}", manifest.display()));
     }
-
-    let source_bytes = fs::read(&source)
-        .unwrap_or_else(|e| err(&format!("cannot read {}: {e}", source.display())));
     let manifest_bytes = fs::read(&manifest)
         .unwrap_or_else(|e| err(&format!("cannot read {}: {e}", manifest.display())));
 
-    let source_name = source
+    let cwd = env::current_dir()
+        .unwrap_or_else(|e| err(&format!("cannot determine current directory: {e}")));
+    let entry_rel = match crate::embed::rel_from_cwd(&cwd, &source) {
+        Ok(r) => r,
+        Err(e) => err(&e),
+    };
+
+    let mode = if embed_dir {
+        crate::embed::Mode::Directory
+    } else {
+        crate::embed::Mode::Closure
+    };
+    let files = match mode {
+        crate::embed::Mode::Directory => crate::embed::collect_directory(&cwd, &entry_rel),
+        crate::embed::Mode::Closure => crate::embed::collect(&cwd, &entry_rel),
+    }
+    .unwrap_or_else(|e| err(&e));
+
+    let is_multi = files.len() > 1;
+    if transpile && is_multi {
+        err(
+            "--transpile is not yet supported for multi-file builds; multi-file artifacts are \
+             transpiled by the runtime at load time",
+        );
+    }
+
+    let launcher = find_launcher();
+    let launcher_bytes = fs::read(&launcher)
+        .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
+
+    let mut out = Vec::new();
+
+    if is_multi {
+        let archive = encode_archive(&files);
+        let manifest_payload = set_module_line(&manifest_bytes, &entry_rel);
+        out.reserve(launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN);
+        out.extend_from_slice(&launcher_bytes);
+        out.extend_from_slice(&archive);
+        out.extend_from_slice(&manifest_payload);
+        out.extend_from_slice(MAGIC_V2);
+        out.extend_from_slice(&(archive.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
+        fs::write(&output, &out)
+            .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
+        fs::set_permissions(&output, fs::Permissions::from_mode(0o755))
+            .unwrap_or_else(|e| err(&format!("cannot chmod {}: {e}", output.display())));
+        println!(
+            "packed {} ({}) <- launcher {} ({}) + {} file(s) archive ({}) + manifest {} ({})",
+            output.display(),
+            out.len(),
+            launcher.display(),
+            launcher_bytes.len(),
+            files.len(),
+            archive.len(),
+            manifest.display(),
+            manifest_payload.len(),
+        );
+        println!("  entry: {entry_rel}  ({} files embedded)", files.len());
+        return;
+    }
+
+    // ---- single-file build (back-compatible v1 trailer) --------------------
+    let entry_bytes = files
+        .first()
+        .map(|(_, b)| b.clone())
+        .unwrap_or_default();
+    let source_name = Path::new(&entry_rel)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "main.js".into());
     let ts_source = ts_family(&source_name);
 
-    let mut payload = source_bytes;
+    let mut payload = entry_bytes;
     let mut transpiled = false;
     if transpile {
         if ts_source {
@@ -160,22 +228,13 @@ pub fn cmd_build(args: &[String]) {
         eprintln!("warning: {w}");
     }
 
-    let launcher = find_launcher();
-    let launcher_bytes = fs::read(&launcher)
-        .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
-
-    let plen = payload.len() as u64;
-    let mlen = manifest_payload.len() as u64;
-
-    let mut out = Vec::with_capacity(
-        launcher_bytes.len() + payload.len() + manifest_payload.len() + FOOTER_LEN,
-    );
+    out.reserve(launcher_bytes.len() + payload.len() + manifest_payload.len() + FOOTER_LEN);
     out.extend_from_slice(&launcher_bytes);
     out.extend_from_slice(&payload);
     out.extend_from_slice(&manifest_payload);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&plen.to_le_bytes());
-    out.extend_from_slice(&mlen.to_le_bytes());
+    out.extend_from_slice(MAGIC_V1);
+    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+    out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
 
     fs::write(&output, &out)
         .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
@@ -194,6 +253,50 @@ pub fn cmd_build(args: &[String]) {
         manifest.display(),
         manifest_payload.len(),
     );
+}
+
+/// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
+fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (path, data) in files {
+        out.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(path.as_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+/// Force the `module=` line to a given entry path (used for multi-file builds,
+/// where the entry lives at a cwd-relative path, not a bare filename).
+fn set_module_line(manifest: &[u8], entry_rel: &str) -> Vec<u8> {
+    let text = String::from_utf8_lossy(manifest);
+    let mut found = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if let Some(val) = trimmed.strip_prefix("module=") {
+            found = true;
+            let val = val.trim();
+            if val != entry_rel {
+                eprintln!(
+                    "warning: manifest 'module={val}' overridden to entry '{entry_rel}' (required for multi-file artifacts)"
+                );
+            }
+            let lead_len = line.len() - line.trim_start().len();
+            out.push(format!("{}module={entry_rel}", &line[..lead_len]));
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !found {
+        out.push(format!("module={entry_rel}"));
+    }
+    let mut joined = out.join("\n");
+    if text.ends_with('\n') {
+        joined.push('\n');
+    }
+    joined.into_bytes()
 }
 
 fn ext_of(name: &str) -> Option<String> {

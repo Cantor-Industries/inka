@@ -6396,6 +6396,7 @@ name = "runtime-deno"
 version = "0.0.0"
 dependencies = [
  "deno_core",
+ "deno_error",
  "deno_runtime",
  "deno_semver",
  "node_resolver",

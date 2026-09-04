@@ -22,11 +22,13 @@ So there are exactly three things in play:
 
 ```
 [ launcher executable bytes ]   ← the compiled Rust launcher
-[ your source (app.js bytes) ]  ← the program
+[ your program bytes        ]  ← a single source file, or a files archive
+                                 when the app imports other files
 [ your manifest bytes        ]  ← what it needs and may do
-[ footer: "DEXFOOT2" + length of source + length of manifest ]
+[ footer: "DEXFOOT2"/"DEXFOOT3" + length of program + length of manifest ]
 ```
 
+The footer is the last 24 bytes: an 8-byte magic string (`DEXFOOT2` = one embedded source, `DEXFOOT3` = a multi-file archive) plus two 8-byte lengths.
 The footer is the last 24 bytes: an 8-byte magic string (`DEXFOOT2`) plus two 8-byte lengths. That is the only "clever" part — it is how the launcher finds its data when it runs.
 
 Why does this work? Because an executable doesn't have to be *only* machine code. The OS runs the code at the start of the file and ignores trailing garbage. Appending text to a compiled binary is safe. That is the entire "embed" model: **the source and manifest are just extra bytes stuck onto the end of the launcher.**
@@ -103,10 +105,14 @@ int  dex_runtime_run_module_perm(void*, const char* specifier,   /* additive */
                             int argc, char** argv,
                             int* exit_code, char** err_msg,
                             const char* perms);
+int  dex_runtime_run_module_dir(void*, const char* dir_path,     /* additive */
+                            const char* entry, int argc, char** argv,
+                            int* exit_code, char** err_msg,
+                            const char* perms);
 void dex_runtime_destroy(void*);
 ```
 
-`dex_runtime_run_module_perm` is the additive, permission-aware entry point; `perms` is a newline-joined string of permission lines (null/empty = deny-by-default). The legacy `dex_runtime_run_module` is kept for older runtimes and behaves the same as `_perm` with empty permissions (deny-by-default) on current runtime builds. If an artifact declares permissions but the installed runtime lacks the `_perm` symbol, the launcher **fails closed** (exit 4) instead of silently running allow-all.
+`dex_runtime_run_module_perm` is the additive, permission-aware single-source entry point. `dex_runtime_run_module_dir` runs a multi-file artifact: `dir_path` points at an extracted tree and `entry` is the entry module's path inside it, resolved with its relative imports (`.ts` transpiled per file). The legacy `dex_runtime_run_module` is kept for older runtimes and behaves the same as `_perm` with empty permissions (deny-by-default) on current runtime builds. If an artifact declares permissions but the installed runtime lacks the `_perm` symbol, or is multi-file while the runtime lacks the `_dir` symbol, the launcher **fails closed** (exit 4).
 
 Everything else (Deno.\*, Web APIs, the event loop) lives inside the `.so` and is invisible to the ABI.
 
@@ -185,6 +191,23 @@ printf 'runtime=deno_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
 
 `dex build` finds the launcher automatically: `$DEX_LAUNCHER`, else `dex-launcher` next to the `dex` binary (so build `-p launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `dex.manifest` in the current directory.
 
+### Local imports & multi-file apps
+
+Files that import other files are supported — build from the project root so the entry has a cwd-relative path:
+
+```sh
+# src/ dir with main.ts importing "./lib/util.ts" etc.
+dex build src/main.ts            # -> ./src/main executable
+./src/main                       # runs with its imports embedded
+```
+
+Embedding is automatic. When imports exist, `dex build` walks the import graph and packs exactly the referenced files into the artifact (a files archive + a new trailer). Two modes:
+
+- **Import closure (default):** static imports/exports, literal `import("./x.js")`, and `.json` are discovered from the entry (via `deno_ast`) and embedded, preserving the cwd-relative tree. A non-literal dynamic `import(...)` can't be seen statically → a warning suggests `--embed-dir`.
+- **`--embed-dir`:** embed the whole current-directory tree (skipping `.git`, `target`, `node_modules`, `.dex`, `dist`) for projects that use computed dynamic imports.
+
+TS is transpiled per file at run time by the tuple (so extensionless `./math` → `math.ts` etc. resolve like Deno). Bundled-module reads are part of the program and don't count against the `read` permission; `Deno.readTextFileSync` and other file/network ops remain permission-gated. `--transpile` currently applies to single-file builds only.
+
 ### TypeScript
 
 Single-file TypeScript entries are supported as-is — no extra steps:
@@ -244,8 +267,8 @@ Without the embedded snapshot, dex cold-starts at ~0.6 s; the snapshot brings it
 
 ## Current limits / roadmap
 
-- No `node:`/`npm:` module resolution (the npm trait slots are inert; non-npm code is unaffected).
-- TypeScript support is single-file: the artifact embeds one entry module, so relative imports of sibling files are not yet supported (multi-file embedding + a runtime module loader is on the roadmap). `.tsx`/`.jsx` are not supported yet.
+- No `node:`/`npm:` module resolution yet (external/bare imports warn at build and fail at run time; npm/jsr + the vendored built-in store is the next phase).
+- `.tsx`/`.jsx` are not supported yet; `--transpile` applies to single-file builds only (multi-file is transpiled by the runtime).
 - Successful runs are silent; set `DEX_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[dex]` prefix.
 - `dex install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.

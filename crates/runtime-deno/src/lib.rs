@@ -1,14 +1,17 @@
 // dex runtime-deno: a cdylib embedding deno_runtime behind the frozen dex C ABI.
 
 use std::ffi::{c_char, c_int, c_void, CStr, CString};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
 use deno_runtime::deno_core::url::Url;
-use deno_runtime::deno_core::{FsModuleLoader, ModuleCodeString, ModuleLoader, ModuleName,
-    ModuleSpecifier};
+use deno_runtime::deno_core::{
+    FsModuleLoader, ModuleCodeString, ModuleLoadOptions, ModuleLoadResponse, ModuleLoader,
+    ModuleName, ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier,
+    ModuleType, RequestedModuleType,
+};
 use deno_runtime::deno_fetch::dns::Resolver as FetchDnsResolver;
 use deno_runtime::deno_fs::{FileSystem, RealFs};
 use deno_runtime::deno_permissions::{
@@ -22,6 +25,7 @@ use deno_runtime::{FeatureChecker, WorkerLogLevel};
 
 use node_resolver::errors;
 use node_resolver::{InNpmPackageChecker, NpmPackageFolderResolver, UrlOrPathRef};
+use deno_error::JsErrorBox;
 use sys_traits::impls::RealSys;
 
 const DENO_RUNTIME_VERSION: &str = "0.266.0";
@@ -31,6 +35,136 @@ static STARTUP_SNAPSHOT: &[u8] =
 
 mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
+}
+
+/// A module loader for the staged multi-file tree: resolves relative imports
+/// against file specifiers (like `FsModuleLoader`) but refuses to read outside
+/// `root` and transpiles `.ts`/`.mts`/`.cts` on load.
+#[derive(Clone)]
+struct DexModuleLoader {
+    root: PathBuf,
+}
+
+impl ModuleLoader for DexModuleLoader {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        _kind: deno_core::ResolutionKind,
+    ) -> ModuleResolveResponse {
+        deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+    }
+
+    fn load(
+        &self,
+        module_specifier: &ModuleSpecifier,
+        _maybe_referrer: Option<&deno_core::ModuleLoadReferrer>,
+        options: ModuleLoadOptions,
+    ) -> ModuleLoadResponse {
+        let specifier = module_specifier.clone();
+        let root = self.root.clone();
+        let fut = async move {
+            let mut path = module_url_to_path(&specifier)?;
+            if !path.starts_with(&root) {
+                return Err(JsErrorBox::generic(format!(
+                    "refusing to load module outside the artifact tree: {specifier}"
+                )));
+            }
+            // Deno-style resolution: an extensionless specifier like "./math"
+            // may point at math.ts / math.js / ...
+            if !path.is_file() && path.extension().is_none() {
+                const EXTS: [&str; 6] = ["ts", "mts", "cts", "js", "mjs", "json"];
+                let mut found = None;
+                for ext in EXTS {
+                    let cand = PathBuf::from(format!("{}.{ext}", path.to_string_lossy()));
+                    if cand.is_file() {
+                        found = Some(cand);
+                        break;
+                    }
+                }
+                if let Some(p) = found {
+                    path = p;
+                }
+            }
+            if !path.starts_with(&root) {
+                return Err(JsErrorBox::generic(format!(
+                    "refusing to load module outside the artifact tree: {specifier}"
+                )));
+            }
+            let bytes = std::fs::read(&path).map_err(|source| {
+                JsErrorBox::from_err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Cannot load module \"{specifier}\": {source}"),
+                ))
+            })?;
+
+            let module_type = if let Some(extension) = path.extension() {
+                let ext = extension.to_string_lossy().to_lowercase();
+                if ext == "json" {
+                    ModuleType::Json
+                } else {
+                    match &options.requested_module_type {
+                        deno_core::RequestedModuleType::Other(ty) => {
+                            ModuleType::Other(ty.clone())
+                        }
+                        deno_core::RequestedModuleType::Text => ModuleType::Text,
+                        deno_core::RequestedModuleType::Bytes => ModuleType::Bytes,
+                        _ => ModuleType::JavaScript,
+                    }
+                }
+            } else {
+                ModuleType::JavaScript
+            };
+
+            if options.requested_module_type == RequestedModuleType::Json
+                && module_type != ModuleType::Json
+            {
+                return Err(JsErrorBox::type_error(format!(
+                    "Expected a JSON module, but identified a {module_type} module.\n  Specifier: {specifier}"
+                )));
+            }
+            if module_type == ModuleType::Json
+                && options.requested_module_type != RequestedModuleType::Json
+            {
+                return Err(JsErrorBox::generic(
+                    "Attempted to load JSON module without specifying \"type\": \"json\" attribute in the import statement.",
+                ));
+            }
+
+            // Transpile TS-family files (decided by the resolved file's
+            // extension, which also covers extensionless specifiers).
+            let file_ts = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_ascii_lowercase())
+                .is_some_and(|e| e == "ts" || e == "mts" || e == "cts");
+            let code: ModuleSourceCode = if module_type == ModuleType::JavaScript && file_ts {
+                // TypeScript source: transpile to JS before handing it to V8.
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                let file_url = ModuleSpecifier::from_file_path(&path)
+                    .unwrap_or_else(|_| specifier.clone());
+                let name = ModuleName::from(file_url.as_str().to_string());
+                let source = ModuleCodeString::from(text);
+                let (js, _map) = maybe_transpile_source(name, source).map_err(|e| {
+                    JsErrorBox::generic(format!(
+                        "failed to transpile TypeScript module {specifier}: {e}"
+                    ))
+                })?;
+                ModuleSourceCode::String(js)
+            } else {
+                ModuleSourceCode::Bytes(bytes.into_boxed_slice().into())
+            };
+
+            Ok(ModuleSource::new(module_type, code, &specifier, None))
+        };
+
+        ModuleLoadResponse::Async(Box::pin(fut))
+    }
+}
+
+fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox> {
+    specifier.to_file_path().map_err(|_| {
+        JsErrorBox::type_error(format!("not a file URL module: {specifier}"))
+    })
 }
 
 // ---- npm/node trait slots --------------------------------------------------
@@ -71,14 +205,17 @@ impl NpmPackageFolderResolver for NoNpmFolder {
 
 type DrtServices = WorkerServiceOptions<NoNpm, NoNpmFolder, RealSys>;
 
-fn build_services(permissions: PermissionsContainer) -> DrtServices {
+fn build_services(
+    permissions: PermissionsContainer,
+    loader: Rc<dyn ModuleLoader>,
+) -> DrtServices {
     WorkerServiceOptions {
         blob_store: BlobStore::default_arc(),
         broadcast_channel: InMemoryBroadcastChannel::default(),
         deno_rt_native_addon_loader: None,
         feature_checker: Arc::new(FeatureChecker::default()),
         fs: Arc::new(RealFs) as Arc<dyn FileSystem>,
-        module_loader: Rc::new(FsModuleLoader) as Rc<dyn ModuleLoader>,
+        module_loader: loader,
         node_services: None,
         npm_process_state_provider: None,
         permissions,
@@ -244,8 +381,9 @@ async fn run_module_async(
     main_module: &ModuleSpecifier,
     args: &[String],
     permissions: PermissionsContainer,
+    loader: Rc<dyn ModuleLoader>,
 ) -> Result<i32, String> {
-    let services = build_services(permissions);
+    let services = build_services(permissions, loader);
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
     options.bootstrap.location = Some(main_module.clone());
@@ -337,11 +475,45 @@ fn run_inner(
     let result = rt.block_on(async {
         let url = ModuleSpecifier::from_file_path(&path)
             .map_err(|_| "failed to derive file url for staged module".to_string())?;
-        run_module_async(&url, args, permissions).await
+        run_module_async(&url, args, permissions, Rc::new(FsModuleLoader)).await
     });
 
     let _ = std::fs::remove_file(&path);
     result
+}
+
+/// Runs an entry module from a staged multi-file tree (`dir`/`entry`), using
+/// `DexModuleLoader` so relative imports between the files resolve.
+fn run_dir_inner(
+    dir: &str,
+    entry: &str,
+    args: &[String],
+    perm_dsl: Option<&str>,
+) -> Result<i32, String> {
+    let root = PathBuf::from(dir);
+    if !root.is_dir() {
+        return Err(format!("runtime directory not found: {dir}"));
+    }
+    if entry.is_empty() || entry.contains("..") || Path::new(entry).is_absolute() {
+        return Err(format!("invalid entry path '{entry}'"));
+    }
+    let file = root.join(entry);
+    if !file.is_file() {
+        return Err(format!("entry module not found in artifact tree: {entry}"));
+    }
+
+    let permissions = permissions_from_dsl(perm_dsl.unwrap_or(""))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
+
+    rt.block_on(async {
+        let url = ModuleSpecifier::from_file_path(&file)
+            .map_err(|_| format!("failed to derive file url for {entry}"))?;
+        let loader: Rc<dyn ModuleLoader> = Rc::new(DexModuleLoader { root });
+        run_module_async(&url, args, permissions, loader).await
+    })
 }
 
 // ---- version ---------------------------------------------------------------
@@ -461,7 +633,7 @@ pub unsafe extern "C" fn dex_runtime_run_module(
 }
 
 /// Permission-aware run entry point. `perms` is a newline-joined string of
-/// manifest permission lines (or null/empty for allow-all).
+/// manifest permission lines (or null/empty for deny-by-default).
 #[no_mangle]
 pub unsafe extern "C" fn dex_runtime_run_module_perm(
     _rt: *mut c_void,
@@ -484,4 +656,66 @@ pub unsafe extern "C" fn dex_runtime_run_module_perm(
         err_msg,
         Some(perms),
     )
+}
+
+/// Multi-file run entry point: executes `entry` (a path relative to the
+/// extracted `dir_path`) from a staged artifact tree, resolving its relative
+/// imports. `perms` behaves like `dex_runtime_run_module_perm`.
+#[no_mangle]
+pub unsafe extern "C" fn dex_runtime_run_module_dir(
+    _rt: *mut c_void,
+    dir_path: *const c_char,
+    entry: *const c_char,
+    argc: c_int,
+    argv: *const *const c_char,
+    exit_code: *mut c_int,
+    err_msg: *mut *mut c_char,
+    perms: *const c_char,
+) -> c_int {
+    if exit_code.is_null() {
+        return -1;
+    }
+    *exit_code = 0;
+    if !err_msg.is_null() {
+        *err_msg = std::ptr::null_mut();
+    }
+
+    let dir = if dir_path.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(dir_path).to_string_lossy().into_owned()
+    };
+    let entry = if entry.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(entry).to_string_lossy().into_owned()
+    };
+
+    let mut args = Vec::new();
+    if !argv.is_null() {
+        for i in 0..argc {
+            let p = *argv.add(i as usize);
+            if p.is_null() {
+                break;
+            }
+            args.push(CStr::from_ptr(p).to_string_lossy().into_owned());
+        }
+    }
+    let dsl = if perms.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(perms).to_string_lossy().into_owned())
+    };
+
+    match run_dir_inner(&dir, &entry, &args, dsl.as_deref()) {
+        Ok(code) => {
+            *exit_code = code;
+            0
+        }
+        Err(e) => {
+            *exit_code = 1;
+            set_err_msg(err_msg, e);
+            1
+        }
+    }
 }

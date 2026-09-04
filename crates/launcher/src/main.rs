@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FOOTER_LEN: usize = 24;
-const MAGIC: &[u8] = b"DEXFOOT2";
+const MAGIC_V1: &[u8] = b"DEXFOOT2"; // single embedded source
+const MAGIC_V2: &[u8] = b"DEXFOOT3"; // multi-file archive
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -32,22 +33,101 @@ fn parse_version(s: &str) -> Option<Version> {
     Some(Version(a, b, c))
 }
 
-fn parse_trailer(bytes: &[u8]) -> Result<(&[u8], &[u8]), String> {
+enum Trailer<'a> {
+    /// v1: a single embedded source file + manifest.
+    Single {
+        source: &'a [u8],
+        manifest: &'a [u8],
+    },
+    /// v2: an archive of relative-path files + manifest.
+    Archive {
+        files: Vec<(String, Vec<u8>)>,
+        manifest: &'a [u8],
+    },
+}
+
+fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
     if bytes.len() < FOOTER_LEN {
         return Err("file smaller than footer".into());
     }
     let footer = &bytes[bytes.len() - FOOTER_LEN..];
-    if &footer[0..8] != MAGIC {
-        return Err("trailer magic not found (not a dex artifact?)".into());
-    }
-    let plen = u64::from_le_bytes(footer[8..16].try_into().unwrap()) as usize;
+    let magic = &footer[0..8];
+    let alen = u64::from_le_bytes(footer[8..16].try_into().unwrap()) as usize;
     let mlen = u64::from_le_bytes(footer[16..24].try_into().unwrap()) as usize;
-    if plen.saturating_add(mlen).saturating_add(FOOTER_LEN) > bytes.len() {
+    if alen.saturating_add(mlen).saturating_add(FOOTER_LEN) > bytes.len() {
         return Err("trailer lengths out of range".into());
     }
     let mstart = bytes.len() - FOOTER_LEN - mlen;
-    let pstart = mstart - plen;
-    Ok((&bytes[pstart..mstart], &bytes[mstart..mstart + mlen]))
+    let pstart = mstart - alen;
+    let manifest = &bytes[mstart..mstart + mlen];
+    match magic {
+        MAGIC_V1 => Ok(Trailer::Single {
+            source: &bytes[pstart..mstart],
+            manifest,
+        }),
+        MAGIC_V2 => {
+            let files = parse_archive(&bytes[pstart..mstart])?;
+            Ok(Trailer::Archive { files, manifest })
+        }
+        _ => Err("trailer magic not found (not a dex artifact?)".into()),
+    }
+}
+
+/// Archive layout: repeated `{path_len u64}{data_len u64}{path}{data}`.
+fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut files = Vec::new();
+    let mut rest = blob;
+    while !rest.is_empty() {
+        if rest.len() < 16 {
+            return Err("malformed archive entry header".into());
+        }
+        let path_len = u64::from_le_bytes(rest[0..8].try_into().unwrap()) as usize;
+        let data_len = u64::from_le_bytes(rest[8..16].try_into().unwrap()) as usize;
+        rest = &rest[16..];
+        if path_len == 0 || path_len + data_len > rest.len() {
+            return Err("malformed archive entry lengths".into());
+        }
+        let path_bytes = &rest[..path_len];
+        let path = std::str::from_utf8(path_bytes)
+            .map_err(|_| "archive entry path is not valid UTF-8".to_string())?;
+        validate_rel_path(path)?;
+        let data = rest[path_len..path_len + data_len].to_vec();
+        rest = &rest[path_len + data_len..];
+        files.push((path.to_string(), data));
+    }
+    Ok(files)
+}
+
+fn validate_rel_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || Path::new(path).is_absolute() {
+        return Err(format!("invalid archive path '{path}' (must be relative)"));
+    }
+    if path.contains('\0') {
+        return Err("archive path contains a NUL byte".into());
+    }
+    for comp in path.split('/') {
+        if comp == ".." {
+            return Err(format!("archive path '{path}' escapes the artifact tree"));
+        }
+    }
+    Ok(())
+}
+
+/// Materialize the embedded archive under a fresh temp dir, mirroring paths.
+fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
+    let nonce = format!("{}-{}", std::process::id(), files.len());
+    let root = std::env::temp_dir().join(format!("dex-{nonce}"));
+    let _ = fs::remove_dir_all(&root);
+    for (path, data) in files {
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        fs::write(&target, data)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+    }
+    Ok(root)
 }
 
 #[derive(Default)]
@@ -298,13 +378,96 @@ fn load_and_run(
     }
 }
 
+fn load_and_run_dir(
+    lib: &Path,
+    dir: &str,
+    entry: &str,
+    args: &[String],
+    perms: &str,
+) -> i32 {
+    let library = match unsafe { libloading::Library::new(lib) } {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[dex] failed to load {}: {e}", lib.display());
+            std::process::exit(1);
+        }
+    };
+
+    type FnRunDir = unsafe extern "C" fn(
+        *mut c_void,
+        *const c_char,
+        *const c_char,
+        c_int,
+        *const *const c_char,
+        *mut c_int,
+        *mut *mut c_char,
+        *const c_char,
+    ) -> c_int;
+
+    unsafe {
+        let dir_c = CString::new(dir).expect("nul in dir");
+        let entry_c = CString::new(entry).expect("nul in entry");
+        let perms_c = CString::new(perms).unwrap_or_else(|_| CString::new("").unwrap());
+        let argv: Vec<CString> = args
+            .iter()
+            .map(|a| CString::new(a.as_str()).expect("nul byte in arg"))
+            .collect();
+        let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|c| c.as_ptr()).collect();
+        argv_ptrs.push(std::ptr::null());
+
+        let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            library.get(b"dex_runtime_create").expect("missing dex_runtime_create");
+        let destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = library
+            .get(b"dex_runtime_destroy")
+            .expect("missing dex_runtime_destroy");
+        let run_dir: libloading::Symbol<FnRunDir> = match library
+            .get(b"dex_runtime_run_module_dir")
+        {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[dex] this artifact is multi-file but runtime {} does not support it \
+                     (missing dex_runtime_run_module_dir); install a newer runtime",
+                    lib.display()
+                );
+                std::process::exit(4);
+            }
+        };
+
+        let rt = create();
+        let mut exit_code: c_int = 0;
+        let mut err_msg: *mut c_char = std::ptr::null_mut();
+        let rc = run_dir(
+            rt,
+            dir_c.as_ptr(),
+            entry_c.as_ptr(),
+            argv.len() as c_int,
+            argv_ptrs.as_ptr(),
+            &mut exit_code,
+            &mut err_msg,
+            perms_c.as_ptr(),
+        );
+
+        if !err_msg.is_null() {
+            eprintln!("[dex] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+        }
+        destroy(rt);
+
+        if rc != 0 {
+            eprintln!("[dex] runtime call failed (rc={rc})");
+            std::process::exit(rc);
+        }
+        exit_code
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
     let me = fs::read_link("/proc/self/exe").expect("read /proc/self/exe");
     let bytes = fs::read(&me).expect("read own executable");
 
-    let (payload, manifest_bytes) = match parse_trailer(&bytes) {
+    let trailer = match parse_trailer(&bytes) {
         Ok(x) => x,
         Err(e) => {
             eprintln!("[dex] {e}");
@@ -312,6 +475,9 @@ fn main() {
         }
     };
 
+    let manifest_bytes = match &trailer {
+        Trailer::Single { manifest, .. } | Trailer::Archive { manifest, .. } => *manifest,
+    };
     let m = parse_manifest(manifest_bytes);
     let dirs = runtime_dirs();
 
@@ -327,8 +493,32 @@ fn main() {
         std::process::exit(3);
     };
 
-    debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
-    debug_log!("[dex] module '{}' payload {} bytes", m.module, payload.len());
-    let code = load_and_run(&path, &m.module, payload, &args, &m.perms);
+    let code = match trailer {
+        Trailer::Single { source, manifest: _ } => {
+            debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
+            debug_log!("[dex] module '{}' payload {} bytes", m.module, source.len());
+            load_and_run(&path, &m.module, source, &args, &m.perms)
+        }
+        Trailer::Archive { files, manifest: _ } => {
+            debug_log!("[dex] resolved deno_runtime {v} at {}", path.display());
+            debug_log!("[dex] module '{}' archive {} files", m.module, files.len());
+            let root = match extract_tree(&files) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("[dex] failed to extract artifact tree: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let code = load_and_run_dir(
+                &path,
+                &root.to_string_lossy(),
+                &m.module,
+                &args,
+                &m.perms,
+            );
+            let _ = fs::remove_dir_all(&root);
+            code
+        }
+    };
     std::process::exit(code);
 }

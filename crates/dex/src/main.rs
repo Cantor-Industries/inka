@@ -6,6 +6,7 @@
 //   dex list [--home <dir>]
 
 mod build;
+mod embed;
 mod transpile;
 
 use std::env;
