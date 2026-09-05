@@ -1,0 +1,10 @@
+{
+  "package": "mime",
+  "version": "3.0.0",
+  "type": "bundle-esm",
+  "entry": "index.js",
+  "external": [],
+  "output": "esm.js",
+  "neutralizeEnv": [],
+  "note": "mime 3 is CommonJS (`module.exports = new Mime(...)`). @effect/platform-node/HttpPlatform imports the default (= the Mime instance). Rolldown bundles it to one ESM with a default export; post-pass hoists builtin requires."
+}

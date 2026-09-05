@@ -21,6 +21,12 @@
 // install`, for a release's store/ payload) only downloads -> verifies ->
 // replaces node_modules. Nothing installs or runs on the consumer machine.
 //
+// CommonJS packages that the engine cannot run are converted to engine-viable
+// pure ESM at snapshot time, inside the scratch node_modules BEFORE the tar:
+// repo-managed specs under `patches/<pkg>/<version>/patch.json` are applied by
+// the sibling `inka-patcher` binary ($INKA_PATCHER or next to the inka binary).
+// Discovery: --patches <dir> -> <dir of the seed manifest>/patches.
+//
 // The set of packages to seed comes from a user-editable seed-manifest.json
 // (NOT hard-coded): { "seed": [ { "name", "version", "registry" } ] }.
 // Discovery order: --seed-manifest -> $INKA_SEED_MANIFEST -> ./seed-manifest.json
@@ -33,7 +39,7 @@ use std::process::Command;
 use crate::{fetch_with_sidecar, hex, runtime_dir};
 use sha2::{Digest, Sha256};
 
-const PKG_HELP: &str = "usage:\n  inka pkg snapshot [--seed-manifest <file>] [--out <dir>]   build a whole-store snapshot tar (network)\n  inka pkg seed     [--from <dir-or-url>] [--store <dir>] [--insecure]   install a snapshot into the store\n  inka pkg list     [--store <dir>]";
+const PKG_HELP: &str = "usage:\n  inka pkg snapshot [--seed-manifest <file>] [--patches <dir>] [--out <dir>]   build a whole-store snapshot tar (network)\n  inka pkg seed     [--from <dir-or-url>] [--store <dir>] [--insecure]   install a snapshot into the store\n  inka pkg list     [--store <dir>]";
 
 const SNAPSHOT_TAR: &str = "store.tar.gz";
 const STORE_MANIFEST: &str = "seed-manifest.json";
@@ -57,10 +63,19 @@ struct SeedSpec {
 struct SeedRecord {
     #[serde(default)]
     seeded: Vec<Installed>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    patched: Vec<PatchRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tar: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct PatchRecord {
+    name: String,
+    version: String,
+    kind: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -192,6 +207,113 @@ fn write_record(path: &Path, record: &SeedRecord) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("cannot finalize {}: {e}", path.display()))
 }
 
+// ---- seed-time package patching (Option C) ---------------------------------
+
+fn patch_base(patches_flag: Option<&str>, seed_manifest: &Path) -> PathBuf {
+    if let Some(p) = patches_flag {
+        return PathBuf::from(p);
+    }
+    seed_manifest
+        .parent()
+        .map(|d| d.join("patches"))
+        .unwrap_or_else(|| PathBuf::from("patches"))
+}
+
+/// All `patches/<pkg>/<version>/patch.json` specs under a base dir.
+fn discover_patch_specs(base: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let Ok(versions) = fs::read_dir(base) else {
+        return out;
+    };
+    for pkg in versions.flatten() {
+        let pkg_dir = pkg.path();
+        if !pkg_dir.is_dir() {
+            continue;
+        }
+        let Ok(ver_dirs) = fs::read_dir(&pkg_dir) else { continue };
+        for v in ver_dirs.flatten() {
+            let spec = v.path().join("patch.json");
+            if spec.is_file() {
+                out.push(spec);
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+fn patcher_binary() -> Result<PathBuf, String> {
+    if let Ok(p) = std::env::var("INKA_PATCHER") {
+        if Path::new(&p).is_file() {
+            return Ok(PathBuf::from(p));
+        }
+        return Err(format!("INKA_PATCHER points to a missing file: {p}"));
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let p = dir.join("inka-patcher");
+            if p.is_file() {
+                return Ok(p);
+            }
+        }
+    }
+    Err(
+        "patch specs exist but no inka-patcher binary found; build it with the big-disk \
+         cargo home/target (cargo build --release -p inka-patcher) and keep it next to \
+         this inka binary (or set INKA_PATCHER)"
+            .into(),
+    )
+}
+
+/// Apply repo-managed patch specs to the scratch node_modules (in place, pre-tar).
+/// Returns the list of applied patches for the record. No specs -> no-op.
+fn apply_patches(
+    node_modules: &Path,
+    seed_manifest: &Path,
+    patches_flag: Option<&str>,
+) -> Result<Vec<PatchRecord>, String> {
+    let base = patch_base(patches_flag, seed_manifest);
+    let specs = discover_patch_specs(&base);
+    if specs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let bin = patcher_binary()?;
+    let mut record = Vec::new();
+    for spec in specs {
+        let name = spec
+            .parent()
+            .and_then(|v| v.parent())
+            .and_then(|p| p.file_name())
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let mut cmd = Command::new(&bin);
+        cmd.arg("apply")
+            .arg("--spec")
+            .arg(&spec)
+            .arg("--node-modules")
+            .arg(node_modules);
+        run_ok(&mut cmd, &format!("inka-patcher apply {}", spec.display()))?;
+        let raw = fs::read(&spec).map_err(|e| format!("re-read {}: {e}", spec.display()))?;
+        let v: serde_json::Value =
+            serde_json::from_slice(&raw).map_err(|e| format!("parse {}: {e}", spec.display()))?;
+        record.push(PatchRecord {
+            name,
+            version: v
+                .get("version")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            kind: v
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        });
+    }
+    Ok(record)
+}
+
 /// Atomically replace the store's node_modules with a freshly extracted tree.
 fn swap_node_modules(store: &Path, tar_bytes: &[u8]) -> Result<(), String> {
     fs::create_dir_all(store).map_err(|e| format!("cannot create {}: {e}", store.display()))?;
@@ -266,12 +388,16 @@ fn load_seed_manifest(path: &Path) -> Result<SeedManifest, String> {
 
 fn cmd_snapshot(args: &[String]) {
     let mut seed_manifest: Option<String> = None;
+    let mut patches: Option<String> = None;
     let mut out = PathBuf::from(".");
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--seed-manifest" => {
                 seed_manifest = Some(it.next().unwrap_or_else(|| fail("--seed-manifest needs a file")).clone())
+            }
+            "--patches" => {
+                patches = Some(it.next().unwrap_or_else(|| fail("--patches needs a dir")).clone())
             }
             "--out" => out = PathBuf::from(it.next().unwrap_or_else(|| fail("--out needs a dir"))),
             "--help" | "-h" => {
@@ -320,6 +446,21 @@ fn cmd_snapshot(args: &[String]) {
         fail("npm install did not produce a node_modules directory");
     }
 
+    // 1b) apply repo-managed CommonJS->ESM patches inside the scratch pool
+    //     (before the tar), so the snapshot ships engine-viable packages.
+    let patched =
+        apply_patches(&work.join("node_modules"), &manifest_path, patches.as_deref())
+            .unwrap_or_else(|e| {
+                let _ = fs::remove_dir_all(&work);
+                fail(&e);
+            });
+    for p in &patched {
+        println!(
+            "[inka] pkg snapshot: patched {}@{} ({})",
+            p.name, p.version, p.kind
+        );
+    }
+
     // 2) package the resolved pool as a whole-store snapshot.
     if !out.is_absolute() {
         out = std::env::current_dir().unwrap_or_default().join(out);
@@ -345,6 +486,7 @@ fn cmd_snapshot(args: &[String]) {
 
     let record = SeedRecord {
         seeded: scan_installed(&work),
+        patched,
         tar: Some(SNAPSHOT_TAR.to_string()),
         sha256: Some(sha.clone()),
     };
@@ -442,6 +584,7 @@ fn cmd_seed(args: &[String]) {
             (
                 SeedRecord {
                     seeded: Vec::new(),
+                    patched: Vec::new(),
                     tar: None,
                     sha256: None,
                 },
@@ -456,6 +599,7 @@ fn cmd_seed(args: &[String]) {
     let seeded = scan_installed(&store);
     let out_record = SeedRecord {
         seeded: seeded.clone(),
+        patched: record.patched.clone(),
         tar: record.tar,
         sha256: record.sha256,
     };
@@ -480,6 +624,7 @@ pub(crate) fn seed_release_store(source: &str, store: &Path) -> Result<Option<us
     let seeded = scan_installed(store);
     let out_record = SeedRecord {
         seeded: seeded.clone(),
+        patched: record.patched.clone(),
         tar: record.tar,
         sha256: record.sha256,
     };

@@ -1,0 +1,10 @@
+{
+  "package": "undici",
+  "version": "7.29.1",
+  "type": "bundle-esm",
+  "entry": "index.js",
+  "external": [],
+  "output": "esm.js",
+  "neutralizeEnv": [],
+  "note": "undici 7 is CommonJS (no exports map, main index.js). @effect/platform-node/Undici.js does `export { default } from \"undici\"` + `export *`. Rolldown bundles it to one ESM with a default export (= module.exports) and statically-detected named exports; the post-pass hoists builtin requires to imports. No optional natives."
+}

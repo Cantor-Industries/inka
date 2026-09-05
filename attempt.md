@@ -477,7 +477,103 @@ spike, install payload) + the new CJS/Effect cases. Update §11 risks + README
 limits. Commit per phase. Risks: still bounded, but this milestone is the
 largest single engine change; keep resolver decoupled so either path is replaceable.
 
-### P0 verdict (evidence added during probe work)
+## 13. Option C / P0 probe results — rolldown-as-crate + post-pass (ws ESM)
+
+Decision context (fresh-session, supersedes the §12 Option-B-as-default stance):
+Option C was chosen (ESM-only store + seed-time patches, clean CJS rejection). The
+bundler = **rolldown as a Rust crate**, procedural patches at snapshot time, node
+deferrals accepted until npm-install is later removed. P0 (probe, all in scratch,
+no repo changes) verdict:
+
+### Rolldown crate facts
+- `rolldown` 1.2.7 on crates.io (MIT, edition 2024, rustc fine). **Not** semver /
+  undocumented / Rust-only issues closed upstream (their own policy) → pin exact
+  `=1.2.7`, isolate the dep behind a dedicated crate, golden-test on bumps.
+- Rust API is a flat `BundlerOptions` (input/external/platform/format/... single
+  struct) + `BundlerBuilder` -> `Bundler`; `bundler.generate().await` ->
+  `BundleOutput { assets: Vec<Output> }` (`Output::content_as_bytes()`).
+  Required: `platform: Platform::Node`, `external` (natives), `format: Esm`.
+- Cold build ~12 min with big-disk cargo home/target (~36k+ lines across the
+  rolldown/oxc workspace). Do NOT link into the fast `crates/inka` default build.
+- **Deterministic**: two runs of the same bundle are byte-identical.
+
+### The critical finding: rolldown (and esbuild) keep `require()` for externals
+Rolldown ESM output of a CJS package externalizes node builtins + optional natives
+as a runtime `__require = createRequire(import.meta.url)`. The engine **panics**
+on any createRequire (`Rc<dyn deno_node::NodeRequireLoader>` missing in
+GothamState), even for builtins — same class as the msgpackr panic. esbuild 0.27.2
+output is worse: its ESM `__require` throws "Dynamic require is not supported"
+**under real Node** (verified) — rolldown is the correct bundler here.
+
+### Post-pass that makes the bundle engine-viable (validated end-to-end)
+Probe `postprocess.py` on the rolldown bundle of ws@8.21.3 `wrapper.mjs`:
+1. hoist every `__require("<node builtin>")` into a **default** ESM import
+   (`import __rq_x from "node:x"` — default == module.exports, mirrors `require`)
+   and rewrite call sites (namespace `import *` broke `class extends EventEmitter`);
+2. delete the `import { createRequire } ...` line and redefine `__require` to
+   **throw a catchable JS Error** → ws's own try/catch turns the absent optional
+   natives (`bufferutil`, `utf-8-validate`) into the pure-JS fallback;
+3. neutralize the env knobs read at import time (`process.env.WS_NO_BUFFER_UTIL` /
+   `WS_NO_UTF_8_VALIDATE` → `"1"`, which in ws *skips* the native branch) so the
+   artifact needs no `allow-env`.
+
+Result: single self-contained ESM (~117 KB, 116,604 B) that under real Node v22
+exposes `WebSocket`/`WebSocketServer`/`PerMessageDeflate`/`default` + passes a
+127.0.0.1 echo smoke, AND runs in the engine offline — live WebSocketServer +
+client echo, `allow-net=127.0.0.1` only, no env, no createRequire, no panic.
+Named exports preserved through the whole chain. Resolver's bare-builtin table
+already covers every builtin ws touches.
+
+### P1 outcome — patch layer landed (repo changes)
+Implemented and verified end-to-end (scratch snapshot -> reseed -> offline runs):
+
+- `crates/inka-patcher` — a **nested standalone workspace** (NOT a root member) that
+  is the only consumer of the rolldown/oxc stack, because it pins tokio ^1.52 (via
+  rolldown) while inka-runtime pins tokio =1.47.1: same workspace cannot hold both.
+  Build it from inside its dir with the big-disk cargo home/target; `inka pkg
+  snapshot` invokes it as a sibling binary (`$INKA_PATCHER` or next to the inka
+  binary) so the fast default build never links rolldown. CLI:
+  `inka-patcher apply --spec <patch.json> --node-modules <dir>`.
+- Specs live under `patches/<pkg>/<version>/patch.json` (discovered by snapshot at
+  `<dir of seed manifest>/patches`, or `--patches <dir>`), two kinds:
+  - `bundle-esm` (entry/external/output/neutralizeEnv): rolldown bundle + post-pass.
+    Shipped specs: `ws@8.21.3` (entry wrapper.mjs, natives external), `undici@7.29.1`
+    (entry index.js), `mime@3.0.0` (entry index.js).
+  - `file-patch` (`deleteFromMarker`): `msgpackr@1.12.1` truncates node-index.js at
+    the `setExtractor` import, dropping the env-read/createRequire native block.
+- Snapshot applies patches in the scratch node_modules BEFORE the tar and records
+  them (`patched: [{name,version,kind}]`) in the seed-manifest record; seed/install
+  carry the note through. Version guard: patcher refuses a spec whose package@version
+  does not match the installed tree (npm resolved a different version -> fail loudly).
+- Post-pass grew from the P0 version: hoists node builtin requires to default ESM
+  imports in BOTH forms rolldown emits (`"crypto"` and `"node:assert"`), including
+  subpaths (`fs/promises`, `util/types`); unknown lazies (`node:sqlite`) are left as
+  catchable `__require` throws (never hoisted — an unused ESM import would hard-fail);
+  the `__require` shim is now optional (bundles with no external requires, e.g. mime,
+  need no shim). 6 hermetic unit tests in the crate.
+- Verified offline against a freshly patched store: bare `effect`, `node:vm`, the
+  multi-file `--transpile` zod/jsr-assert app, `@effect/platform` root + `MsgPack`
+  (patched msgpackr round-trip, named + namespace imports), `trio.js` (effect +
+  @effect/platform + @effect/platform-node NodeContext — pulls the ws/undici/mime
+  leaves through their ESM import graph), and a bare `import "ws"` store app running a
+  live 127.0.0.1 WebSocket echo (proves the exports rewrite + resolver import
+  condition). No panics, no allow-env on the artifact.
+- Remaining Option-C work: P2 (resolver CJS classification + engine clean rejection),
+  P3 (full @effect/platform-node ladder: NodeRuntime.runMain HTTP/WebSocket smoke +
+  regressions), P4 (README/plan.md docs + commits). P1 scratch: snaprel2/p1store under
+  /tmp/opencode/inkam0.
+
+
+`crates/inka-patcher` (new workspace member, the only rolldown dep): bundle a
+spec'd package entry to ESM + apply the post-pass above + rewrite `package.json`
+`exports` to the ESM build. Env-knob neutralization is per-package (spec-driven),
+not generic. msgpackr stays a file-replacement (route `node.import` to pure-ESM
+`index.js`) rather than a bundle. P0 artifacts/probe live under
+`/tmp/opencode/inkam0/rdprobe` (+ `p0wsapp` = engine smoke).
+
+---
+
+### P0 verdict (evidence added during probe work) — §12 Option B
 Probing Option B further showed the full cost. deno's require ops need not just a
 NodeRequireLoader but the whole resolver stack in isolate state:
 `NodeResolverRc`/`PackageJsonResolverRc` (node_resolver) + a CJS tracker

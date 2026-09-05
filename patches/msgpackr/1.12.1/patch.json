@@ -1,0 +1,8 @@
+{
+  "package": "msgpackr",
+  "version": "1.12.1",
+  "type": "file-patch",
+  "file": "node-index.js",
+  "deleteFromMarker": "import { setExtractor } from './unpack.js'",
+  "note": "node-index.js (exports \".\" node.import target) is pure ESM except a tail block that reads process.env.MSGPACKR_NATIVE_ACCELERATION_DISABLED and createRequire()s the optional msgpackr-extract native. Truncating from the setExtractor import removes the block; setExtractor is only referenced there. Result: no env read, no createRequire -> no allow-env, no engine panic."
+}
