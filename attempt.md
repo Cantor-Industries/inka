@@ -407,3 +407,72 @@ node_resolver, pkg_json_resolver, sys: RealSys }` backed by our shared store
 (deno's node/CJS loader = Option B). That is a sizable, separate milestone with
 its own design (see §11); keep the resolver as the policy seam for whatever is
 adopted.
+
+## 12. Node services (Option B) milestone plan — deno's own node/CJS loader
+
+Goal: unblock `@effect/platform`/`@effect/platform-node` (env-reading + CommonJS
+packages) by giving the engine real deno node services backed by the shared
+store, instead of a bespoke CJS loader (probes showed deno's `require()` ops are
+compiled into the snapshot and cannot be bypassed).
+
+### Architecture stance
+- Keep `crates/inka-resolver` as the *policy seam*: classification (ESM/CJS),
+  store/node_modules resolution, jsr mapping, builtins. The engine stays thin.
+- Add deno node services to the *engine* for CJS/`require()` only; pure-ESM
+  store modules continue to load through `PkgLoader`/resolver.
+- Env: deny-by-default remains; env-reading packages need `allow-env` (done).
+  The allow-env panic chain is being walked one resource at a time
+  (RealSys done via `inka_rt_state`; next is `NodeRequireLoader`).
+
+### Components
+1. **Deps (engine):** add `deno_resolver = { version = "=0.89.0", features =
+   ["sync"] }` (same pin as deno_runtime). Maybe `deno_node` is reachable via
+   deno_runtime re-exports — verify; add direct `deno_node = "=0.196.0"` if not.
+2. **Store-backed node resolvers** (replace `NoNpm`/`NoNpmFolder` stubs):
+   - `InNpmPackageChecker` → `in_npm_package` = path under store node_modules.
+   - `NpmPackageFolderResolver` → map bare name to
+     `<store>/node_modules/<name>` (package root), incl. `types_package_folder`.
+   - `NodeResolverRc` + `PackageJsonResolverRc<RealSys>` from deno_resolver built
+     over those; node modules dir = the store root.
+3. **`NodeRequireLoader` impl** (trait in deno_node): `ensure_read_permission`
+   (auto-allow reads confined to artifact tree + store, matching our module-read
+   model), `load_text_file_lossy` (read file), `is_maybe_cjs(_from_require)` via
+   package.json type / extensions (resolver classification), node-module-paths
+   walk up the store.
+4. **Worker wiring** (`build_services`): construct `NodeExtInitServices {
+   node_require_loader, node_resolver, pkg_json_resolver, sys: RealSys }` from
+   the store path and pass `node_services = Some(..)` into `WorkerServiceOptions`;
+   keep `module_loader = PkgLoader` (ESM) and `NoNpm`/folder stubs removed.
+   `npm_process_state_provider` stays None unless a probe needs it.
+
+### Phases (probe-first)
+- **P0 probes:**
+  (a) CJS-only `require()` chain: seed a tiny store package whose entry is CJS
+  and `require()`s another CJS file + a `node:` builtin; run via a small ESM app
+  that does nothing but trigger it through a `node:`/`require` path — validates
+  the resource set + NodeRequireLoader without ESM interop.
+  (b) ESM-import-of-CJS: determine how Deno intends an ESM `import "ws"` (whose
+  `wrapper.mjs` default-imports a CJS file) to be served, and whether our
+  `PkgLoader` must emit a CJS wrapper module (deno "maybe_cjs" handling) — this
+  decides whether P2 reuses deno's machinery or needs our facade.
+  (c) `msgpackr` env-read + require chain through `@effect/platform` after P1.
+- **P1:** implement components 1–4; require() (from CJS/`require()`) works.
+  One heavy engine build; resolver stays unchanged unless classification moves.
+- **P2:** ESM↔CJS interop at the loader for store CJS files (decision from P0b).
+- **P3:** Effect verification + parity harness (ws, undici, msgpackr-extract,
+  circular-require, dual-package hazard) + full regression matrix.
+
+### Open design points (resolve in P0)
+- Dual module-identity policy when a package is reached via both ESM and CJS.
+- Whether require-reads auto-allow store reads (recommended) vs need read perm.
+- Whether deno's ESM loader needs to take over store modules that are CJS
+  (loader-level maybe_cjs) — the crux of P2.
+- If P2 can't cleanly reuse deno ops for ESM-import-of-CJS, fall back to a
+  resolver+engine CJS wrapper emitting `default` + static named exports backed by
+  a small CJS registry — but keep it behind the same resolver classification.
+
+### Verify / regressions / docs
+Same matrix as prior milestones (bare, builtins, node:vm, --transpile, perms,
+spike, install payload) + the new CJS/Effect cases. Update §11 risks + README
+limits. Commit per phase. Risks: still bounded, but this milestone is the
+largest single engine change; keep resolver decoupled so either path is replaceable.
