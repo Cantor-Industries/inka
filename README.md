@@ -88,6 +88,7 @@ The mental flip versus what you're used to: *the file you distribute is not the 
 | `crates/inka-launcher` | Thin native host: parses the appended trailer, resolves a tuple, `dlopen`s it, runs your module |
 | `crates/inka-runtime-stub` | Tiny fake `.so` exporting the same C ABI — used to develop/test the launcher cheaply |
 | `crates/inka-runtime` | Real runtime: `deno_runtime` behind the frozen C ABI, with a V8 startup snapshot embedded at build time |
+| `crates/inka-resolver` | Import-resolution/policy engine as its own cdylib (`libinka_resolver-<v>.so`), pure Rust + serde with **no** deno/V8 dependency — loaded by the runtime via a stable C ABI, so resolver changes rebuild in seconds without touching the engine |
 | `crates/inka` | Companion CLI: `inka build` (pack launcher + source + manifest into an artifact), `inka install <version>` (checksum-gated runtime distribution), `inka list`, and `inka pkg` (tar/seed/list the vendored-package store) |
 
 ## The frozen C ABI (identical in stub and real runtime)

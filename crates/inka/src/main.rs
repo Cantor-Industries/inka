@@ -20,6 +20,11 @@ use sha2::{Digest, Sha256};
 
 const FILENAME_PREFIX: &str = "libinka_runtime-";
 const FILENAME_SUFFIX: &str = ".so";
+const RESOLVER_PREFIX: &str = "libinka_resolver-";
+const RESOLVER_SUFFIX: &str = ".so";
+/// Resolver version used when fetching from a URL base that has no directory
+/// listing (and $INKA_RESOLVER_VERSION is unset).
+const DEFAULT_RESOLVER_VERSION: &str = "1.0.0";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Version(u64, u64, u64);
@@ -192,6 +197,70 @@ fn cmd_install(args: &[String]) {
             std::process::exit(1);
         }
     }
+
+    install_resolver_payload(&source, &target_dir, insecure);
+}
+
+fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
+    // Pick a resolver from the release: newest libinka_resolver-*.so in a local
+    // dir, else a URL fetch of the current resolver version ($INKA_RESOLVER_VERSION
+    // overrides; DEFAULT_RESOLVER_VERSION fallback).
+    let name = if Path::new(base).is_dir() {
+        let mut best: Option<(Version, String)> = None;
+        if let Ok(rd) = fs::read_dir(base) {
+            for ent in rd.flatten() {
+                let n = ent.file_name().to_string_lossy().into_owned();
+                let Some(stripped) = n.strip_prefix(RESOLVER_PREFIX) else { continue };
+                let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) else { continue };
+                if let Some(v) = parse_version(vstr) {
+                    if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
+                        best = Some((v, n));
+                    }
+                }
+            }
+        }
+        best.map(|(_, n)| n)
+    } else {
+        let ver = env::var("INKA_RESOLVER_VERSION")
+            .unwrap_or_else(|_| DEFAULT_RESOLVER_VERSION.to_string());
+        Some(format!("{RESOLVER_PREFIX}{ver}{RESOLVER_SUFFIX}"))
+    };
+    let Some(name) = name else {
+        return; // release ships no resolver
+    };
+
+    let (bytes, sidecar_sha) = match fetch_with_sidecar(base, &name) {
+        Ok(x) => x,
+        Err(_) => return, // not present on this source
+    };
+    let expected = sidecar_sha.and_then(|s| {
+        s.split_whitespace()
+            .next()
+            .map(|x| x.trim().to_ascii_lowercase())
+    });
+    let actual = hex(&Sha256::digest(&bytes));
+    match (&expected, insecure) {
+        (Some(exp), _) if exp != &actual => {
+            eprintln!("error: checksum mismatch for {name}");
+            eprintln!("  expected {exp}");
+            eprintln!("  actual   {actual}");
+            std::process::exit(1);
+        }
+        (Some(_), _) => {}
+        (None, false) => {
+            eprintln!("error: no checksum available for {name}");
+            eprintln!("  publish a {name}.sha256 sidecar, or pass --insecure to trust it");
+            std::process::exit(1);
+        }
+        (None, true) => {}
+    }
+    let target = target_dir.join(&name);
+    install_atomically(&target, &bytes);
+    println!(
+        "[inka] installed resolver {} ({})",
+        target.display(),
+        bytes.len()
+    );
 }
 
 fn install_atomically(target: &Path, bytes: &[u8]) {
@@ -268,25 +337,34 @@ fn cmd_list(args: &[String]) {
         return;
     }
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
+    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     for ent in fs::read_dir(&dir).unwrap().flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
-        let Some(stripped) = name.strip_prefix(FILENAME_PREFIX) else {
-            continue;
-        };
-        let Some(vstr) = stripped.strip_suffix(FILENAME_SUFFIX) else {
-            continue;
-        };
-        if let Some(v) = parse_version(vstr) {
-            found.push((v, ent.path()));
+        if let Some(stripped) = name.strip_prefix(FILENAME_PREFIX) {
+            if let Some(vstr) = stripped.strip_suffix(FILENAME_SUFFIX) {
+                if let Some(v) = parse_version(vstr) {
+                    found.push((v, ent.path()));
+                }
+            }
+        } else if let Some(stripped) = name.strip_prefix(RESOLVER_PREFIX) {
+            if let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) {
+                if let Some(v) = parse_version(vstr) {
+                    resolvers.push((v, ent.path()));
+                }
+            }
         }
     }
     found.sort();
-    if found.is_empty() {
+    resolvers.sort();
+    if found.is_empty() && resolvers.is_empty() {
         println!("(no runtimes installed in {})", dir.display());
         return;
     }
     for (v, p) in found {
         println!("inka_runtime {v:<10} {}", p.display());
+    }
+    for (v, p) in resolvers {
+        println!("inka_resolver {v:<10} {}", p.display());
     }
 }
 

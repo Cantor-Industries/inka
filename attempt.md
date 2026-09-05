@@ -301,3 +301,19 @@ root straight from `store/node_modules/<identity>` and checks pinned imports
 against the hoisted copy's version. Verified: `effect` core runs offline; the
 Effect `platform`/`platform-node` tiers still need engine Node compat (CJS `ws`
 interop, `process.env` reads at import) that isn't implemented.
+
+### Engine/resolver split (fast iteration for import policy)
+`crates/inka-runtime` (heavy: V8 + snapshot + deno_runtime) now contains no
+import-resolution logic. All of it moved to a new pure-Rust cdylib
+`crates/inka-resolver` (`libinka_resolver-<v>.so`, no deno/V8 dep) exposing a
+stable C ABI: `inka_resolver_abi()==1`, `inka_resolver_resolve(store, referrer,
+specifier)` -> `{UseDefault, File, Builtin(node:), Error}`, `inka_resolver_free`.
+The engine dlopens it once per process from `$INKA_RESOLVER` (launcher defaults
+it to the newest installed `libinka_resolver-*.so`); on a miss it degrades to
+relative/file/node:/data: + offline rejection only. Resolver changes rebuild in
+~1s with no engine rebuild (verified: message change took effect immediately).
+Versioning: the resolver is its own tuple installed alongside the runtime
+(`inka install` ships `libinka_resolver-1.0.0.so`; `inka list` shows both).
+Known correctness catch: serde_json maps sort keys, so `exports` conditions must
+be chosen by a fixed import>node>default priority, never by file order (this
+bit us when `effect` resolved to its CJS `default` build).

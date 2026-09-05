@@ -27,8 +27,6 @@ use deno_runtime::{FeatureChecker, WorkerLogLevel};
 use node_resolver::errors;
 use node_resolver::{InNpmPackageChecker, NpmPackageFolderResolver, UrlOrPathRef};
 use deno_error::JsErrorBox;
-use deno_semver::{Version, VersionReq};
-use serde_json::Value;
 use sys_traits::impls::RealSys;
 
 const DENO_RUNTIME_VERSION: &str = "0.266.0";
@@ -38,110 +36,6 @@ static STARTUP_SNAPSHOT: &[u8] =
 
 mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
-}
-
-/// Allow-listed condition keys for package.json `exports` target selection.
-/// `types` and `require` (CommonJS) are deliberately skipped; only ESM-capable
-/// targets are used.
-const EXPORT_CONDITIONS: [&str; 3] = ["import", "node", "default"];
-
-/// Bare specifiers that map to Node built-ins, so `import … from "vm"`
-/// behaves like `node:vm` (Node semantics: core wins over node_modules).
-fn node_builtin_spec(spec: &str) -> Option<String> {
-    const SIMPLE: &[&str] = &[
-        "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
-        "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
-        "events", "fs", "http", "http2", "https", "inspector", "module", "net",
-        "os", "path", "perf_hooks", "process", "punycode", "querystring",
-        "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls",
-        "trace_events", "tty", "url", "util", "v8", "vm", "wasi",
-        "worker_threads", "zlib",
-    ];
-    const SUB: &[(&str, &str)] = &[
-        ("assert/strict", "node:assert/strict"),
-        ("dns/promises", "node:dns/promises"),
-        ("fs/promises", "node:fs/promises"),
-        ("path/posix", "node:path/posix"),
-        ("path/win32", "node:path/win32"),
-        ("readline/promises", "node:readline/promises"),
-        ("stream/consumers", "node:stream/consumers"),
-        ("stream/promises", "node:stream/promises"),
-        ("stream/web", "node:stream/web"),
-        ("timers/promises", "node:timers/promises"),
-        ("util/types", "node:util/types"),
-    ];
-    for (key, node) in SUB {
-        if *key == spec {
-            return Some((*node).to_string());
-        }
-    }
-    if SIMPLE.contains(&spec) {
-        return Some(format!("node:{spec}"));
-    }
-    None
-}
-
-/// One parsed `npm:`/`jsr:` specifier, normalized to its npm identity.
-struct PkgSpec {
-    /// npm package name, e.g. `zod` or `@jsr/std__assert`.
-    name: String,
-    /// Optional version requirement text as written (no leading `@`).
-    req: Option<String>,
-    /// Optional subpath (no leading `/`).
-    sub: Option<String>,
-}
-
-fn parse_pkg_specifier(spec: &str) -> Result<PkgSpec, String> {
-    let body = if let Some(rest) = spec.strip_prefix("npm:") {
-        rest.to_string()
-    } else if let Some(rest) = spec.strip_prefix("jsr:") {
-        // jsr:@scope/name -> npm @jsr/scope__name (jsr's npm-compatibility mirror).
-        let rest = rest.trim();
-        let (scope, after) = rest.split_once('/').ok_or_else(|| {
-            format!("invalid jsr specifier '{spec}' (expected jsr:@scope/name[...])")
-        })?;
-        let scope = scope.strip_prefix('@').unwrap_or(scope);
-        let (name, tail) = split_name_suffix(after);
-        format!("@jsr/{scope}__{name}{tail}")
-    } else {
-        return Err(format!("not a package specifier: '{spec}'"));
-    };
-    parse_npm_body(&body)
-}
-
-/// Splits `name` from the rest of a package body (`name[@req][/sub]`).
-fn split_name_suffix(after: &str) -> (&str, &str) {
-    match after.find(['@', '/']) {
-        Some(i) => (&after[..i], &after[i..]),
-        None => (after, ""),
-    }
-}
-
-fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
-    let body = body.trim();
-    let (name, rest) = if body.starts_with('@') {
-        let (scope, after) = body
-            .split_once('/')
-            .ok_or_else(|| format!("malformed scoped package '{body}'"))?;
-        let (nm, rest) = split_name_suffix(after);
-        (format!("{scope}/{nm}"), rest)
-    } else {
-        let (nm, rest) = split_name_suffix(body);
-        (nm.to_string(), rest)
-    };
-    let mut req = None;
-    let mut sub = None;
-    if let Some(tail) = rest.strip_prefix('@') {
-        let (r, s) = match tail.split_once('/') {
-            Some((r, s)) => (r, Some(s.to_string())),
-            None => (tail, None),
-        };
-        req = Some(r.to_string());
-        sub = s;
-    } else if let Some(s) = rest.strip_prefix('/') {
-        sub = Some(s.to_string());
-    }
-    Ok(PkgSpec { name, req, sub })
 }
 
 /// Store-backed module loader. Serves:
@@ -173,289 +67,165 @@ fn has_scheme(spec: &str) -> bool {
     spec.split_once(':').is_some()
 }
 
-fn referrer_file_path(referrer: &str) -> Option<PathBuf> {
-    Url::parse(referrer).ok().and_then(|u| u.to_file_path().ok())
+fn resolver_path_env() -> Option<PathBuf> {
+    std::env::var_os("INKA_RESOLVER").map(PathBuf::from)
 }
 
-fn version_satisfies(v: &Version, req: &str) -> bool {
-    let req = req.trim();
-    if let Ok(exact) = Version::parse_standard(req) {
-        return v == &exact;
-    }
-    match VersionReq::parse_from_npm(req) {
-        Ok(vr) => vr.tag().is_none() && vr.matches(v),
-        Err(_) => false,
-    }
+type FnResolve = unsafe extern "C" fn(
+    *const c_char,
+    *const c_char,
+    *const c_char,
+    *mut *mut c_char,
+    *mut *mut c_char,
+) -> c_int;
+type FnFree = unsafe extern "C" fn(*mut c_char);
+type FnAbi = unsafe extern "C" fn() -> c_int;
+
+const RESOLVER_ABI: c_int = 1;
+const KIND_USE_DEFAULT: c_int = 0;
+const KIND_FILE: c_int = 1;
+const KIND_BUILTIN: c_int = 2;
+const KIND_ERROR: c_int = 3;
+
+struct ResolverApi {
+    resolve: FnResolve,
+    free: FnFree,
 }
 
-/// Render an npm identity for user-facing messages: jsr's mirror identity
-/// `@jsr/scope__name` displays as `jsr:@scope/name`.
-fn npm_display(npm_name: &str) -> String {
-    if let Some(rest) = npm_name.strip_prefix("@jsr/") {
-        if let Some((scope, pkg)) = rest.split_once("__") {
-            return format!("jsr:@{scope}/{pkg}");
+/// Loaded once per process from `$INKA_RESOLVER` (set by the launcher). The
+/// library is leaked after copying the function pointers, so only the
+/// fn-pointer values live on.
+static RESOLVER: OnceLock<Result<&'static ResolverApi, &'static str>> = OnceLock::new();
+
+fn resolver_api() -> Result<&'static ResolverApi, &'static str> {
+    RESOLVER.get_or_init(init_resolver).clone()
+}
+
+fn init_resolver() -> Result<&'static ResolverApi, &'static str> {
+    let path = resolver_path_env().ok_or(
+        "no inka resolver configured (INKA_RESOLVER is unset); install it with `inka install`",
+    )?;
+    // Safety: we dlopen a path supplied by the launcher (or INKA_RESOLVER) and
+    // read the exported resolver symbols below.
+    let lib = unsafe { libloading::Library::new(&path) }
+        .map_err(|_| "failed to load the inka resolver library (libinka_resolver)")?;
+    unsafe {
+        let abi: libloading::Symbol<FnAbi> = lib
+            .get(b"inka_resolver_abi")
+            .map_err(|_| "missing inka_resolver_abi in resolver library")?;
+        if abi() != RESOLVER_ABI {
+            return Err("inka resolver ABI mismatch (expected 1); run `inka install` to update");
         }
     }
-    npm_name.to_string()
-}
-
-/// The hoisted package root for an npm identity inside the store pool.
-fn store_package_dir(store: &Path, npm_name: &str) -> PathBuf {
-    store.join("node_modules").join(npm_name)
-}
-
-/// Reads the installed version of a package root from its package.json.
-fn installed_version(pkg_root: &Path) -> Option<Version> {
-    let raw = std::fs::read(pkg_root.join("package.json")).ok()?;
-    let v: Value = serde_json::from_slice(&raw).ok()?;
-    let text = v.get("version").and_then(Value::as_str)?;
-    Version::parse_standard(text).ok()
-}
-
-/// Resolves a package by npm identity against the single hoisted store pool.
-/// An explicit version requirement must match the hoisted copy (the one a bare
-/// import reaches); nested duplicates are only reachable through their own
-/// dependents, which Node semantics resolve automatically.
-fn resolve_store_package(
-    store: &Path,
-    npm_name: &str,
-    req: Option<&str>,
-    sub: Option<&str>,
-) -> Result<PathBuf, String> {
-    let pkg_root = store_package_dir(store, npm_name);
-    if !pkg_root.is_dir() {
-        return Err(format!(
-            "package '{}' is not in the package store; run `inka pkg seed` to install it",
-            npm_display(npm_name)
-        ));
-    }
-    if let Some(installed) = installed_version(&pkg_root) {
-        if let Some(r) = req.map(str::trim).filter(|s| !s.is_empty()) {
-            if !version_satisfies(&installed, r) {
-                return Err(format!(
-                    "package '{}' is installed at {installed}, which does not satisfy '{r}'; \
-                     run `inka pkg seed` to install the requested version",
-                    npm_display(npm_name)
-                ));
-            }
-        }
-    }
-    resolve_pkg_file(&pkg_root, sub)
-}
-
-/// Resolves an `npm:`/`jsr:` specifier against the store to a concrete file.
-fn store_lookup(store: &Path, spec: &str) -> Result<PathBuf, String> {
-    let ps = parse_pkg_specifier(spec)?;
-    resolve_store_package(store, &ps.name, ps.req.as_deref(), ps.sub.as_deref())
-}
-
-/// Store identities to try for a bare specifier: the npm identity first, then
-/// — for a scoped `@scope/name` — jsr's npm-mirror identity (`@jsr/scope__name`).
-fn bare_store_identities(name: &str) -> Vec<String> {
-    let mut out = vec![name.to_string()];
-    if let Some(body) = name.strip_prefix('@') {
-        if let Some((scope, pkg)) = body.split_once('/') {
-            if scope != "jsr" {
-                out.push(format!("@jsr/{scope}__{pkg}"));
-            }
-        }
-    }
-    out
-}
-
-/// Resolves a bare specifier from artifact/user code against the store pool.
-fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
-    let (name, sub) = split_bare(spec);
-    for ident in bare_store_identities(&name) {
-        if store_package_dir(store, &ident).is_dir() {
-            return resolve_store_package(store, &ident, None, sub.as_deref());
-        }
-    }
-    Err(format!(
-        "package '{name}' is not in the package store; run `inka pkg seed` to install it"
-    ))
-}
-
-/// Picks the importable JS target out of a `package.json` `exports` value for
-/// the requested subpath. Returns a package-relative path (may start with `./`).
-fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
-    fn pick_conditions(v: &Value) -> Result<String, String> {
-        match v {
-            Value::String(s) => Ok(s.clone()),
-            Value::Array(items) => {
-                for item in items {
-                    if let Ok(s) = pick_conditions(item) {
-                        return Ok(s);
-                    }
-                }
-                Err("no usable export target".to_string())
-            }
-            Value::Object(map) => {
-                for (k, val) in map {
-                    if EXPORT_CONDITIONS.contains(&k.as_str()) {
-                        return pick_conditions(val);
-                    }
-                }
-                Err(
-                    "package has no import/default export target \
-                     (CommonJS-only packages are not supported)"
-                        .to_string(),
-                )
-            }
-            _ => Err("malformed exports target".to_string()),
-        }
-    }
-
-    let sub = subpath.trim_start_matches("./");
-    let is_map = match exports {
-        Value::Object(map) => map.keys().any(|k| k == "." || k.starts_with("./")),
-        _ => false,
+    let resolve: FnResolve = unsafe {
+        let s: libloading::Symbol<FnResolve> = lib
+            .get(b"inka_resolver_resolve")
+            .map_err(|_| "missing inka_resolver_resolve in resolver library")?;
+        *s
     };
-    let target = if is_map {
-        let map = exports.as_object().unwrap();
-        if sub.is_empty() {
-            match map.get(".") {
-                Some(v) => pick_conditions(v)?,
-                None => return Err("package has no '.' export".to_string()),
+    let free: FnFree = unsafe {
+        let s: libloading::Symbol<FnFree> = lib
+            .get(b"inka_resolver_free")
+            .map_err(|_| "missing inka_resolver_free in resolver library")?;
+        *s
+    };
+    // Keep the underlying library alive for the process lifetime.
+    std::mem::forget(lib);
+    Ok(Box::leak(Box::new(ResolverApi { resolve, free })))
+}
+
+fn cstring(s: &str) -> CString {
+    CString::new(s).unwrap_or_else(|_| CString::new("").expect("empty has no nul"))
+}
+
+/// Ask the resolver library how to resolve `specifier`, then translate its
+/// decision into a `ModuleResolveResponse`.
+fn resolve_with_resolver(
+    api: &ResolverApi,
+    store: Option<&Path>,
+    specifier: &str,
+    referrer: &str,
+) -> ModuleResolveResponse {
+    let store_s = store
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let store_c = cstring(&store_s);
+    let referrer_c = cstring(referrer);
+    let spec_c = cstring(specifier);
+    let mut a: *mut c_char = std::ptr::null_mut();
+    let mut b: *mut c_char = std::ptr::null_mut();
+    // Safety: fn pointers come from a compatible, process-lifetime library.
+    let kind = unsafe {
+        (api.resolve)(
+            store_c.as_ptr(),
+            referrer_c.as_ptr(),
+            spec_c.as_ptr(),
+            &mut a,
+            &mut b,
+        )
+    };
+    let a_str = if a.is_null() {
+        String::new()
+    } else {
+        // Safety: `a` is owned by the resolver; read before freeing it below.
+        unsafe { CStr::from_ptr(a).to_string_lossy().into_owned() }
+    };
+    unsafe {
+        if !a.is_null() {
+            (api.free)(a);
+        }
+        if !b.is_null() {
+            (api.free)(b);
+        }
+    }
+    match kind {
+        KIND_USE_DEFAULT => deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err),
+        KIND_FILE => file_url_response(&PathBuf::from(a_str)),
+        KIND_BUILTIN => {
+            if a_str.is_empty() {
+                Err(JsErrorBox::generic(
+                    "resolver returned an empty built-in specifier",
+                ))
+            } else {
+                deno_core::resolve_import(&a_str, referrer).map_err(JsErrorBox::from_err)
             }
-        } else if let Some(v) = map.get(format!("./{sub}").as_str()) {
-            pick_conditions(v)?
+        }
+        KIND_ERROR => Err(JsErrorBox::generic(if a_str.is_empty() {
+            format!("cannot resolve module '{specifier}'")
         } else {
-            // support pattern keys like "./locales/*"
-            let mut hit = None;
-            for (k, v) in map {
-                if let Some(star) = k.strip_suffix('*') {
-                    let prefix = star.strip_prefix("./").unwrap_or(star);
-                    if let Some(rem) = sub.strip_prefix(prefix) {
-                        let t = pick_conditions(v)?;
-                        hit = Some(t.replace('*', rem));
-                        break;
-                    }
-                }
-            }
-            match hit {
-                Some(t) => t,
-                None => return Err(format!("no exported subpath './{sub}' for this package")),
-            }
-        }
-    } else if sub.is_empty() {
-        // exports applies to the package root only.
-        pick_conditions(exports)?
-    } else {
-        return Err(format!("no exported subpath './{sub}' for this package"));
-    };
-    Ok(target)
-}
-
-/// Legacy (no `exports`) target resolution: `main` or file/index lookup.
-fn legacy_package_target(pkg_root: &Path, pkg: &Value, sub: &str) -> Result<String, String> {
-    let resolve_loose = |rel: &str| -> Option<String> {
-        let rel = rel.trim_start_matches("./");
-        let candidate = pkg_root.join(rel);
-        if candidate.is_file() {
-            return Some(rel.to_string());
-        }
-        const EXTS: [&str; 3] = ["js", "mjs", "json"];
-        for ext in EXTS {
-            let cand = PathBuf::from(format!("{rel}.{ext}"));
-            if pkg_root.join(&cand).is_file() {
-                return Some(format!("{rel}.{ext}"));
-            }
-        }
-        if candidate.is_dir() {
-            for idx in ["index.js", "index.mjs", "index.json"] {
-                if candidate.join(idx).is_file() {
-                    return Some(format!("{rel}/{idx}"));
-                }
-            }
-        }
-        None
-    };
-    if sub.is_empty() {
-        if let Some(main) = pkg.get("main").and_then(Value::as_str) {
-            if let Some(t) = resolve_loose(main) {
-                return Ok(t);
-            }
-        }
-        return resolve_loose("index.js").ok_or_else(|| "package has no main entry".to_string());
+            a_str
+        })),
+        other => Err(JsErrorBox::generic(format!(
+            "resolver returned an unknown decision ({other}) for '{specifier}'"
+        ))),
     }
-    resolve_loose(sub).ok_or_else(|| format!("cannot resolve file '{sub}' in package"))
 }
 
-/// Resolves a subpath ("" = package root) inside a package directory to a
-/// concrete on-disk file, honoring `exports` with a legacy fallback.
-fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, String> {
-    let pkg_json_path = pkg_root.join("package.json");
-    let raw = std::fs::read_to_string(&pkg_json_path)
-        .map_err(|e| format!("cannot read {}: {e}", pkg_json_path.display()))?;
-    let pkg: Value = serde_json::from_str(&raw)
-        .map_err(|e| format!("invalid package.json in {}: {e}", pkg_json_path.display()))?;
-    let sub = subpath.unwrap_or("").trim_start_matches("./");
-
-    let target = match pkg.get("exports") {
-        Some(Value::Null) | None => legacy_package_target(pkg_root, &pkg, sub)?,
-        Some(exports) => exports_target(exports, sub)?,
-    };
-    let target = target.trim_start_matches("./");
-    let file = pkg_root.join(target);
-    // never allow an export target to walk out of the package directory
-    if target.split('/').any(|c| c == "..")
-        || Path::new(target)
-            .components()
-            .any(|c| matches!(c, std::path::Component::ParentDir))
+/// Minimal resolution used when the resolver library is not installed: only
+/// relative/file/node:/data: imports and the offline http(s) rejection remain;
+/// store/bare resolution reports why the resolver is needed.
+fn fallback_resolve(specifier: &str, referrer: &str, reason: &str) -> ModuleResolveResponse {
+    if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
+        return Err(JsErrorBox::generic(format!(
+            "vendored package resolution requires the inka resolver ({reason})"
+        )));
+    }
+    if specifier.starts_with("http://") || specifier.starts_with("https://") {
+        return Err(JsErrorBox::generic(format!(
+            "network module imports are disabled ('{specifier}'); \
+             vendor the package with `inka pkg seed` instead"
+        )));
+    }
+    if has_scheme(specifier)
+        || specifier.starts_with("./")
+        || specifier.starts_with("../")
+        || specifier.starts_with('/')
     {
-        return Err(format!("export target '{target}' escapes the package directory"));
+        return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
     }
-    if !file.is_file() {
-        return Err(format!(
-            "store package module not found on disk: {}",
-            file.display()
-        ));
-    }
-    Ok(file)
-}
-
-/// Splits a bare specifier into `(package name, optional subpath)`.
-fn split_bare(spec: &str) -> (String, Option<String>) {
-    if spec.starts_with('@') {
-        if let Some((head, tail)) = spec.split_once('/') {
-            return match tail.split_once('/') {
-                Some((name, rest)) => (format!("{head}/{name}"), Some(rest.to_string())),
-                None => (format!("{head}/{tail}"), None),
-            };
-        }
-        (spec.to_string(), None)
-    } else {
-        match spec.split_once('/') {
-            Some((n, rest)) => (n.to_string(), Some(rest.to_string())),
-            None => (spec.to_string(), None),
-        }
-    }
-}
-
-/// Node-style resolution of a bare specifier originating inside the store
-/// (a vendored package importing one of its installed dependencies).
-fn store_bare_lookup(store: &Path, spec: &str, referrer: &Path) -> Result<PathBuf, String> {
-    let (name, sub) = split_bare(spec);
-    let mut dir = referrer
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| store.to_path_buf());
-    loop {
-        let cand = dir.join("node_modules").join(&name);
-        if cand.is_dir() {
-            return resolve_pkg_file(&cand, sub.as_deref());
-        }
-        let Some(parent) = dir.parent() else { break };
-        if !parent.starts_with(store) {
-            break;
-        }
-        dir = parent.to_path_buf();
-    }
-    Err(format!(
-        "cannot resolve '{spec}' from the store (not an installed dependency); \
-         run `inka pkg seed` to install it"
-    ))
+    Err(JsErrorBox::generic(format!(
+        "bare import '{specifier}' cannot be resolved ({reason})"
+    )))
 }
 
 fn file_url_response(path: &Path) -> ModuleResolveResponse {
@@ -475,62 +245,12 @@ impl ModuleLoader for PkgLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
-        // ---- explicit npm:/jsr: (the way to pin an exact version) ------
-        if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
-            let store = match &self.store_root {
-                Some(s) => s.clone(),
-                None => {
-                    return Err(JsErrorBox::generic(
-                        "this runtime has no package store configured (INKA_STORE is unset); \
-                         run `inka pkg seed` to install vendored packages"
-                            .to_string(),
-                    ))
-                }
-            };
-            return match store_lookup(&store, specifier) {
-                Ok(path) => file_url_response(&path),
-                Err(e) => Err(JsErrorBox::generic(e)),
-            };
-        }
-        // ---- schemes (file:/node:/data:/…) and remote imports ----------
-        if has_scheme(specifier) {
-            if specifier.starts_with("http://") || specifier.starts_with("https://") {
-                return Err(JsErrorBox::generic(format!(
-                    "network module imports are disabled ('{specifier}'); \
-                     vendor the package with `inka pkg seed` instead"
-                )));
-            }
-            return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
-        }
-        // ---- no scheme: relative or bare ----
-        if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
-            return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
-        }
-        // Bare Node built-ins resolve without the `node:` prefix (core wins).
-        if let Some(node_spec) = node_builtin_spec(specifier) {
-            return deno_core::resolve_import(&node_spec, referrer).map_err(JsErrorBox::from_err);
-        }
-        // Bare package name -> the store (npm identity, then jsr mirror).
-        let store = match &self.store_root {
-            Some(s) => s.clone(),
-            None => {
-                return Err(JsErrorBox::generic(format!(
-                    "bare import '{specifier}' cannot be resolved: no package store configured \
-                     (INKA_STORE is unset); run `inka pkg seed` to install it"
-                )))
-            }
-        };
-        let ref_path = referrer_file_path(referrer).unwrap_or_default();
-        let result = if ref_path.starts_with(&store) {
-            // inside a vendored package: resolve its installed dependency closure
-            store_bare_lookup(&store, specifier, &ref_path)
-        } else {
-            // artifact/user code: resolve against the store's top-level packages
-            store_bare_top(&store, specifier)
-        };
-        match result {
-            Ok(path) => file_url_response(&path),
-            Err(e) => Err(JsErrorBox::generic(e)),
+        // All import-resolution policy lives in the standalone inka resolver
+        // (libinka_resolver). When it isn't installed we degrade to the small
+        // built-in fallback (relative/file/node:/data: plus offline rejection).
+        match resolver_api() {
+            Ok(api) => resolve_with_resolver(api, self.store_root.as_deref(), specifier, referrer),
+            Err(reason) => fallback_resolve(specifier, referrer, reason),
         }
     }
 

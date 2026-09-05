@@ -210,6 +210,28 @@ fn runtime_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// Pick the newest installed `libinka_resolver-<v>.so` across the runtime dirs.
+fn pick_resolver(dirs: &[PathBuf]) -> Option<PathBuf> {
+    let mut best: Option<(Version, PathBuf)> = None;
+    for dir in dirs {
+        let Ok(rd) = fs::read_dir(dir) else { continue };
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            let Some(stripped) = name.strip_prefix("libinka_resolver-") else {
+                continue;
+            };
+            let Some(vstr) = stripped.strip_suffix(".so") else {
+                continue;
+            };
+            let Some(v) = parse_version(vstr) else { continue };
+            if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
+                best = Some((v, ent.path()));
+            }
+        }
+    }
+    best.map(|(_, p)| p)
+}
+
 fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
     if let Some(p) = env::var_os("INKA_RUNTIME") {
         let p = PathBuf::from(p);
@@ -511,6 +533,16 @@ fn main() {
                 env::set_var("INKA_STORE", &candidate);
                 debug_log!("[inka] package store {}", candidate.display());
             }
+        }
+    }
+
+    // Default the import resolver to the newest installed libinka_resolver.
+    if env::var_os("INKA_RESOLVER").is_none() {
+        if let Some(r) = pick_resolver(&dirs) {
+            env::set_var("INKA_RESOLVER", &r);
+            debug_log!("[inka] inka resolver {}", r.display());
+        } else {
+            debug_log!("[inka] no inka resolver installed (vendored imports disabled)");
         }
     }
 
