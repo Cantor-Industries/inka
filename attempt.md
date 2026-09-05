@@ -476,3 +476,20 @@ Same matrix as prior milestones (bare, builtins, node:vm, --transpile, perms,
 spike, install payload) + the new CJS/Effect cases. Update §11 risks + README
 limits. Commit per phase. Risks: still bounded, but this milestone is the
 largest single engine change; keep resolver decoupled so either path is replaceable.
+
+### P0 verdict (evidence added during probe work)
+Probing Option B further showed the full cost. deno's require ops need not just a
+NodeRequireLoader but the whole resolver stack in isolate state:
+`NodeResolverRc`/`PackageJsonResolverRc` (node_resolver) + a CJS tracker
+(package.json-"type"-aware) + node-modules-path semantics, assembled the way
+`libdeno-0.3.2` does via `deno_resolver::factory` (WorkspaceFactory/ResolverFactory,
+deno_json/config discovery, npm resolver, analysis caches). Hand-assembling it
+directly against node_resolver is dozens of exact-API dependencies, each needing a
+4-5 min engine compile to validate. Conclusion: Option B == porting Deno's CLI
+resolver/npm stack (the phase-2 class of work); it is correct but a dedicated,
+multi-session effort. Blueprint: adapt libdeno's worker_factory.rs /
+deno_runtime_adapter.rs / node_loader.rs / deno_resolver_adapter.rs, substituting
+our shared store for its npm/cache layers and keeping crates/inka-resolver as the
+policy seam. P0 is therefore reclassified as "Option B feasibility study + port
+design" rather than a quick probe. Keep the RealSys state-injection fix; do not
+half-wire node services without the full resolver stack.
