@@ -543,11 +543,23 @@ app: /tmp/opencode/inkam0/p3http.
   'null/tmp/…/main.js'"). Real `deno run` keeps `globalThis.location` undefined.
   Fixed by leaving `bootstrap.location` unset (inka-runtime lib.rs). One heavy
   engine rebuild; tuple stays 0.266.0.
-- Residual P3 gaps (documented, not blocking): a ws echo driven *through* Effect's
-  Socket/WebSocket layers (ws itself is proven raw + store + in trio's graph), and
-  `@parcel/watcher` (native .node addon, watch-only path — out of Option-C scope).
+- **Residual-1 closed — Effect-layered ws echo verified** (`/tmp/opencode/inkam0/p3ws`):
+  a `NodeRuntime.runMain` program with an `HttpRouter` `/ws` route upgrades via
+  `HttpServerRequest.upgrade` (platform-node's internal upgrade handler calls the
+  bundled `ws` `WebSocketServer.handleUpgrade`), echoes through `Socket.writer` +
+  `socket.runRaw`, never returning a normal response; a bundle `ws` client connects
+  and asserts `echo:ping`. Offline, exit 0. The only real wrinkle: a ws route handler
+  must end in `Effect.never` (returning a normal Response writes HTTP bytes over the
+  upgraded socket) and must not require the `Socket` context *service* (the upgraded
+  socket is a request value, not a provided service).
+- **Residual-2 parked (documented, no code)**: `@parcel/watcher` is a native `.node`
+  addon, strictly opt-in (only `@effect/platform-node/NodeFileSystem/ParcelWatcher`;
+  default `NodeFileSystem` uses `node:fs`, `NodeContext` never loads it). Native
+  addons are an Option-C hard limit; opting in already fails cleanly (resolver CJS
+  error). Real support would be Option-B/deno-node-services/FFI engine work.
 - Full offline regression matrix green after the engine fix (effect/assert/node:vm/
-  --transpile/trio/msgpackr/store-ws/p3-http/CJS-clean-error).
+  --transpile/trio/msgpackr/store-ws/p3-http/CJS-clean-error). The only remaining
+  native gap is @parcel/watcher (see residual-2 above).
 
 ### P2-lite — resolver CJS classification + clean rejection + snapshot lint (landed)
 - **Resolver** (`crates/inka-resolver`, no engine build): a `.js` file reached via the
