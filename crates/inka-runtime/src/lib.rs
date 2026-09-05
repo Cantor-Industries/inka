@@ -38,6 +38,14 @@ mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
 }
 
+// deno_node registers ops that borrow `RealSys` from the isolate's op state
+// (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
+// resource when node services are enabled. We always run with node_services
+// None, so inject RealSys ourselves via a tiny state extension.
+deno_core::extension!(inka_rt_state, state = |state: &mut deno_core::OpState| {
+    state.put(sys_traits::impls::RealSys);
+});
+
 /// Store-backed module loader. Serves:
 ///   - the artifact tree (or the staged single-entry tree) — local files,
 ///   - vendored `npm:`/`jsr:` packages from a global self-contained store,
@@ -609,6 +617,7 @@ async fn run_module_async(
     options.startup_snapshot = Some(STARTUP_SNAPSHOT);
     options.residual_lazy_js_sources = runtime_snapshot::RESIDUAL_LAZY_JS;
     options.residual_lazy_esm_sources = runtime_snapshot::RESIDUAL_LAZY_ESM;
+    options.extensions = vec![inka_rt_state::init()];
 
     let mut worker = MainWorker::bootstrap_from_options(main_module, services, options);
 

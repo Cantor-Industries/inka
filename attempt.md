@@ -317,3 +317,93 @@ Versioning: the resolver is its own tuple installed alongside the runtime
 Known correctness catch: serde_json maps sort keys, so `exports` conditions must
 be chosen by a fixed import>node>default priority, never by file order (this
 bit us when `effect` resolved to its CJS `default` build).
+
+## 11. CommonJS support — design risks & future work (Part 2)
+
+Status: **probe/design open**. We chose a *custom bounded CJS loader* over adopting
+`deno_runtime` node services wholesale (Option B). This section records the risks
+of that path and the open design questions a future session should resolve before
+(or while) building it.
+
+### Why CJS exists at all
+`@effect/platform-node` (via `ws`, and `undici`/native-binding fallbacks) is
+CommonJS. Node lets ESM `import` a CJS module by executing it with
+`module/exports/require` and synthesizing `default = module.exports` plus
+lexer-detected named exports. Our engine currently serves a CJS file's bytes as an
+ESM module, so `import PermessageDeflate from "./lib/permessage-deflate.js"` fails
+("does not provide an export named 'default'"). `require()` inside CJS is also
+unimplemented.
+
+### The planned (bounded) design — see session notes
+- CJS files are NOT handed to V8 as ESM. A tiny JS sidecar (`internal:inka/cjs.js`,
+  lazy extension in the snapshot) keeps a per-process module registry
+  (`require.cache` semantics) and a synchronous `require()`.
+- Resolver (fast crate) classifies a file ESM vs CJS (`.cjs` or `.js` in a package
+  without `"type":"module"`), resolves `require()` targets through store/
+  node_modules logic, and lexes static named exports.
+- Engine `PkgLoader::load()` returns an ESM facade for a CJS file:
+  `export default m.exports; export const foo = m.named.foo;` backed by new ops
+  (`op_inka_cjs_load`, `op_inka_cjs_require`).
+
+### Risks / known parity gaps of the bounded path
+1. **Not full Node CJS.** We accept: no live-binding re-export (named exports are a
+   static snapshot), no `require()` of ESM-only packages (ERR_REQUIRE_ESM-style),
+   no dynamic `require(expression)`, no `eval`-based loaders, limited
+   `cjs-module-lexer` parity (dynamic `module.exports` patterns degrade to
+   default-only).
+2. **Isolate-integration uncertainty.** Evaluating CJS bodies inside the worker
+   isolate and bridging synchronous `require()` to Rust ops must match
+   deno_core's module-graph assumptions (error surfaces, top-level await
+   restrictions, `this`/globalThis, stack traces, module identity across the
+   ESM/CJS boundary, circular requires). There is real risk of subtle
+   divergence we will only find by exercising real packages.
+3. **One engine rebuild per structural change.** The facade/sidecar/ops live in
+   `inka-runtime` (snapshot regeneration + heavy relink), which is exactly the
+   slow loop we just split away from. Resolver-only semantics stay fast; anything
+   touching the CJS runtime itself is not.
+4. **Two sources of module-loading truth.** Store ESM loading stays on
+   `PkgLoader`/resolver; CJS loading becomes a parallel path in the engine. That
+   duplication is a maintenance and correctness hazard (resolution, confinement,
+   caching, and version checks must agree in both).
+5. **Scope creep.** "Bounded" tends to grow (package `exports` `require`
+   conditions, `node:` builtin requires, `__dirname` in ESM facade,
+   `import.meta.dirname`, per-version nested `require` from packages that also
+   load ESM). Each addition re-touches the engine crate.
+6. **Correctness vs Node divergences** will surface silently (module identity,
+   circular refs, getters, `module.exports = function` default interop). Need a
+   conformance harness against real packages, not hand tests.
+7. **The eventual correct end-state may still be Option B** (deno_runtime node
+   services backed by our store) or build-time transformation (bundle CJS to ESM
+   at snapshot/seed time). Committing deep into a custom loader could be sunk cost
+   if either of those proves cleaner.
+
+### Recommended future study (before/while building)
+- Probe whether a *minimal* store-backed `NodeExtInitServices` (npm-folder resolver
+  only, no CLI loader) enables deno_node's own `require`/CJS ops — if yes, Option B
+  may be far cheaper than a custom loader.
+- Investigate build-time CJS→ESM at seed/snapshot time (esbuild-style) as an
+  alternative that avoids any runtime CJS; weigh semantics, size, and the
+  "pre/postinstall baked at tar time" guarantee.
+- Decide module-identity policy when the same package is reached via ESM and CJS.
+- Design the conformance test set (ws, undici, msgpackr-extract, a circular-require
+  fixture, dual-package hazard) before implementing.
+- Keep the resolver as the single source of classification/resolution so any
+  future engine-side loader (custom or deno's) can share it.
+
+### M0 probe findings (env panic + CJS) — re-scope of Part 2
+With `allow-env` granted the engine panicked; the allow-env crash is a cascade of
+missing op-state resources, not one:
+- `sys_traits::impls::RealSys` (fixed: injected via a `deno_core::extension!`
+  state hook, `inka_rt_state`), then
+- `alloc::rc::Rc<dyn deno_node::NodeRequireLoader>` — `msgpackr` (inside
+  `@effect/platform`) calls Deno's *own* CJS `require()` ops, which are compiled
+  into the snapshot and cannot be bypassed.
+
+Conclusion: for these real packages a *bespoke* CJS loader (Part 2 Option A)
+cannot cleanly coexist — `deno_node`'s `require` ops will always be invoked and
+must be satisfied. The path that actually unblocks Effect platform is supplying
+`WorkerServiceOptions.node_services` = `NodeExtInitServices { node_require_loader,
+node_resolver, pkg_json_resolver, sys: RealSys }` backed by our shared store
+(deno's node/CJS loader = Option B). That is a sizable, separate milestone with
+its own design (see §11); keep the resolver as the policy seam for whatever is
+adopted.
