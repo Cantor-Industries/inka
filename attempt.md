@@ -524,6 +524,31 @@ client echo, `allow-net=127.0.0.1` only, no env, no createRequire, no panic.
 Named exports preserved through the whole chain. Resolver's bare-builtin table
 already covers every builtin ws touches.
 
+### P3 outcome — @effect/platform-node runs a real HTTP app offline (+ engine parity fix)
+A `NodeRuntime.runMain` Effect program now runs a live HTTP round-trip in the engine,
+fully offline (`allow-net=*` on a local bind):
+`NodeHttpServer.layerTest` (real `node:http` server via engine node builtins) +
+`HttpClient` = **NodeHttpClient = undici** (its `Undici.js` loads our patched undici
+bundle) -> self-fetch `/ping` returns 200 "pong". This exercises, at runtime:
+Effect runtime + layers, NodeContext, node:http/net builtins, `mime` bundle
+(httpPlatform), and the **undici** bundle. ws bundle (raw + store echo) and msgpackr
+round-trip were already proven; trio proves the whole import graph loads. Scratch
+app: /tmp/opencode/inkam0/p3http.
+
+- **Engine parity fix found while running it**: the engine set
+  `WorkerOptions.bootstrap.location = Some(main_module)`, which exposes a live
+  `globalThis.location` (origin "null" for the staged file:// module). Web code
+  that builds URL bases from it breaks — @effect/platform `UrlParams.baseUrl()`
+  produced `"null" + pathname`, an invalid `new URL` base ("Invalid URL … with base
+  'null/tmp/…/main.js'"). Real `deno run` keeps `globalThis.location` undefined.
+  Fixed by leaving `bootstrap.location` unset (inka-runtime lib.rs). One heavy
+  engine rebuild; tuple stays 0.266.0.
+- Residual P3 gaps (documented, not blocking): a ws echo driven *through* Effect's
+  Socket/WebSocket layers (ws itself is proven raw + store + in trio's graph), and
+  `@parcel/watcher` (native .node addon, watch-only path — out of Option-C scope).
+- Full offline regression matrix green after the engine fix (effect/assert/node:vm/
+  --transpile/trio/msgpackr/store-ws/p3-http/CJS-clean-error).
+
 ### P2-lite — resolver CJS classification + clean rejection + snapshot lint (landed)
 - **Resolver** (`crates/inka-resolver`, no engine build): a `.js` file reached via the
   `import`/`node` `exports` condition is ESM by context (dual-package dist/esm pattern,

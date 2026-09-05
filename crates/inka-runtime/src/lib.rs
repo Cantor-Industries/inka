@@ -612,7 +612,10 @@ async fn run_module_async(
     let services = build_services(permissions, loader);
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
-    options.bootstrap.location = Some(main_module.clone());
+    // Leave bootstrap.location unset (like `deno run`): setting it makes the worker
+    // expose a live `globalThis.location` whose origin is "null" for the staged
+    // file:// module, which breaks web code that builds URL bases from it (e.g.
+    // @effect/platform UrlParams.baseUrl() -> "null" + pathname -> invalid URL).
     options.bootstrap.log_level = WorkerLogLevel::Error;
     options.startup_snapshot = Some(STARTUP_SNAPSHOT);
     options.residual_lazy_js_sources = runtime_snapshot::RESIDUAL_LAZY_JS;
