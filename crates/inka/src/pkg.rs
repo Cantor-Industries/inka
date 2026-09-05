@@ -37,6 +37,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::{fetch_with_sidecar, hex, runtime_dir};
+use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const PKG_HELP: &str = "usage:\n  inka pkg snapshot [--seed-manifest <file>] [--patches <dir>] [--out <dir>]   build a whole-store snapshot tar (network)\n  inka pkg seed     [--from <dir-or-url>] [--store <dir>] [--insecure]   install a snapshot into the store\n  inka pkg list     [--store <dir>]";
@@ -384,6 +385,142 @@ fn load_seed_manifest(path: &Path) -> Result<SeedManifest, String> {
     Ok(m)
 }
 
+// ---- seed-time CJS lint (heads-up only) -----------------------------------
+//
+// Warn about installed packages whose import-reachable entry is CommonJS and has
+// no patch record. Mirrors the resolver's classification (import/node conditions
+// => ESM by context; otherwise .cjs / non-"module" .js => CJS) as a heuristic,
+// not a full resolve. Not fatal: the resolver rejects such a package cleanly at
+// run time if it is actually imported.
+
+fn classify_cjs_file(pkg_type: &str, rel: &str) -> bool {
+    let rel = rel.trim_start_matches("./");
+    if rel.ends_with(".cjs") {
+        return true;
+    }
+    if rel.ends_with(".mjs") || rel.ends_with(".json") || rel.ends_with(".node") {
+        return false;
+    }
+    pkg_type != "module"
+}
+
+fn exports_dot_is_cjs(pkg_type: &str, v: &Value) -> bool {
+    match v {
+        Value::String(s) => classify_cjs_file(pkg_type, s),
+        Value::Array(items) => {
+            // Arrays are rare for ".": flag only if no usable branch is ESM.
+            !items.iter().any(|i| !exports_dot_is_cjs(pkg_type, i))
+        }
+        Value::Object(map) => {
+            for cond in ["import", "node"] {
+                if map.contains_key(cond) {
+                    return false; // ESM by condition (dual-package pattern)
+                }
+            }
+            if let Some(d) = map.get("default") {
+                return exports_dot_is_cjs(pkg_type, d);
+            }
+            map.contains_key("require")
+        }
+        _ => false,
+    }
+}
+
+fn package_entry_is_cjs(pkg: &Value) -> bool {
+    let pkg_type = pkg.get("type").and_then(Value::as_str).unwrap_or("");
+    match pkg.get("exports") {
+        Some(Value::String(s)) => classify_cjs_file(pkg_type, s),
+        Some(Value::Object(map)) => {
+            let is_subpath_map = map.keys().any(|k| k == "." || k.starts_with("./"));
+            if is_subpath_map {
+                match map.get(".") {
+                    Some(dot) => exports_dot_is_cjs(pkg_type, dot),
+                    None => false, // no "." export: root not importable
+                }
+            } else {
+                exports_dot_is_cjs(pkg_type, pkg.get("exports").unwrap())
+            }
+        }
+        _ => {
+            let main = pkg.get("main").and_then(Value::as_str).unwrap_or("index.js");
+            classify_cjs_file(pkg_type, main)
+        }
+    }
+}
+
+/// Collect the top-level (hoisted) packages of a node_modules tree. Unpatched CJS
+/// leaves that the ESM graph actually reaches are hoisted here (npm dedupes), so
+/// top-level-only keeps the lint signal high while skipping nested optional
+/// natives and nested dupes that aren't importable as ESM roots.
+fn top_level_packages(nm: &Path) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    let Ok(top) = fs::read_dir(nm) else { return out };
+    let mut entries: Vec<PathBuf> = top.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    entries.sort();
+    for dir in entries {
+        let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        if name.starts_with('@') {
+            let Ok(sub) = fs::read_dir(&dir) else { continue };
+            let mut subs: Vec<PathBuf> = sub.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            subs.sort();
+            for p in subs {
+                let pkg = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let display = format!("{name}/{pkg}");
+                if let Ok(raw) = fs::read(p.join("package.json")) {
+                    if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+                        out.push((display, v));
+                    }
+                }
+            }
+        } else if let Ok(raw) = fs::read(dir.join("package.json")) {
+            if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
+                out.push((name, v));
+            }
+        }
+    }
+    out
+}
+
+fn lint_unpatched_cjs(node_modules: &Path, patched: &[PatchRecord], seeds: &[SeedSpec]) {
+    // Only direct seeds are the user's responsibility: warn when a seeded package
+    // resolves CJS and has no patch spec. Transitive CJS leaves are handled by the
+    // repo's curated patch specs (discovered empirically); optional natives /
+    // unreachable CJS would otherwise flood every snapshot with noise.
+    let mut seed_names = std::collections::HashSet::new();
+    for s in seeds {
+        let reg = s.registry.trim().to_ascii_lowercase();
+        if reg == "jsr" {
+            if let Some(m) = jsr_to_mirror(&s.name) {
+                seed_names.insert(m);
+            }
+        } else {
+            seed_names.insert(s.name.clone());
+        }
+    }
+    let patched_keys: Vec<String> = patched
+        .iter()
+        .map(|p| format!("{}@{}", p.name, p.version))
+        .collect();
+    for (name, pkg) in top_level_packages(node_modules) {
+        if !seed_names.contains(&name) || !package_entry_is_cjs(&pkg) {
+            continue;
+        }
+        let version = pkg.get("version").and_then(Value::as_str).unwrap_or("?");
+        let key = format!("{name}@{version}");
+        if !patched_keys.contains(&key) {
+            eprintln!(
+                "[inka] pkg snapshot: warning: seeded package {key} has a CommonJS entry and \
+                 no patches/ spec; it will fail cleanly at run time if imported — add a patch \
+                 spec under patches/{} or exclude it",
+                pkg.get("name").and_then(Value::as_str).unwrap_or(&name)
+            );
+        }
+    }
+}
+
 // ---- snapshot ---------------------------------------------------------------
 
 fn cmd_snapshot(args: &[String]) {
@@ -460,6 +597,7 @@ fn cmd_snapshot(args: &[String]) {
             p.name, p.version, p.kind
         );
     }
+    lint_unpatched_cjs(&work.join("node_modules"), &patched, &manifest.seed);
 
     // 2) package the resolved pool as a whole-store snapshot.
     if !out.is_absolute() {

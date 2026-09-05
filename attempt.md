@@ -524,6 +524,22 @@ client echo, `allow-net=127.0.0.1` only, no env, no createRequire, no panic.
 Named exports preserved through the whole chain. Resolver's bare-builtin table
 already covers every builtin ws touches.
 
+### P2-lite — resolver CJS classification + clean rejection + snapshot lint (landed)
+- **Resolver** (`crates/inka-resolver`, no engine build): a `.js` file reached via the
+  `import`/`node` `exports` condition is ESM by context (dual-package dist/esm pattern,
+  e.g. find-my-way-ts/multipasta have no `"type":"module"`), so `exports_target` now
+  returns an `EsmContext` (ByCondition vs Classify). `resolve_pkg_file` then rejects,
+  with a stable CommonJS error, any served file that is `.cjs` or a non-`"module"`
+  `.js` reached via `default`/plain-string/legacy `main`. Unpatched CJS roots/subpaths
+  now fail cleanly instead of a cryptic "does not provide an export named 'default'".
+  7 unit tests (CJS legacy main -> error, default-only-CJS -> error, type-module legacy
+  + patched-ws shape -> file). Resolver tuple stays 1.0.0 (ABI unchanged).
+- **Snapshot lint** (`inka pkg snapshot`): warns only when a *direct seed* package
+  resolves CJS with no patch spec (top-level-only scan; transitive optional natives
+  like msgpackr-extract/@parcel/watcher are the repo's patch-spec concern, not noise).
+  Verified silent on the healthy store; fires on a seeded CJS package.
+- Regressions green (effect/assert/node:vm/--transpile/trio/msgpackr/store-ws, offline).
+
 ### P1 outcome — patch layer landed (repo changes)
 Implemented and verified end-to-end (scratch snapshot -> reseed -> offline runs):
 

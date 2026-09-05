@@ -291,14 +291,63 @@ fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
     ))
 }
 
-fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
-    fn pick_conditions(v: &Value) -> Result<String, String> {
+/// ESM-ness of a resolved store file. A `.js` file selected through the `import`
+/// or `node` condition of an `exports` map is ESM regardless of the package's
+/// `"type"` (the dual-package dist/esm pattern), so we must know the selection
+/// context, not just the extension.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EsmContext {
+    /// Selected via the `import`/`node` condition: ESM by context.
+    ByCondition,
+    /// Selected via a plain-string/`default` target or legacy `main`: classify
+    /// by file extension + package `"type"`.
+    Classify,
+}
+
+/// CommonJS message: the engine is ESM-only and cannot run `require`/CJS files.
+fn cjs_error(pkg_name: &str, file: &Path) -> String {
+    format!(
+        "'{}' (package '{pkg_name}') is CommonJS, which this engine cannot run; \
+         vendor the patched ESM store (`inka pkg snapshot` applies its `patches/`) \
+         or use an ESM alternative",
+        file.display()
+    )
+}
+
+/// Reject files the engine cannot serve: CommonJS (and anything not ESM-typed).
+/// `.cjs` is rejected even when reached via an `import` condition; `.mjs`/`.json`
+/// are always fine; a `.js`/other file is fine only when ESM-by-condition or the
+/// package declares `"type":"module"`.
+fn ensure_esm(pkg: &Value, file: &Path, ctx: EsmContext) -> Result<(), String> {
+    let name = pkg
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown>");
+    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
+        "cjs" => Err(cjs_error(name, file)),
+        "mjs" | "json" => Ok(()),
+        _ => {
+            if ctx == EsmContext::ByCondition {
+                return Ok(());
+            }
+            let is_module = pkg.get("type").and_then(Value::as_str) == Some("module");
+            if is_module {
+                Ok(())
+            } else {
+                Err(cjs_error(name, file))
+            }
+        }
+    }
+}
+
+fn exports_target(exports: &Value, subpath: &str) -> Result<(String, EsmContext), String> {
+    fn pick_conditions(v: &Value) -> Result<(String, EsmContext), String> {
         match v {
-            Value::String(s) => Ok(s.clone()),
+            Value::String(s) => Ok((s.clone(), EsmContext::Classify)),
             Value::Array(items) => {
                 for item in items {
-                    if let Ok(s) = pick_conditions(item) {
-                        return Ok(s);
+                    if let Ok(x) = pick_conditions(item) {
+                        return Ok(x);
                     }
                 }
                 Err("no usable export target".to_string())
@@ -310,7 +359,13 @@ fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
                 // CJS build) to beat an explicit `import` target.
                 for cond in EXPORT_CONDITIONS {
                     if let Some(val) = map.get(cond) {
-                        return pick_conditions(val);
+                        let (target, _) = pick_conditions(val)?;
+                        let ctx = if cond == "import" || cond == "node" {
+                            EsmContext::ByCondition
+                        } else {
+                            EsmContext::Classify
+                        };
+                        return Ok((target, ctx));
                     }
                 }
                 Err(
@@ -343,8 +398,8 @@ fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
                 if let Some(star) = k.strip_suffix('*') {
                     let prefix = star.strip_prefix("./").unwrap_or(star);
                     if let Some(rem) = sub.strip_prefix(prefix) {
-                        let t = pick_conditions(v)?;
-                        hit = Some(t.replace('*', rem));
+                        let (t, ctx) = pick_conditions(v)?;
+                        hit = Some((t.replace('*', rem), ctx));
                         break;
                     }
                 }
@@ -404,8 +459,11 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
         .map_err(|e| format!("invalid package.json in {}: {e}", pkg_json_path.display()))?;
     let sub = subpath.unwrap_or("").trim_start_matches("./");
 
-    let target = match pkg.get("exports") {
-        Some(Value::Null) | None => legacy_package_target(pkg_root, &pkg, sub)?,
+    let (target, ctx) = match pkg.get("exports") {
+        Some(Value::Null) | None => (
+            legacy_package_target(pkg_root, &pkg, sub)?,
+            EsmContext::Classify,
+        ),
         Some(exports) => exports_target(exports, sub)?,
     };
     let target = target.trim_start_matches("./");
@@ -423,6 +481,7 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
             file.display()
         ));
     }
+    ensure_esm(&pkg, &file, ctx)?;
     Ok(file)
 }
 
@@ -630,6 +689,104 @@ mod tests {
         assert!(matches!(d, Decision::File(_)));
         let d = resolve(Some(&tmp), "file:///a/main.ts", "npm:zod@9.9.9");
         assert!(matches!(d, Decision::Error(m) if m.contains("does not satisfy")));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Seed a package with the given package.json + files; resolve its root.
+    fn seed_pkg(tmp: &Path, name: &str, pkg_json: serde_json::Value, files: &[(&str, &str)]) {
+        let dir = tmp.join("node_modules").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::to_string_pretty(&pkg_json).unwrap(),
+        )
+        .unwrap();
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+    }
+
+    fn fresh_store() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("inkares-cjs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        tmp
+    }
+
+    #[test]
+    fn rejects_legacy_cjs_main() {
+        let tmp = fresh_store();
+        seed_pkg(
+            &tmp,
+            "legacycjs",
+            serde_json::json!({ "name": "legacycjs", "version": "1.0.0", "main": "index.js" }),
+            &[("index.js", "module.exports = {};\n")],
+        );
+        let d = resolve(Some(&tmp), "file:///a/main.ts", "legacycjs");
+        assert!(
+            matches!(&d, Decision::Error(m) if m.contains("CommonJS")),
+            "got {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn rejects_default_only_cjs_build_even_with_type_missing() {
+        let tmp = fresh_store();
+        // exports object is NOT a subpath map: only a `default` (CJS) target.
+        seed_pkg(
+            &tmp,
+            "cjsonly",
+            serde_json::json!({
+                "name": "cjsonly", "version": "1.0.0",
+                "exports": { "default": "./index.cjs" }
+            }),
+            &[("index.cjs", "module.exports = {};\n")],
+        );
+        let d = resolve(Some(&tmp), "file:///a/main.ts", "cjsonly");
+        assert!(
+            matches!(&d, Decision::Error(m) if m.contains("CommonJS")),
+            "got {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn allows_type_module_legacy_and_patched_shape() {
+        let tmp = fresh_store();
+        // legacy ESM via "type":"module" + main index.js
+        seed_pkg(
+            &tmp,
+            "esmlegacy",
+            serde_json::json!({
+                "name": "esmlegacy", "version": "1.0.0", "type": "module", "main": "index.js"
+            }),
+            &[("index.js", "export const x = 1;\n")],
+        );
+        let d = resolve(Some(&tmp), "file:///a/main.ts", "esmlegacy");
+        assert!(
+            matches!(&d, Decision::File(p) if p.ends_with("esmlegacy/index.js")),
+            "got {d:?}"
+        );
+        // patched-ws shape: exports "." -> import/default ./esm.js, no "type"
+        seed_pkg(
+            &tmp,
+            "wspatched",
+            serde_json::json!({
+                "name": "wspatched", "version": "8.21.3",
+                "exports": {
+                    "./package.json": "./package.json",
+                    ".": { "import": "./esm.js", "default": "./esm.js" }
+                }
+            }),
+            &[("esm.js", "export const WebSocket = 1;\n")],
+        );
+        let d = resolve(Some(&tmp), "file:///a/main.ts", "wspatched");
+        assert!(
+            matches!(&d, Decision::File(p) if p.ends_with("wspatched/esm.js")),
+            "got {d:?}"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }
