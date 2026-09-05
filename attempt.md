@@ -284,3 +284,20 @@ import rewriting). Such artifacts carry a new trailer magic `INKFOOT4`; the
 launcher sets `INKA_PRECOMPILED=1` and the runtime serves those modules as plain
 JS (skips `maybe_transpile_source`). Runtime-transpile artifacts (default) still
 use `INKFOOT3`. JSX/TSX entries with `--transpile` error (unsupported).
+
+### Store redesign: shared pool + manifest-driven snapshot (supersedes §10 closure model)
+The store is now ONE hoisted `node_modules` pool (classic npm layout): independent
+packages may pin different versions of a shared dep (npm hoists + nests), and
+Effect-family packages share a single `effect` when versions align. Distribution is
+a whole-store snapshot tar (`store.tar.gz`): `inka pkg snapshot` npm-installs the
+seed set together (pre/postinstall baked there); `pkg seed` / `inka install` verify
++ atomically replace `store/node_modules`. The seed set is no longer hard-coded: a
+default `seed-manifest.json` ships with inka (repo root; discovery order
+`--seed-manifest` → `$INKA_SEED_MANIFEST` → `./seed-manifest.json` → next to the
+binary); users swap it to curate their own store. Default set: `zod@3.23.0`,
+`jsr:@std/assert@1.0.0`, `effect@3.22.1`, `@effect/platform@0.97.1`,
+`@effect/platform-node@0.108.1` (+ auto peers). The loader now resolves a package
+root straight from `store/node_modules/<identity>` and checks pinned imports
+against the hoisted copy's version. Verified: `effect` core runs offline; the
+Effect `platform`/`platform-node` tiers still need engine Node compat (CJS `ws`
+interop, `process.env` reads at import) that isn't implemented.

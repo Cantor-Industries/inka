@@ -40,8 +40,6 @@ mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
 }
 
-const STORE_PACKAGES_DIR: &str = "packages";
-
 /// Allow-listed condition keys for package.json `exports` target selection.
 /// `types` and `require` (CommonJS) are deliberately skipped; only ESM-capable
 /// targets are used.
@@ -155,7 +153,8 @@ fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
 struct PkgLoader {
     /// Root of the artifact tree (or the staged temp tree for single-file runs).
     artifact_root: PathBuf,
-    /// Root of the global package store (`<store>/packages/<name>/<version>/…`).
+    /// Root of the global package store (`<store>/node_modules/<name>/…`, one
+    /// hoisted pool).
     store_root: Option<PathBuf>,
     /// True when the artifact's `.ts/.mts/.cts` payloads were transpiled at
     /// build time (`--transpile`); such files are served as plain JS.
@@ -178,27 +177,6 @@ fn referrer_file_path(referrer: &str) -> Option<PathBuf> {
     Url::parse(referrer).ok().and_then(|u| u.to_file_path().ok())
 }
 
-/// Lists the installed versions of a package: `Vec<(dir_name, version)>`
-/// sorted ascending. A missing dir simply means "nothing installed".
-fn store_package_versions(dir: &Path) -> Result<Vec<(String, Version)>, String> {
-    let mut out = Vec::new();
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(out),
-    };
-    for ent in entries.flatten() {
-        if !ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-            continue;
-        }
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if let Ok(v) = Version::parse_standard(&name) {
-            out.push((name, v));
-        }
-    }
-    out.sort_by(|a, b| a.1.cmp(&b.1));
-    Ok(out)
-}
-
 fn version_satisfies(v: &Version, req: &str) -> bool {
     let req = req.trim();
     if let Ok(exact) = Version::parse_standard(req) {
@@ -210,66 +188,92 @@ fn version_satisfies(v: &Version, req: &str) -> bool {
     }
 }
 
-/// A concrete pin suggestion for an error message, phrased for whatever the
-/// user actually wrote: jsr mirror identities render as `jsr:@scope/name@ver`.
-fn exact_hint(npm_name: &str, ver: &str) -> String {
+/// Render an npm identity for user-facing messages: jsr's mirror identity
+/// `@jsr/scope__name` displays as `jsr:@scope/name`.
+fn npm_display(npm_name: &str) -> String {
     if let Some(rest) = npm_name.strip_prefix("@jsr/") {
         if let Some((scope, pkg)) = rest.split_once("__") {
-            return format!("jsr:@{scope}/{pkg}@{ver}");
+            return format!("jsr:@{scope}/{pkg}");
         }
     }
-    format!("npm:{npm_name}@{ver}")
+    npm_name.to_string()
 }
 
-/// Chooses the installed version dir for a package given the requested version.
-fn pick_package_version(
-    name: &str,
-    versions: &[(String, Version)],
+/// The hoisted package root for an npm identity inside the store pool.
+fn store_package_dir(store: &Path, npm_name: &str) -> PathBuf {
+    store.join("node_modules").join(npm_name)
+}
+
+/// Reads the installed version of a package root from its package.json.
+fn installed_version(pkg_root: &Path) -> Option<Version> {
+    let raw = std::fs::read(pkg_root.join("package.json")).ok()?;
+    let v: Value = serde_json::from_slice(&raw).ok()?;
+    let text = v.get("version").and_then(Value::as_str)?;
+    Version::parse_standard(text).ok()
+}
+
+/// Resolves a package by npm identity against the single hoisted store pool.
+/// An explicit version requirement must match the hoisted copy (the one a bare
+/// import reaches); nested duplicates are only reachable through their own
+/// dependents, which Node semantics resolve automatically.
+fn resolve_store_package(
+    store: &Path,
+    npm_name: &str,
     req: Option<&str>,
-) -> Result<String, String> {
-    let avail: Vec<&str> = versions.iter().map(|(n, _)| n.as_str()).collect();
-    if versions.is_empty() {
+    sub: Option<&str>,
+) -> Result<PathBuf, String> {
+    let pkg_root = store_package_dir(store, npm_name);
+    if !pkg_root.is_dir() {
         return Err(format!(
-            "package '{name}' is not in the package store (nothing installed); \
-             run `inka pkg seed` to install it"
+            "package '{}' is not in the package store; run `inka pkg seed` to install it",
+            npm_display(npm_name)
         ));
     }
-    let req = req.map(str::trim).filter(|s| !s.is_empty());
-    let matching: Vec<&(String, Version)> = match &req {
-        None => versions.iter().collect(),
-        Some(r) => versions
-            .iter()
-            .filter(|(_, v)| version_satisfies(v, r))
-            .collect(),
-    };
-    match req {
-        None => {
-            if matching.len() == 1 {
-                Ok(matching[0].0.clone())
-            } else {
-                Err(format!(
-                    "multiple versions of '{name}' are installed ({avail:?}); \
-                     import an exact version (e.g. {})",
-                    exact_hint(name, avail[0])
-                ))
-            }
-        }
-        Some(r) => {
-            if matching.is_empty() {
-                Err(format!(
-                    "no installed version of '{name}' satisfies '{r}' (have {avail:?}); \
-                     run `inka pkg seed` to install it"
-                ))
-            } else {
-                // Prefer the highest satisfying installed version.
-                Ok(matching
-                    .iter()
-                    .max_by(|a, b| a.1.cmp(&b.1))
-                    .map(|m| m.0.clone())
-                    .expect("matching is non-empty"))
+    if let Some(installed) = installed_version(&pkg_root) {
+        if let Some(r) = req.map(str::trim).filter(|s| !s.is_empty()) {
+            if !version_satisfies(&installed, r) {
+                return Err(format!(
+                    "package '{}' is installed at {installed}, which does not satisfy '{r}'; \
+                     run `inka pkg seed` to install the requested version",
+                    npm_display(npm_name)
+                ));
             }
         }
     }
+    resolve_pkg_file(&pkg_root, sub)
+}
+
+/// Resolves an `npm:`/`jsr:` specifier against the store to a concrete file.
+fn store_lookup(store: &Path, spec: &str) -> Result<PathBuf, String> {
+    let ps = parse_pkg_specifier(spec)?;
+    resolve_store_package(store, &ps.name, ps.req.as_deref(), ps.sub.as_deref())
+}
+
+/// Store identities to try for a bare specifier: the npm identity first, then
+/// — for a scoped `@scope/name` — jsr's npm-mirror identity (`@jsr/scope__name`).
+fn bare_store_identities(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if let Some(body) = name.strip_prefix('@') {
+        if let Some((scope, pkg)) = body.split_once('/') {
+            if scope != "jsr" {
+                out.push(format!("@jsr/{scope}__{pkg}"));
+            }
+        }
+    }
+    out
+}
+
+/// Resolves a bare specifier from artifact/user code against the store pool.
+fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
+    let (name, sub) = split_bare(spec);
+    for ident in bare_store_identities(&name) {
+        if store_package_dir(store, &ident).is_dir() {
+            return resolve_store_package(store, &ident, None, sub.as_deref());
+        }
+    }
+    Err(format!(
+        "package '{name}' is not in the package store; run `inka pkg seed` to install it"
+    ))
 }
 
 /// Picks the importable JS target out of a `package.json` `exports` value for
@@ -409,68 +413,6 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
         ));
     }
     Ok(file)
-}
-
-/// Resolves a package (npm identity) + optional version req + subpath against
-/// the store to a concrete file. Shared by `npm:`/`jsr:` and bare imports.
-fn resolve_store_package(
-    store: &Path,
-    npm_name: &str,
-    req: Option<&str>,
-    sub: Option<&str>,
-) -> Result<PathBuf, String> {
-    let packages = store.join(STORE_PACKAGES_DIR);
-    let base = packages.join(npm_name);
-    if !base.starts_with(&packages) {
-        return Err(format!("unsafe package name '{npm_name}'"));
-    }
-    let versions = store_package_versions(&base)?;
-    let dir_name = pick_package_version(npm_name, &versions, req)?;
-    let pkg_dir = base.join(&dir_name);
-    let pkg_root = pkg_dir.join("node_modules").join(npm_name);
-    if !pkg_root.is_dir() {
-        return Err(format!(
-            "store package {npm_name}@{dir_name} is missing its node_modules/{npm_name} tree; \
-             re-run `inka pkg seed`"
-        ));
-    }
-    resolve_pkg_file(&pkg_root, sub)
-}
-
-/// Resolves an `npm:`/`jsr:` specifier against the store to a concrete file.
-fn store_lookup(store: &Path, spec: &str) -> Result<PathBuf, String> {
-    let ps = parse_pkg_specifier(spec)?;
-    resolve_store_package(store, &ps.name, ps.req.as_deref(), ps.sub.as_deref())
-}
-
-/// Store identities to try for a bare specifier: the npm identity first, then
-/// — for a scoped `@scope/name` — jsr's npm-mirror identity (`@jsr/scope__name`).
-fn bare_store_identities(name: &str) -> Vec<String> {
-    let mut out = vec![name.to_string()];
-    if let Some(body) = name.strip_prefix('@') {
-        if let Some((scope, pkg)) = body.split_once('/') {
-            if scope != "jsr" {
-                out.push(format!("@jsr/{scope}__{pkg}"));
-            }
-        }
-    }
-    out
-}
-
-/// Resolves a bare specifier from artifact/user code against the store's
-/// top-level packages (npm identity, then jsr mirror). Versions are unpinned:
-/// a unique installed version is required.
-fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
-    let (name, sub) = split_bare(spec);
-    for ident in bare_store_identities(&name) {
-        let base = store.join(STORE_PACKAGES_DIR).join(&ident);
-        if !store_package_versions(&base)?.is_empty() {
-            return resolve_store_package(store, &ident, None, sub.as_deref());
-        }
-    }
-    Err(format!(
-        "package '{name}' is not in the package store; run `inka pkg seed` to install it"
-    ))
 }
 
 /// Splits a bare specifier into `(package name, optional subpath)`.

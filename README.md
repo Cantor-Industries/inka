@@ -247,28 +247,32 @@ import vm from "vm";
 import process from "process";
 ```
 
-Resolution happens at run time against a **package store** (a directory of self-contained package closures on the machine), not by installing anything at run time. `node:` built-ins keep working as before.
+Resolution happens at run time against a **package store** — one shared, hoisted `node_modules` pool on the machine (a normal npm project layout) — not by installing anything at run time. `node:` built-ins keep working as before.
 
 Store layout:
 
 ```
-<store>/
-  seed-manifest.json                      # what was seeded + sha256
-  packages/<npm-name>/<version>/node_modules/<npm-name>/…   # one closure per version
+<store>/                                  ~/.inka-runtime/store  (or $INKA_STORE)
+  seed-manifest.json                      # installed top-levels + snapshot sha256
+  node_modules/…                          # the whole resolved tree (shared/hoisted)
 ```
+
+Because it is a single pool, dependency graphs behave like any Node project: compatible versions share one hoisted copy; incompatible ones nest under their dependents and the runtime resolves them by nearest-`node_modules` (so independent packages can use different versions of a shared dependency, and Effect-style libraries keep a single copy when their versions align).
 
 `<store>` defaults to `$INKA_STORE`, else a `store/` directory next to the chosen runtime (e.g. `~/.inka-runtime/store`); the launcher sets it for you when it exists, so plain `./app` runs work with no env.
 
-Packages ship as tarballs that are already "built": each tar is a real package-manager resolution of one package **plus its dependency closure**, with any preinstall/postinstall already run at tar-build time. Consumers only download → verify → extract; nothing is installed or scripted on the machine. jsr is served through jsr's npm-mirror identity (`jsr:@scope/name` → `@jsr/scope__name`), so one mechanism covers both registries.
+The store is **curated by a `seed-manifest.json`**, not hard-coded: `{ "seed": [ { "name", "version", "registry" } ] }` (registry defaults to `npm`; use `"jsr"` for jsr packages). inka ships a default one; replace it to curate your own set. Discovery: `--seed-manifest` → `$INKA_SEED_MANIFEST` → `./seed-manifest.json` → next to the inka binary. The shipped default currently seeds `zod`, `@std/assert` (jsr), and the Effect trio `effect` + `@effect/platform` + `@effect/platform-node` (peers like `@effect/rpc`/`sql`/`cluster` auto-included).
+
+Distribution is a **whole-store snapshot**: `snapshot` npm-installs the seed set together (pre/postinstall already run there, before the tar is made) and packages the resolved `node_modules` as `store.tar.gz`. Consumers only download → verify → replace `node_modules`; nothing installs or runs on the machine. jsr is served through jsr's npm-mirror identity (`jsr:@scope/name` → `@jsr/scope__name`), so one mechanism covers both registries.
 
 Commands (`crates/inka`):
 
-- `inka pkg tar <spec>…` — network-only (release/dev). Resolves `npm:name@version` / `jsr:@scope/name@version` closures with a package manager and writes `.tar.gz` + sha256 sidecars, plus a payload `seed-manifest.json` next to them.
-- `inka pkg seed --from <dir-or-url>` — fetch → sha256-verify → extract into the store. With no specs it seeds the curated zero-install set (currently `zod`, `@std/assert`); pass specs to add more.
-- `inka pkg list` — show installed `name@version`.
-- `inka install <version> --from <release>` — when the release carries a `store/` payload, installs it into the store too, so curated packages arrive together with the runtime (zero extra step for end users).
+- `inka pkg snapshot [--seed-manifest <file>] [--out <dir>]` — network-only (release/dev). Resolves the whole seed set with a package manager and writes `store.tar.gz` + `.sha256` + a `seed-manifest.json` record.
+- `inka pkg seed --from <dir-or-url>` — fetch → sha256-verify → atomically replace the store's `node_modules`.
+- `inka pkg list` — show installed top-levels as `name@version`.
+- `inka install <version> --from <release>` — when the release carries a `store/` payload, seeds it too, so curated packages arrive together with the runtime (zero extra step for end users).
 
-Version policy: bare imports pick the store's unique installed version. When several versions are installed (or to pin exactly), use the prefixed specifier form — `npm:zod@3.23.0`, `jsr:@std/assert@1.0.0` — which is always accepted too; a range (`npm:zod@^3`) resolves to the best satisfying installed version. Anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
+Version policy: bare imports load the store's hoisted copy of a package. An explicit pinned/range import (`npm:effect@3.22.1`, `jsr:@std/assert@1.0.0`) must match that hoisted version, otherwise a clean error tells you to re-seed. Anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
 
 ## Building the real runtime
 
@@ -307,6 +311,7 @@ Without the embedded snapshot, inka cold-starts at ~0.6 s; the snapshot brings i
 
 - `node:` built-ins resolve with or without the prefix (`vm` ≡ `node:vm`); bare `npm:`/`jsr:` package names resolve **only** against the local package store (`inka pkg seed`), and `http(s):` module imports are rejected — the engine is offline by construction.
 - `.tsx`/`.jsx` are not supported yet; `--transpile` works for single- and multi-file `.ts/.mts/.cts` (JSX entries error).
+- Store *resolution* is fully general, but *execution* still depends on the engine's Node compatibility: CommonJS-only packages (no `exports.import`) and modules that read `process.env` at import time (parts of the Effect `platform`/`platform-node` tier via `msgpackr`/`ws`) can't run yet — pure-ESM packages like `effect` itself do.
 - Successful runs are silent; set `INKA_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[inka]` prefix.
 - `inka install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.
