@@ -52,7 +52,7 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)"
     );
     std::process::exit(2);
 }
@@ -80,6 +80,7 @@ fn main() {
         "remove" => vendor::cmd_remove(&args[1..]),
         "vendor" => vendor::cmd_vendor(&args[1..]),
         "pkg" => pkg::cmd_pkg(&args[1..]),
+        "doctor" => cmd_doctor(&args[1..]),
         _ => usage(),
     }
 }
@@ -337,30 +338,11 @@ fn cmd_list(args: &[String]) {
         }
     }
     let dir = runtime_dir(home.as_deref());
+    let (found, resolvers) = installed_parts(&dir);
     if !dir.is_dir() {
         println!("(no runtimes installed in {})", dir.display());
         return;
     }
-    let mut found: Vec<(Version, PathBuf)> = Vec::new();
-    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
-    for ent in fs::read_dir(&dir).unwrap().flatten() {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if let Some(stripped) = name.strip_prefix(FILENAME_PREFIX) {
-            if let Some(vstr) = stripped.strip_suffix(FILENAME_SUFFIX) {
-                if let Some(v) = parse_version(vstr) {
-                    found.push((v, ent.path()));
-                }
-            }
-        } else if let Some(stripped) = name.strip_prefix(RESOLVER_PREFIX) {
-            if let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) {
-                if let Some(v) = parse_version(vstr) {
-                    resolvers.push((v, ent.path()));
-                }
-            }
-        }
-    }
-    found.sort();
-    resolvers.sort();
     if found.is_empty() && resolvers.is_empty() {
         println!("(no runtimes installed in {})", dir.display());
         return;
@@ -373,7 +355,225 @@ fn cmd_list(args: &[String]) {
     }
 }
 
+/// Scan a runtime dir for installed `libinka_runtime-*.so` / `libinka_resolver-*.so`
+/// files, sorted by version. Reused by `inka list` and `inka doctor`.
+fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
+    let mut found: Vec<(Version, PathBuf)> = Vec::new();
+    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            let name = ent.file_name().to_string_lossy().into_owned();
+            if let Some(stripped) = name.strip_prefix(FILENAME_PREFIX) {
+                if let Some(vstr) = stripped.strip_suffix(FILENAME_SUFFIX) {
+                    if let Some(v) = parse_version(vstr) {
+                        found.push((v, ent.path()));
+                    }
+                }
+            } else if let Some(stripped) = name.strip_prefix(RESOLVER_PREFIX) {
+                if let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) {
+                    if let Some(v) = parse_version(vstr) {
+                        resolvers.push((v, ent.path()));
+                    }
+                }
+            }
+        }
+    }
+    found.sort();
+    resolvers.sort();
+    (found, resolvers)
+}
+
 // ---- helpers ---------------------------------------------------------------
+
+/// dlopen a resolver .so and read `inka_resolver_abi()` + `inka_resolver_version()`.
+fn resolver_abi_etc(path: &Path) -> (i32, String) {
+    let lib = match unsafe { libloading::Library::new(path) } {
+        Ok(l) => l,
+        Err(e) => return (-1, format!("load failed: {e}")),
+    };
+    let abi = unsafe {
+        lib.get::<unsafe extern "C" fn() -> i32>(b"inka_resolver_abi")
+            .map(|f| f())
+            .unwrap_or(-1)
+    };
+    let version = unsafe {
+        lib.get::<unsafe extern "C" fn() -> *const std::ffi::c_char>(b"inka_resolver_version")
+            .ok()
+            .and_then(|f| {
+                let p = f();
+                if p.is_null() {
+                    None
+                } else {
+                    Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
+                }
+            })
+            .unwrap_or_default()
+    };
+    (abi, version)
+}
+
+/// Count package roots (dirs with package.json, one level deep; scope containers
+/// count their children) under a node_modules-style pool root.
+fn pool_package_count(pool: &Path) -> usize {
+    let nm = pool.join("node_modules");
+    let root = if nm.is_dir() { &nm } else { pool };
+    let Ok(rd) = fs::read_dir(root) else {
+        return 0;
+    };
+    let mut n = 0usize;
+    for ent in rd.flatten() {
+        let p = ent.path();
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if p.join("package.json").is_file() {
+            n += 1;
+        } else if name.starts_with('@') {
+            if let Ok(sub) = fs::read_dir(&p) {
+                n += sub.flatten().filter(|s| s.path().join("package.json").is_file()).count();
+            }
+        }
+    }
+    n
+}
+
+fn seed_sha(store: &Path) -> String {
+    fs::read(store.join("seed-manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+        .and_then(|v| v.get("sha256").and_then(serde_json::Value::as_str).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Generic read of a vendored.lock (never fails the report).
+fn lock_summary(lock_path: &Path) -> (usize, Option<String>) {
+    let Ok(raw) = fs::read_to_string(lock_path) else {
+        return (0, None);
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return (0, None);
+    };
+    let entries = v
+        .get("entries")
+        .and_then(serde_json::Value::as_object)
+        .map(|o| o.len())
+        .unwrap_or(0);
+    let store = v
+        .get("store")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    (entries, store)
+}
+
+fn git_posture(vendored: &Path) -> String {
+    let gi = vendored.parent().unwrap_or(vendored).join(".gitignore");
+    match fs::read_to_string(&gi) {
+        Ok(text) if text.lines().any(|l| l.trim().trim_end_matches('/') == "vendored") => {
+            "ignore (dev)".to_string()
+        }
+        Ok(_) => "commit (release)".to_string(),
+        Err(_) => "no .gitignore".to_string(),
+    }
+}
+
+fn cmd_doctor(args: &[String]) {
+    if args.iter().any(|a| a == "--help" || a == "-h") {
+        eprintln!("usage: inka doctor");
+        std::process::exit(0);
+    }
+    const EXPECTED_RESOLVER_ABI: i32 = 2;
+    let mut warnings: Vec<String> = Vec::new();
+
+    println!("[inka] doctor");
+    let dir = runtime_dir(None);
+    println!("runtime dir: {}", dir.display());
+    let (runtimes, resolvers) = installed_parts(&dir);
+    if runtimes.is_empty() {
+        println!("  runtimes: (none installed)");
+        warnings.push("no runtimes installed; artifacts cannot run until `inka install <version>`".into());
+    }
+    for (v, p) in &runtimes {
+        println!("  runtime {v}  {}", p.display());
+    }
+
+    let (abi, res_version, res_path) = match resolvers.last() {
+        Some((v, p)) => {
+            let (a, s) = resolver_abi_etc(p);
+            (Some(a), Some(s), Some((v.clone(), p.clone())))
+        }
+        None => (None, None, None),
+    };
+    match &res_path {
+        None => {
+            println!("  resolver: none installed (vendored resolution disabled)");
+            warnings.push("no inka resolver installed; install one with `inka install` or set INKA_RESOLVER".into());
+        }
+        Some((v, p)) => {
+            let abi = abi.unwrap_or(-1);
+            println!("  resolver {v}  {}  abi={abi} version={}", p.display(), res_version.as_deref().unwrap_or("?"));
+            if abi != EXPECTED_RESOLVER_ABI {
+                warnings.push(format!(
+                    "resolver abi {abi} != expected {EXPECTED_RESOLVER_ABI}; runtime/resolver mismatch"
+                ));
+            }
+        }
+    }
+
+    let store = crate::vendor::store_dir();
+    let store_present = store.join("node_modules").is_dir();
+    let sha = seed_sha(&store);
+    println!(
+        "default store: {} ({}) packages={} sha={}",
+        store.display(),
+        if store_present { "present" } else { "absent" },
+        pool_package_count(&store),
+        if sha.is_empty() { "(none)" } else { &sha },
+    );
+
+    let vendored = crate::vendor::vendor_root();
+    let vendored_count = pool_package_count(&vendored);
+    println!("vendored pool (cwd): {vendored_count} package root(s)");
+    if vendored_count > 0 {
+        let posture = git_posture(&vendored);
+        let ignored = posture == "ignore (dev)";
+        println!(
+            "git posture: {} (vendored/ {})",
+            posture,
+            if ignored { "ignored" } else { "not ignored" }
+        );
+    }
+
+    let (lock_entries, lock_store) = lock_summary(&vendored.join("vendored.lock"));
+    if lock_entries > 0 {
+        println!("vendored.lock: {lock_entries} entr{}", if lock_entries == 1 { "y" } else { "ies" });
+        let current = format!(
+            "{} sha256={}",
+            store.display(),
+            if sha.is_empty() { "no-sha-record" } else { &sha }
+        );
+        match lock_store {
+            Some(recorded) if recorded != current => {
+                if store_present {
+                    warnings.push(format!(
+                        "vendored set was built against a different default store ({recorded}); reseed or vendor the affected deps"
+                    ));
+                }
+            }
+            _ => {}
+        }
+        if !store_present {
+            warnings.push("default store is missing but vendored.lock records deps it would provide; reseed or vendor the affected deps".into());
+        }
+    }
+
+    if warnings.is_empty() {
+        println!("warnings: none");
+    } else {
+        println!("warnings:");
+        for w in &warnings {
+            println!("  - {w}");
+        }
+    }
+}
+
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);

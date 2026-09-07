@@ -164,7 +164,7 @@ Descriptor syntax and enforcement match Deno exactly (`Deno.permissions` works, 
 Two notes:
 
 - **Fail-closed:** if an artifact declares permissions but the installed runtime predates the `_perm` ABI, launching errors (exit 4) rather than silently running allow-all.
-- **Relative paths resolve at run time** against the process cwd (Deno semantics). Resolving them against the artifact's build location is a noted future option.
+- **Relative `allow-read`/`allow-write` entries are interpreted at run time against the directory the executable is launched from** (Deno semantics). The paths in your config (`permissions` sets / `compile.permissions`) or a `.manifest` are passed through verbatim — copying an exe to another directory changes which paths a relative grant covers. This is convenient for dev (`allow-read=./data` next to where you run) but easy to misread for a portable artifact. To pin grants to the build-time project layout instead, write **absolute paths** in your config or `.manifest` — the trade-off: absolute paths tie the artifact to a machine's path layout, while relative entries match Deno and follow the launch directory. (Canonicalizing config paths to the build dir at bake time is a noted future option.)
 - **Policy is a property of the runtime build:** runtimes built before the deny-by-default change ran permission-less artifacts allow-all; current builds deny. Rebuild old artifacts against the current runtime to inherit the new default (or declare `permissions=all`).
 
 ## Quickstart

@@ -56,11 +56,11 @@ pub(crate) fn cmd_vendor(args: &[String]) {
 
 // ---- project + store paths ------------------------------------------------
 
-fn vendor_root() -> PathBuf {
+pub(crate) fn vendor_root() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(VENDOR_DIR)
 }
 
-fn store_dir() -> PathBuf {
+pub(crate) fn store_dir() -> PathBuf {
     if let Ok(s) = std::env::var("INKA_STORE") {
         PathBuf::from(s)
     } else {
@@ -213,6 +213,11 @@ fn parse_add_spec(raw: &str) -> Result<AddSpec, String> {
 struct Lock {
     #[serde(default)]
     entries: BTreeMap<String, LockEntry>,
+    /// Informational record of the default store used for dedupe at add time
+    /// (WS3-3). Never gates anything; `cmd_status` warns when the current store
+    /// identity differs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    store: Option<String>,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -240,6 +245,22 @@ fn save_lock(root: &Path, lock: &Lock) -> Result<(), String> {
     let json = serde_json::to_string_pretty(lock).map_err(|e| format!("encode lock: {e}"))?;
     fs::write(lock_path(root), format!("{json}\n"))
         .map_err(|e| format!("cannot write {}: {e}", lock_path(root).display()))
+}
+
+/// Identity string for the default store, for the lock's informational note:
+/// the store path plus its `seed-manifest.json` `sha256` record when present.
+fn store_identity(store: &Path) -> String {
+    let sha = fs::read(store.join("seed-manifest.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("sha256").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default();
+    let sha = if sha.is_empty() {
+        "no-sha-record".to_string()
+    } else {
+        sha
+    };
+    format!("{} sha256={sha}", store.display())
 }
 
 // ---- manifests (package.json + deno.json union) ---------------------------
@@ -1251,6 +1272,8 @@ pub(crate) fn cmd_add(args: &[String]) {
         }
         entry.converted = converted.get(name).cloned().unwrap_or_default();
     }
+    // WS3-3: record which default store the dedupe consulted.
+    lock.store = Some(store_identity(&store));
     save_lock(&root, &lock).unwrap_or_else(|e| fail(&e));
 
     let mut manifests = project_manifests();
@@ -1352,6 +1375,10 @@ fn prune_orphans(root: &Path, lock: &mut Lock) {
 }
 
 /// Is `dep` a runtime dependency of any package root currently under `root`?
+/// WS3-2: `dep` counts when it appears in ANY of `dependencies`,
+/// `optionalDependencies`, or `peerDependencies` (skipping `peerDependenciesMeta`
+/// entries marked optional=true) of an on-disk vendored package root. Only
+/// affects prune/remove decisions; never auto-vendors.
 fn package_requires(root: &Path, dep: &str) -> bool {
     let Ok(top) = fs::read_dir(root) else {
         return false;
@@ -1363,13 +1390,28 @@ fn package_requires(root: &Path, dep: &str) -> bool {
         }
         let Ok(raw) = fs::read(dir.join("package.json")) else { continue };
         let Ok(v) = serde_json::from_slice::<Value>(&raw) else { continue };
-        let deps = v
-            .get("dependencies")
-            .and_then(Value::as_object)
-            .cloned()
-            .unwrap_or_default();
+        let key = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
+        let deps = key("dependencies");
         if deps.contains_key(dep) {
             return true;
+        }
+        if key("optionalDependencies").contains_key(dep) {
+            return true;
+        }
+        let peers = key("peerDependencies");
+        if peers.contains_key(dep) {
+            // skip peers declared optional in peerDependenciesMeta
+            let meta = v
+                .get("peerDependenciesMeta")
+                .and_then(Value::as_object)
+                .and_then(|m| m.get(dep))
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("optional"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if !meta {
+                return true;
+            }
         }
     }
     false
@@ -1425,6 +1467,19 @@ pub(crate) fn cmd_status(args: &[String]) {
             "absent"
         }
     );
+    // WS3-3: informational store identity recorded at add time; warn (never
+    // fail) when the current store differs.
+    if let Some(recorded) = &lock.store {
+        let current = store_identity(&store);
+        println!("recorded default store: {recorded}");
+        if current != *recorded {
+            eprintln!(
+                "[inka] warning: this vendored set was built against a different default store \
+                 ({recorded});\n  current store identity: {current}\n  reseed or vendor the \
+                 affected deps to pin behavior"
+            );
+        }
+    }
     if lock.entries.is_empty() {
         println!("vendored: (none)");
     }
@@ -1854,5 +1909,86 @@ mod tests {
         let mirror = parse_add_spec("@jsr/std__path").unwrap();
         assert_eq!(original.name, "@jsr/std__path");
         assert_eq!(mirror.name, "@jsr/std__path");
+    }
+
+    // ---- WS3-2: prune considers optional/peer dependencies --------------------
+
+    #[test]
+    fn package_requires_sees_optional_and_nonoptional_peers() {
+        let root = scratch("reqs");
+        // a -> b only under optionalDependencies
+        write_file(
+            &root,
+            "a/package.json",
+            r#"{"name":"a","version":"1.0.0","optionalDependencies":{"b":"1.0.0"}}"#,
+        );
+        // a2 -> peers b (non-optional) and c (optional via peerDependenciesMeta)
+        write_file(
+            &root,
+            "a2/package.json",
+            r#"{"name":"a2","version":"1.0.0","peerDependencies":{"b":"1.0.0","c":"1.0.0"},"peerDependenciesMeta":{"c":{"optional":true}}}"#,
+        );
+        write_file(&root, "b/package.json", r#"{"name":"b","version":"1.0.0"}"#);
+        write_file(&root, "c/package.json", r#"{"name":"c","version":"1.0.0"}"#);
+        // "b" referenced via optionalDependencies and a non-optional peer
+        assert!(package_requires(&root, "b"));
+        // "c" only referenced as an optional peer -> not a hard reference
+        assert!(!package_requires(&root, "c"));
+        // an unreferenced name is not required
+        assert!(!package_requires(&root, "nope"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn prune_keeps_optional_dep_until_referrer_removed() {
+        let root = scratch("prune");
+        write_file(
+            &root,
+            "a/package.json",
+            r#"{"name":"a","version":"1.0.0","optionalDependencies":{"b":"1.0.0"}}"#,
+        );
+        write_file(&root, "b/package.json", r#"{"name":"b","version":"1.0.0"}"#);
+        let mut lock = Lock::default();
+        lock.entries.insert(
+            "a".to_string(),
+            LockEntry { version: "1.0.0".into(), why: "root".into(), converted: vec![] },
+        );
+        lock.entries.insert(
+            "b".to_string(),
+            LockEntry { version: "1.0.0".into(), why: "dep".into(), converted: vec![] },
+        );
+        // A still references B (optional) -> B is not pruned.
+        prune_orphans(&root, &mut lock);
+        assert!(lock.entries.contains_key("b"));
+        // Remove A (dir + lock entry), then B becomes an orphan and is pruned.
+        let _ = fs::remove_dir_all(root.join("a"));
+        lock.entries.remove("a");
+        prune_orphans(&root, &mut lock);
+        assert!(!lock.entries.contains_key("b"));
+        assert!(!root.join("b").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- WS3-3: lock store note -----------------------------------------------
+
+    #[test]
+    fn lock_store_note_round_trips_and_defaults_backward_compatibly() {
+        let mut lock = Lock::default();
+        lock.store = Some("/tmp/store sha256=abc123".to_string());
+        lock.entries.insert(
+            "zod".to_string(),
+            LockEntry { version: "3.23.0".into(), why: "root".into(), converted: vec![] },
+        );
+        let json = serde_json::to_string(&lock).unwrap();
+        assert!(json.contains("\"store\""), "{json}");
+        let back: Lock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.store.as_deref(), Some("/tmp/store sha256=abc123"));
+        assert_eq!(back.entries.len(), 1);
+
+        // A pre-WS3-3 lock (no "store" key) still parses with store == None.
+        let old = r#"{"entries":{"zod":{"version":"3.23.0","why":"root","converted":[]}}}"#;
+        let parsed: Lock = serde_json::from_str(old).unwrap();
+        assert_eq!(parsed.store, None);
+        assert_eq!(parsed.entries.len(), 1);
     }
 }

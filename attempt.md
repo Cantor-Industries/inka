@@ -707,3 +707,14 @@ needs to express runtime + permissions; `module=` is always set to the entry.
 - Verified offline matrix: no-config deny, deno default-set allow, compile.permissions,
   package.json-only, both-files (deno wins), `-P <name>`, `--runtime` override,
   deno.jsonc, and back-compat on-disk .manifest. Store-mode regression green.
+
+## Relative allow-* path semantics (WS3-4)
+
+`allow-read`/`allow-write` lists in the config or a `.manifest` are baked VERBATIM
+and interpreted by the runtime at RUN time against the directory the executable
+is launched from (Deno semantics), NOT the project dir at build time. Copying an
+exe elsewhere changes which paths a relative grant covers — convenient in dev,
+but easy to misread for a portable artifact. To pin grants to the build layout,
+write ABSOLUTE paths in the config/.manifest; the trade-off is that absolute
+paths tie the artifact to a machine path layout. Canonicalizing config paths to
+the build dir at bake time is a noted future option (not implemented).

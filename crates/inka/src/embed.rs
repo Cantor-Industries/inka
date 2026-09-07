@@ -452,6 +452,22 @@ pub fn collect_vendored(cwd: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(files.into_iter().collect())
 }
 
+/// Files that never run and bloat whole-pool artifacts. Vendored packages ship
+/// tests/specs, source maps, and type declarations (only tooling uses .d.ts);
+/// the app's own files are never filtered (this is only consulted by
+/// `walk_vendored`).
+fn is_vendor_noise(name: &str) -> bool {
+    let l = name.to_ascii_lowercase();
+    l.ends_with("_test.ts")
+        || l.ends_with(".test.ts")
+        || l.ends_with(".test.js")
+        || l.contains(".spec.")
+        || l.ends_with(".map")
+        || l.ends_with(".d.ts")
+        || l.ends_with(".d.mts")
+        || l.ends_with(".d.cts")
+}
+
 fn walk_vendored(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
     let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
     for ent in rd.flatten() {
@@ -470,6 +486,11 @@ fn walk_vendored(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) 
             }
             walk_vendored(cwd, &ent.path(), files)?;
         } else if ft.is_file() {
+            // WS3-1: skip vendored tests/specs, source maps, and type
+            // declarations — never imported at run time.
+            if is_vendor_noise(&name) {
+                continue;
+            }
             if let Ok(bytes) = fs::read(ent.path()) {
                 if let Ok(rel) = ent.path().strip_prefix(cwd) {
                     let rel = rel
@@ -595,6 +616,37 @@ mod tests {
         assert!(
             rels.iter().all(|r| r != "app.js" && r != "util.js"),
             "app files must not be returned: {rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // WS3-1: whole-pool vendored embed skips tests/specs, source maps, and type
+    // declarations, but keeps real source (including .ts) modules.
+    #[test]
+    fn collect_vendored_skips_noise_files() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "vendored/ws/package.json",
+            r#"{"name":"ws","version":"1.0.0"}"#,
+        );
+        mk(&cwd, "vendored/ws/index.js", "export const i = 1;\n");
+        mk(&cwd, "vendored/ws/mod.ts", "export const t = 1;\n"); // real .ts source kept
+        mk(&cwd, "vendored/ws/lib_test.ts", "export const t = 1;\n");
+        mk(&cwd, "vendored/ws/spec.test.js", "export const t = 1;\n");
+        mk(&cwd, "vendored/ws/y.spec.ts", "export const t = 1;\n");
+        mk(&cwd, "vendored/ws/index.js.map", "{}");
+        mk(&cwd, "vendored/ws/index.d.ts", "export declare const i: number;\n");
+        let files = collect_vendored(&cwd).unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(
+            rels,
+            vec![
+                "vendored/ws/index.js",
+                "vendored/ws/mod.ts",
+                "vendored/ws/package.json",
+            ],
+            "{rels:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
     }

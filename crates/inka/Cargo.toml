@@ -19,5 +19,6 @@ serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 sha2 = "0.10"
 url = "2"
+libloading = "0.8"
 deno_ast = { version = "=0.53.3", features = ["transpiling"], optional = true }
 inka-resolver = { path = "../inka-resolver" }
