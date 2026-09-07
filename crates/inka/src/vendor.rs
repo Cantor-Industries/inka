@@ -14,7 +14,7 @@
 //   vendored.lock pins the whole vendored closure (roots + auto-vendored deps).
 //   package.json + deno.json (union) declare the user ROOT set (direct adds only).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -537,40 +537,484 @@ fn default_patches_base() -> PathBuf {
     local
 }
 
-/// Convert a CJS package (at scratch `nm/<name>`) in place using a known patch
-/// spec if one exists. Returns Some(converted_kind) or errors on unpatched CJS.
-fn convert_if_needed(nm: &Path, name: &str, version: &str) -> Result<Option<String>, String> {
-    if !entry_is_commonjs(&nm.join(name)) {
-        return Ok(None);
+/// Pick the file target out of an `exports` "." condition value, preferring the
+/// conditions an ESM-first tool resolves: import -> node -> module -> default ->
+/// require (recursing into nested condition objects). String and array forms are
+/// handled; object keys we do not recognize (types, browser, …) are skipped.
+fn pick_export_target(v: &Value) -> Option<&str> {
+    match v {
+        Value::String(s) => Some(s.as_str()),
+        Value::Array(items) => items.iter().filter_map(pick_export_target).next(),
+        Value::Object(map) => {
+            for key in ["import", "node", "module", "default", "require"] {
+                if let Some(sub) = map.get(key) {
+                    if let Some(s) = pick_export_target(sub) {
+                        return Some(s);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
     }
-    let spec = default_patches_base()
-        .join(name)
-        .join(version)
-        .join("patch.json");
-    if !spec.is_file() {
-        return Err(format!(
-            "'{name}@{version}' is CommonJS and has no patch spec at {};\n  add a patches/{name}/{version}/patch.json (see crates/inka-patcher) or keep the package in the default store",
-            spec.display()
-        ));
+}
+
+/// Resolve an exports/main target (which may be extensionless or a directory)
+/// to a real file inside `root`, returning its package-relative path. Targets
+/// that escape the package root, or that resolve to nothing, yield None.
+fn resolve_entry_file(root: &Path, target: &str) -> Option<String> {
+    let t = target.trim_start_matches("./");
+    if t.is_empty() || t.split('/').any(|c| c == "..") {
+        return None;
     }
+    let cand = root.join(t);
+    if cand.is_file() {
+        return Some(t.to_string());
+    }
+    if cand.is_dir() {
+        for ext in ["js", "cjs", "mjs", "json"] {
+            let idx = format!("{}/index.{ext}", t.trim_end_matches('/'));
+            if root.join(&idx).is_file() {
+                return Some(idx);
+            }
+        }
+        return None;
+    }
+    for ext in ["js", "cjs", "mjs", "json"] {
+        let with_ext = format!("{t}.{ext}");
+        if root.join(&with_ext).is_file() {
+            return Some(with_ext);
+        }
+    }
+    None
+}
+
+/// Resolve the served entry of a CJS package root, mirroring the resolver's
+/// selection: package.json `exports` string, or the `"."` condition value;
+/// otherwise legacy `main`; otherwise `index.js`. Returns the file's
+/// package-relative path, or None when nothing resolvable exists.
+fn find_cjs_entry(pkg_root: &Path) -> Option<String> {
+    let raw = fs::read_to_string(pkg_root.join("package.json")).ok()?;
+    let pkg: Value = serde_json::from_str(&raw).ok()?;
+    let target = match pkg.get("exports") {
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(Value::Object(map)) if map.contains_key(".") => {
+            map.get(".").and_then(pick_export_target).map(str::to_string)
+        }
+        _ => None,
+    };
+    let t = target.unwrap_or_else(|| {
+        pkg.get("main")
+            .and_then(Value::as_str)
+            .unwrap_or("index.js")
+            .to_string()
+    });
+    resolve_entry_file(pkg_root, &t)
+}
+
+/// Collect every `process.env.<NAME>` / `process.env["NAME"]` / `process.env['NAME']`
+/// token in a text blob. Deliberately coarse (WS2-1 v1 "any read anywhere").
+fn collect_env_tokens(text: &str, out: &mut BTreeSet<String>) {
+    let b = text.as_bytes();
+    const K: &[u8] = b"process.env";
+    let mut i = 0;
+    while i + K.len() <= b.len() {
+        if &b[i..i + K.len()] != K {
+            i += 1;
+            continue;
+        }
+        let mut j = i + K.len();
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t' || b[j] == b'\n') {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'.' {
+            j += 1;
+            let start = j;
+            while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_' || b[j] == b'$') {
+                j += 1;
+            }
+            if j > start {
+                out.insert(text[start..j].to_string());
+            }
+            i = j + 1;
+        } else if j < b.len() && b[j] == b'[' {
+            j += 1;
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t' || b[j] == b'\n') {
+                j += 1;
+            }
+            let quote = if j < b.len() && (b[j] == b'\'' || b[j] == b'"') {
+                let q = b[j];
+                j += 1;
+                Some(q)
+            } else {
+                None
+            };
+            let start = j;
+            while j < b.len() && (quote.map_or(b']', |q| q) != b[j]) {
+                j += 1;
+            }
+            if j > start {
+                let name: String = text[start..j]
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$' || *c == '.')
+                    .collect();
+                if !name.is_empty() {
+                    out.insert(name);
+                }
+            }
+            i = j + 1;
+        } else {
+            i = j + 1;
+        }
+    }
+}
+
+/// Find relative `require("./x")` / `import … from "./x"` specifiers in a file.
+fn collect_relative_specifiers(text: &str) -> Vec<String> {
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        let kw = if b[i..].starts_with(b"require(") {
+            Some(i + "require(".len())
+        } else if b[i..].starts_with(b"from ") {
+            Some(i + "from ".len())
+        } else {
+            None
+        };
+        if let Some(mut j) = kw {
+            while j < b.len() && (b[j] == b' ' || b[j] == b'\t' || b[j] == b'\n') {
+                j += 1;
+            }
+            if j < b.len() && (b[j] == b'\'' || b[j] == b'"') {
+                let q = b[j];
+                j += 1;
+                let start = j;
+                while j < b.len() && b[j] != q {
+                    j += 1;
+                }
+                if j < b.len() {
+                    let spec = &text[start..j];
+                    if spec.starts_with("./") || spec.starts_with("../") {
+                        out.push(spec.to_string());
+                    }
+                    i = j + 1;
+                    continue;
+                }
+            }
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Resolve a relative specifier from `from_rel` to an existing file inside the
+/// package root (following extension/`index.*` conventions); None if it escapes
+/// the root or does not exist.
+fn resolve_in_root(root: &Path, from_rel: &str, spec: &str) -> Option<String> {
+    let base = Path::new(from_rel).parent().unwrap_or_else(|| Path::new(""));
+    let cand = base.join(spec);
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for comp in cand.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                if parts.is_empty() {
+                    return None; // escapes the package root
+                }
+                parts.pop();
+            }
+            std::path::Component::CurDir | std::path::Component::RootDir => {}
+            std::path::Component::Normal(p) => parts.push(p),
+            _ => {}
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let rel: String = parts
+        .iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if root.join(&rel).is_file() {
+        return Some(rel);
+    }
+    for ext in ["js", "cjs", "mjs", "json"] {
+        let with_ext = format!("{rel}.{ext}");
+        if root.join(&with_ext).is_file() {
+            return Some(with_ext);
+        }
+    }
+    let dir = root.join(&rel);
+    if dir.is_dir() {
+        for ext in ["js", "cjs", "mjs", "json"] {
+            let idx = format!("{}/index.{ext}", rel.trim_end_matches('/'));
+            if root.join(&idx).is_file() {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// WS2-1 env-read pre-pass: scan the served entry and (following small relative
+/// imports, up to depth 2) collect every `process.env.<NAME>` read. Returns the
+/// sorted, deduped names. v1 policy is "any read anywhere": a non-empty result
+/// makes the package a hard case (an env-gated artifact needs allow-env, or a
+/// curated spec with the right neutralizeEnv).
+fn scan_env_reads(pkg_root: &Path, entry: &str) -> Vec<String> {
+    const MAX_FOLLOW: u64 = 64 * 1024;
+    const MAX_DEPTH: u32 = 2;
+    let mut found: BTreeSet<String> = BTreeSet::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    queue.push_back((entry.to_string(), 0));
+    while let Some((rel, depth)) = queue.pop_front() {
+        if !visited.insert(rel.clone()) {
+            continue;
+        }
+        let Ok(bytes) = fs::read(pkg_root.join(&rel)) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        collect_env_tokens(&text, &mut found);
+        if depth >= MAX_DEPTH || bytes.len() as u64 > MAX_FOLLOW {
+            continue;
+        }
+        for spec in collect_relative_specifiers(&text) {
+            if let Some(next) = resolve_in_root(pkg_root, &rel, &spec) {
+                queue.push_back((next, depth + 1));
+            }
+        }
+    }
+    found.into_iter().collect()
+}
+
+/// Scaffold-style error for a CJS package that could not be auto-converted,
+/// naming the reason and the exact curated spec file to create.
+fn cjs_scaffold_error(name: &str, version: &str, reason: &str) -> String {
+    format!(
+        "'{name}@{version}' is CommonJS and could not be auto-converted ({reason});\n  \
+         add a patches/{name}/{version}/patch.json (see crates/inka-patcher), \
+         neutralize/allow the env it reads, or keep the package in the default store"
+    )
+}
+
+/// Run the patcher on a spec file against the scratch node_modules, returning
+/// the patch kind the spec declares.
+fn invoke_patcher(spec_path: &Path, nm: &Path) -> Result<String, String> {
     let bin = pkg::patcher_binary().map_err(|e| {
         format!(
-            "conversion needs the patcher: {e}\n  (build crates/inka-patcher and keep it next to the inka binary)"
+            "CJS conversion needs the inka-patcher binary: {e}\n  \
+             (build crates/inka-patcher --release with the big-disk cargo home/target, \
+             keep it next to this inka binary, or set INKA_PATCHER)"
         )
     })?;
     let mut cmd = Command::new(&bin);
     cmd.arg("apply")
         .arg("--spec")
-        .arg(&spec)
+        .arg(spec_path)
         .arg("--node-modules")
         .arg(nm);
-    pkg::run_ok(&mut cmd, &format!("inka-patcher apply {}", spec.display()))?;
-    let kind = fs::read_to_string(&spec)
+    pkg::run_ok(&mut cmd, &format!("inka-patcher apply {}", spec_path.display()))?;
+    let kind = fs::read_to_string(spec_path)
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(&t).ok())
         .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string))
         .unwrap_or_else(|| "file-patch".to_string());
-    Ok(Some(kind))
+    Ok(kind)
+}
+
+/// Write a synthesized bundle-esm spec for auto-conversion into the scratch work
+/// dir (never the user's repo). Returns the spec file path.
+fn write_synthesized_spec(
+    work: &Path,
+    name: &str,
+    version: &str,
+    entry: &str,
+) -> Result<PathBuf, String> {
+    let file_name = format!("auto-{}.json", name.replace('/', "__"));
+    let path = work.join(file_name);
+    let spec = serde_json::json!({
+        "package": name,
+        "version": version,
+        "type": "bundle-esm",
+        "entry": entry,
+        "external": [],
+        "output": "esm.js",
+        "neutralizeEnv": [],
+        "note": format!("auto-generated by inka add: CJS {name}@{version} with no curated patch"),
+    });
+    fs::write(&path, serde_json::to_string_pretty(&spec).unwrap())
+        .map_err(|e| format!("cannot write synthesized patch spec {}: {e}", path.display()))?;
+    Ok(path)
+}
+
+/// Conversion decision for a leaf that is being vendored.
+#[derive(Debug, PartialEq)]
+enum CjsPlan {
+    /// Not CJS (and no curated spec): vendored as-is.
+    Skip,
+    /// A curated patch spec exists for this exact name@version — apply it
+    /// regardless of classification (dual/ESM-facade packages like ws are
+    /// converted on add, not vendored raw).
+    Curated(PathBuf),
+    /// Automatic bundle-esm fallback for a CJS leaf, carrying its entry file.
+    Auto(String),
+}
+
+/// Decide what to do with a leaf, without invoking the patcher (pure, testable).
+/// Curated spec wins first; then ESM-classified leaves are skipped; then a CJS
+/// leaf is Auto unless its entry is unresolvable or it reads env (pre-scan
+/// fast-fail).
+fn plan_conversion(
+    base: &Path,
+    nm: &Path,
+    name: &str,
+    version: &str,
+) -> Result<CjsPlan, String> {
+    let root = nm.join(name);
+    let curated = base.join(name).join(version).join("patch.json");
+    if curated.is_file() {
+        return Ok(CjsPlan::Curated(curated));
+    }
+    if !entry_is_commonjs(&root) {
+        return Ok(CjsPlan::Skip);
+    }
+    let entry = match find_cjs_entry(&root) {
+        Some(e) => e,
+        None => {
+            return Err(cjs_scaffold_error(
+                name,
+                version,
+                "no resolvable entry file (exports/main/index all missing or unusable)",
+            ))
+        }
+    };
+    let envs = scan_env_reads(&root, &entry);
+    if !envs.is_empty() {
+        return Err(cjs_scaffold_error(
+            name,
+            version,
+            &format!(
+                "reads process.env at load time ({}) — would need allow-env or a curated \
+                 spec with neutralizeEnv",
+                envs.join(", ")
+            ),
+        ));
+    }
+    Ok(CjsPlan::Auto(entry))
+}
+
+/// Authoritative env-read gate on the *finished bundle*: esm.js is exactly the
+/// code that runs, so any surviving `process.env` / `process["env"]` reference
+/// (dot, bracket, destructuring, or aliasing — whatever leaves the literal in
+/// the chunk) is a runtime env access. Returns best-effort names; a reference
+/// that yields no parseable name reports ["<unknown>"] so the hard case still
+/// fires.
+fn bundle_env_refs(text: &str) -> Vec<String> {
+    let references = text.contains("process.env")
+        || text.contains("process[\"env\"]")
+        || text.contains("process['env']");
+    if !references {
+        return Vec::new();
+    }
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    collect_env_tokens(text, &mut names);
+    if names.is_empty() {
+        vec!["<unknown>".to_string()]
+    } else {
+        names.into_iter().collect()
+    }
+}
+
+/// Count `__require(<expr>)` calls in a bundle whose first argument is NOT a
+/// string literal. Hoisted builtins and intentional optional-native externs are
+/// literals and are not counted; an expression argument is a dynamic require
+/// that the throwing shim will not satisfy at runtime.
+fn scan_dynamic_requires(text: &str) -> usize {
+    let b = text.as_bytes();
+    let mut count = 0;
+    let mut i = 0;
+    while i < b.len() {
+        if !b[i..].starts_with(b"__require(") {
+            i += 1;
+            continue;
+        }
+        let mut j = i + b"__require(".len();
+        while j < b.len() && (b[j] == b' ' || b[j] == b'\t' || b[j] == b'\n') {
+            j += 1;
+        }
+        if j < b.len() && b[j] == b'\'' || b[j] == b'"' {
+            // literal (hoisted builtin / optional native) — fine
+        } else {
+            count += 1;
+        }
+        i += 1;
+    }
+    count
+}
+
+/// Convert a CJS package (at scratch `nm/<name>`) in place. A curated patch spec
+/// is applied when present (classification-independent); otherwise WS2-1 auto
+/// bundle-esm converts genuine CJS leaves. Returns Some(converted_kind).
+fn convert_if_needed(nm: &Path, name: &str, version: &str) -> Result<Option<String>, String> {
+    let base = default_patches_base();
+    match plan_conversion(&base, nm, name, version)? {
+        CjsPlan::Skip => Ok(None),
+        CjsPlan::Curated(spec) => invoke_patcher(&spec, nm).map(Some),
+        CjsPlan::Auto(entry) => {
+            let root = nm.join(name);
+            let work = nm.parent().unwrap_or(nm);
+            let spec_path = write_synthesized_spec(work, name, version, &entry)?;
+            invoke_patcher(&spec_path, nm).map_err(|e| {
+                cjs_scaffold_error(name, version, &format!("automatic conversion failed: {e}"))
+            })?;
+            let out = root.join("esm.js");
+            let text = fs::read_to_string(&out).map_err(|_| {
+                cjs_scaffold_error(
+                    name,
+                    version,
+                    "automatic conversion produced no esm.js output",
+                )
+            })?;
+            if text.contains("createRequire") {
+                return Err(cjs_scaffold_error(
+                    name,
+                    version,
+                    "automatic conversion produced a bundle that still references createRequire",
+                ));
+            }
+            let envs = bundle_env_refs(&text);
+            if !envs.is_empty() {
+                return Err(cjs_scaffold_error(
+                    name,
+                    version,
+                    &format!(
+                        "automatic conversion left process.env reads in the bundle ({}) — \
+                         would need allow-env or a curated spec with neutralizeEnv",
+                        envs.join(", ")
+                    ),
+                ));
+            }
+            if entry_is_commonjs(&root) {
+                return Err(cjs_scaffold_error(
+                    name,
+                    version,
+                    "still classified CommonJS after automatic conversion",
+                ));
+            }
+            let dyns = scan_dynamic_requires(&text);
+            if dyns > 0 {
+                eprintln!(
+                    "[inka] warning: '{name}@{version}' auto-converted but left {dyns} dynamic \
+                     require(s) that will throw at runtime when reached (add a curated \
+                     patches/{name}/{version}/patch.json or guard the require with try/catch)"
+                );
+            }
+            Ok(Some("bundle-esm".to_string()))
+        }
+    }
 }
 
 // ---- add -------------------------------------------------------------------
@@ -1044,5 +1488,260 @@ mod tests {
         write_file(&store, "node_modules/stray/file.txt", "x\n");
         assert!(!store_has_packages(&store));
         let _ = fs::remove_dir_all(&store);
+    }
+
+    // ---- WS2-1: find_cjs_entry -------------------------------------------
+
+    fn pkg_root() -> PathBuf {
+        let d = scratch("cjs");
+        d
+    }
+
+    fn entry_scratch(pkg_json: &str, files: &[(&str, &str)]) -> PathBuf {
+        let root = pkg_root();
+        write_file(&root, "package.json", pkg_json);
+        for (rel, body) in files {
+            write_file(&root, rel, body);
+        }
+        root
+    }
+
+    #[test]
+    fn find_cjs_entry_legacy_main() {
+        let root = entry_scratch(r#"{"name":"m","version":"1.0.0","main":"index.js"}"#, &[("index.js", "")]);
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("index.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_exports_string() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","exports":"./lib/main.js"}"#,
+            &[("lib/main.js", "")],
+        );
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("lib/main.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_exports_default_condition() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","exports":{".":{"types":"./index.d.ts","default":"./lib/cjs/index.js"}}}"#,
+            &[("lib/cjs/index.js", "")],
+        );
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("lib/cjs/index.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_exports_require_only_condition() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","exports":{".":{"require":"./index.js"}}}"#,
+            &[("index.js", "")],
+        );
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("index.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_subpath_only_falls_back_to_main() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","exports":{"./foo":"./foo.js"},"main":"./main.js"}"#,
+            &[("main.js", "")],
+        );
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("main.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_defaults_to_index() {
+        let root = entry_scratch(r#"{"name":"x","version":"1.0.0"}"#, &[("index.js", "")]);
+        assert_eq!(find_cjs_entry(&root).as_deref(), Some("index.js"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn find_cjs_entry_unresolvable_is_none() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","main":"./missing.js"}"#,
+            &[],
+        );
+        assert_eq!(find_cjs_entry(&root), None);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- WS2-1: scan_env_reads -------------------------------------------
+
+    #[test]
+    fn scan_env_reads_finds_all_forms() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","main":"index.js"}"#,
+            &[(
+                "index.js",
+                "module.exports = { a: process.env.FOO };\nif (process.env[\"BAR\"]) {}\nconst c = process.env['BAZ'];\n",
+            )],
+        );
+        assert_eq!(scan_env_reads(&root, "index.js"), vec!["BAR", "BAZ", "FOO"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_env_reads_follows_small_relative_imports() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","main":"index.js"}"#,
+            &[
+                ("index.js", "require('./cfg');\n"),
+                ("cfg.js", "module.exports = { k: process.env.CFG_KEY };\n"),
+            ],
+        );
+        assert_eq!(scan_env_reads(&root, "index.js"), vec!["CFG_KEY"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_env_reads_empty_when_no_reads() {
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","main":"index.js"}"#,
+            &[("index.js", "module.exports = { plain: true };\n")],
+        );
+        assert!(scan_env_reads(&root, "index.js").is_empty());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn scan_env_reads_counts_reads_inside_functions_too() {
+        // WS2-1 v1 policy is deliberately coarse: any read anywhere is flagged.
+        let root = entry_scratch(
+            r#"{"name":"x","version":"1.0.0","main":"index.js"}"#,
+            &[("index.js", "module.exports = function () { return process.env.LAZY; };\n")],
+        );
+        assert_eq!(scan_env_reads(&root, "index.js"), vec!["LAZY"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // ---- WS2-1: auto-conversion hard cases --------------------------------
+
+    #[test]
+    fn convert_unresolvable_cjs_is_a_scaffold_error() {
+        // A CommonJS package whose entry cannot be resolved -> clean hard error.
+        let work = scratch("work");
+        let nm = work.join("node_modules");
+        let name = "badexit";
+        let root = nm.join(name);
+        fs::create_dir_all(&root).unwrap();
+        write_file(
+            &root,
+            "package.json",
+            r#"{"name":"badexit","version":"1.0.0","main":"./missing.js"}"#,
+        );
+        let err = convert_if_needed(&nm, name, "1.0.0").unwrap_err();
+        assert!(err.contains("badexit@1.0.0"), "{err}");
+        assert!(err.contains("no resolvable entry"), "{err}");
+        assert!(err.contains("patches/badexit/1.0.0/patch.json"), "{err}");
+        // nothing half-installed: the scratch root holds no converted output
+        assert!(!root.join("esm.js").exists());
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn convert_env_reading_cjs_is_a_scaffold_error() {
+        let work = scratch("work-env");
+        let nm = work.join("node_modules");
+        let name = "envleaf";
+        let root = nm.join(name);
+        fs::create_dir_all(&root).unwrap();
+        write_file(
+            &root,
+            "package.json",
+            r#"{"name":"envleaf","version":"1.0.0","main":"index.js"}"#,
+        );
+        write_file(
+            &root,
+            "index.js",
+            "module.exports = { m: process.env.ENVLEAF_CFG };\n",
+        );
+        let err = convert_if_needed(&nm, name, "1.0.0").unwrap_err();
+        assert!(err.contains("reads process.env at load time"), "{err}");
+        assert!(err.contains("ENVLEAF_CFG"), "{err}");
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    // ---- WS2-1 hardening: plan_conversion (curated-first, classification-agnostic)
+
+    #[test]
+    fn plan_curated_spec_wins_over_esm_classification() {
+        let work = scratch("plan-curated");
+        let nm = work.join("node_modules");
+        let base = work.join("patches-base");
+        let name = "dual";
+        let root = nm.join(name);
+        fs::create_dir_all(&root).unwrap();
+        // ESM-classified (import condition) — today this is vendored raw.
+        write_file(
+            &root,
+            "package.json",
+            r#"{"name":"dual","version":"1.0.0","exports":{".":{"import":"./index.mjs"}}}"#,
+        );
+        write_file(&root, "index.mjs", "export const x = 1;\n");
+        write_file(&base, "dual/1.0.0/patch.json", "{}");
+        match plan_conversion(&base, &nm, name, "1.0.0").unwrap() {
+            CjsPlan::Curated(p) => assert_eq!(p, base.join("dual").join("1.0.0").join("patch.json")),
+            other => panic!("expected Curated for dual package with a curated spec, got {other:?}"),
+        }
+        // same ESM shape WITHOUT a curated spec -> Skip (vendored raw)
+        let name2 = "plaindual";
+        let root2 = nm.join(name2);
+        fs::create_dir_all(&root2).unwrap();
+        write_file(
+            &root2,
+            "package.json",
+            r#"{"name":"plaindual","version":"1.0.0","exports":{".":{"import":"./index.mjs"}}}"#,
+        );
+        write_file(&root2, "index.mjs", "export const x = 1;\n");
+        assert!(matches!(plan_conversion(&base, &nm, name2, "1.0.0").unwrap(), CjsPlan::Skip));
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    #[test]
+    fn plan_auto_for_cjs_leaf_without_env() {
+        let work = scratch("plan-auto");
+        let nm = work.join("node_modules");
+        let base = work.join("patches-base");
+        let name = "cjsleaf";
+        let root = nm.join(name);
+        fs::create_dir_all(&root).unwrap();
+        write_file(
+            &root,
+            "package.json",
+            r#"{"name":"cjsleaf","version":"1.0.0","main":"index.js"}"#,
+        );
+        write_file(&root, "index.js", "module.exports = { ok: true };\n");
+        match plan_conversion(&base, &nm, name, "1.0.0").unwrap() {
+            CjsPlan::Auto(entry) => assert_eq!(entry, "index.js"),
+            other => panic!("expected Auto, got {other:?}"),
+        }
+        let _ = fs::remove_dir_all(&work);
+    }
+
+    // ---- WS2-1 hardening: post-bundle env + dynamic-require gates
+
+    #[test]
+    fn bundle_env_refs_detects_dot_and_unknown_forms() {
+        assert_eq!(bundle_env_refs("if (process.env.FOO) {}"), vec!["FOO"]);
+        assert_eq!(bundle_env_refs("const x = process.env[\"BAR\"];"), vec!["BAR"]);
+        assert!(bundle_env_refs("module.exports = { plain: 1 };\n").is_empty());
+        // destructuring / aliasing leave the literal but no parseable name:
+        // still a hard-case trigger via ["<unknown>"].
+        assert_eq!(bundle_env_refs("const { A } = process.env;"), vec!["<unknown>"]);
+        assert_eq!(bundle_env_refs("const e = process.env; e.PORT;"), vec!["<unknown>"]);
+    }
+
+    #[test]
+    fn scan_dynamic_requires_counts_only_expression_args() {
+        let literals = "a(__require(\"bufferutil\")); b(__require('utf-8-validate'));\n";
+        assert_eq!(scan_dynamic_requires(literals), 0);
+        let dynamic =
+            "a(__require(name)); b(__require(path + '/x')); c(__require(\"node:fs\"));\n";
+        assert_eq!(scan_dynamic_requires(dynamic), 2);
     }
 }
