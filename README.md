@@ -177,8 +177,11 @@ cat > app.js <<'EOF'
 console.log(`hello ${Deno.args[0] ?? "world"} from deno ${Deno.version.deno}`);
 EOF
 
-# 2. manifest (same directory as the source)
-printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
+# 2. manifest — optional. A `.manifest` file (app.manifest / inka.manifest) is
+#    honored when present; otherwise it is auto-generated from package.json /
+#    deno.json top-level `permissions` (and an `inka.runtime` block) with a
+#    default floor of runtime>=0.266.0 and deny-by-default permissions.
+printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest   # optional
 
 # 3. pack  (manifest auto-found as app.manifest; output auto-derived as "app")
 ./target/release/inka build app.js
@@ -189,7 +192,20 @@ printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest
 ./myapp kook
 ```
 
-`inka build` finds the launcher automatically: `$INKA_LAUNCHER`, else `inka-launcher` next to the `inka` binary (so build `-p inka-launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `<source-stem>.manifest` then `inka.manifest` in the current directory.
+`inka build` finds the launcher automatically: `$INKA_LAUNCHER`, else `inka-launcher` next to the `inka` binary (so build `-p inka-launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `--manifest` → `<source-stem>.manifest` → `inka.manifest` → auto-generated from project config (`package.json` + `deno.json`/`deno.jsonc`; `deno.json` wins per-key). `module=` is always set to the entry.
+
+### Manifest vs project config
+
+When no `.manifest` file exists, `inka build` synthesizes one from top-level fields:
+
+| Config (package.json / deno.json) | Emits |
+|---|---|
+| `permissions.default.<cat>` (Deno shape) | `allow-<cat>=…` / `deny-<cat>=…` |
+| `deno.json.compile.permissions` | same (used instead of the default set) |
+| `inka.runtime` / `inka.tested-against` | `runtime=…` / `tested-against=…` |
+| *(none)* | deny-all + `runtime=inka_runtime>=0.266.0` |
+
+Deno's `ignore` sub-key and the `import` category have no inka equivalent (warned + skipped). `inka build -P <set>` selects a named permission set; `--runtime '<spec>'` / `--tested-against <ver>` override config on the command line.
 
 ### Local imports & multi-file apps
 

@@ -681,3 +681,29 @@ enforced at add. Imports in app/vendored code resolve vendored -> default store
   matrix (effect/trio/ws/http/p3) green after the change.
 - Current CJS handling in `crates/inka` mirrors the resolver rule for detection
   (entry_is_commonjs). Scratch tests: /tmp/opencode/inkam0/vproj.
+
+## 16. Optional .manifest — auto-generated from package.json / deno.json
+
+`*.manifest` is no longer required. `inka build` resolves the effective manifest:
+`--manifest <file>` -> on-disk `<stem>.manifest`/`inka.manifest` (back-compat) ->
+auto-synthesized from project config -> defaults. The launcher only consumes
+runtime=/tested-against=/module=/permissions=/allow-*/deny-*, so the config only
+needs to express runtime + permissions; `module=` is always set to the entry.
+
+- Config lives at TOP LEVEL of `package.json` and `deno.json(.jsonc)`: a
+  `permissions` object in the exact Deno shape (`{ "default"|"<name>": { <cat>:
+  bool | array | {allow,deny,ignore} } }`), `compile.permissions` (deno compile
+  analog) in deno.json, and an optional `inka` block (`runtime`,
+  `tested-against`) in either file. When both files exist deno.json wins per-key.
+- Field -> manifest: `runtime` -> `runtime=inka_runtime…` (or exact `==`); cat
+  true/array -> `allow-<cat>=*|a,b`; object allow/deny -> allow/deny lines;
+  Deno `ignore` sub-key and the `import` category have no inka equivalent ->
+  build-time warning + skip (never silently translated). No config = deny-all.
+- Runtime source: `--runtime '<spec>'` / `--tested-against <ver>` CLI (strongest)
+  -> config `inka.runtime` -> default floor `>=0.266.0` (auto-synthesized only;
+  a hand-written .manifest may omit runtime to accept any installed engine).
+- `-P/--permission-set <name>` picks a named set; `deno.jsonc` comments + trailing
+  commas are tolerated (new crate::config::strip_jsonc). 5 unit tests.
+- Verified offline matrix: no-config deny, deno default-set allow, compile.permissions,
+  package.json-only, both-files (deno wins), `-P <name>`, `--runtime` override,
+  deno.jsonc, and back-compat on-disk .manifest. Store-mode regression green.

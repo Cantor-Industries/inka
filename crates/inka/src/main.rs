@@ -6,6 +6,7 @@
 //   inka list [--home <dir>]
 
 mod build;
+mod config;
 mod embed;
 mod pkg;
 mod transpile;

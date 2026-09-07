@@ -30,7 +30,11 @@ fn help() -> ! {
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-         \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then inka.manifest, in the current directory)\n\
+         \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then inka.manifest,\n\
+         \x20                      then auto-generated from package.json / deno.json permissions)\n\
+         \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.0' or '==0.266.0' (overrides config)\n\
+         \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
+         \x20 -P, --permission-set <name>  use this named permission set from the config\n\
          \x20     --transpile       compile TypeScript to JavaScript now (single- and multi-file; default: the runtime transpiles at load)\n\
          \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
          \x20 -h, --help            show this help\n\
@@ -49,6 +53,9 @@ pub fn cmd_build(args: &[String]) {
     let mut source_flag: Option<PathBuf> = None;
     let mut output_flag: Option<PathBuf> = None;
     let mut manifest_flag: Option<PathBuf> = None;
+    let mut runtime_flag: Option<String> = None;
+    let mut tested_flag: Option<String> = None;
+    let mut perm_set: Option<String> = None;
     let mut transpile = false;
     let mut embed_dir = false;
     let mut positional: Vec<PathBuf> = Vec::new();
@@ -59,6 +66,9 @@ pub fn cmd_build(args: &[String]) {
             "-s" | "--source" => source_flag = Some(next_val(&mut it, a)),
             "-o" | "--output" => output_flag = Some(next_val(&mut it, a)),
             "--manifest" => manifest_flag = Some(next_val(&mut it, a)),
+            "--runtime" => runtime_flag = Some(next_str(&mut it, a)),
+            "--tested-against" => tested_flag = Some(next_str(&mut it, a)),
+            "-P" | "--permission-set" => perm_set = Some(next_str(&mut it, a)),
             "--transpile" => transpile = true,
             "--embed-dir" => embed_dir = true,
             "-h" | "--help" => help(),
@@ -112,29 +122,17 @@ pub fn cmd_build(args: &[String]) {
         ));
     }
 
-    let manifest = match manifest_flag {
-        Some(m) => m,
-        None => find_default_manifest(&source).unwrap_or_else(|| {
-            let stem = source
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "?".into());
-            err(&format!(
-                "no manifest found (looked for '{stem}.manifest' and 'inka.manifest' in {})",
-                env::current_dir()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "the current directory".into())
-            ))
-        }),
-    };
-    if !manifest.is_file() {
-        err(&format!("manifest file not found: {}", manifest.display()));
-    }
-    let manifest_bytes = fs::read(&manifest)
-        .unwrap_or_else(|e| err(&format!("cannot read {}: {e}", manifest.display())));
-
     let cwd = env::current_dir()
         .unwrap_or_else(|e| err(&format!("cannot determine current directory: {e}")));
+    let (manifest_bytes, manifest_label) = resolve_manifest(
+        &source,
+        manifest_flag.as_deref(),
+        &cwd,
+        runtime_flag.as_deref(),
+        tested_flag.as_deref(),
+        perm_set.as_deref(),
+    );
+
     let entry_rel = match crate::embed::rel_from_cwd(&cwd, &source) {
         Ok(r) => r,
         Err(e) => err(&e),
@@ -221,7 +219,7 @@ pub fn cmd_build(args: &[String]) {
             launcher_bytes.len(),
             files.len(),
             archive.len(),
-            manifest.display(),
+            manifest_label,
             manifest_payload.len(),
         );
         if precompiled {
@@ -292,7 +290,7 @@ pub fn cmd_build(args: &[String]) {
         source.display(),
         payload.len(),
         if transpiled { ", transpiled to JS" } else { "" },
-        manifest.display(),
+        manifest_label,
         manifest_payload.len(),
     );
 }
@@ -415,8 +413,19 @@ fn effective_manifest(
     (joined.into_bytes(), warning)
 }
 
-fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {    match it.next() {
+fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
+    match it.next() {
         Some(v) => PathBuf::from(v),
+        None => {
+            eprintln!("error: {flag} requires a value");
+            std::process::exit(2);
+        }
+    }
+}
+
+fn next_str(it: &mut std::slice::Iter<'_, String>, flag: &str) -> String {
+    match it.next() {
+        Some(v) => v.clone(),
         None => {
             eprintln!("error: {flag} requires a value");
             std::process::exit(2);
@@ -447,6 +456,103 @@ fn find_default_manifest(source: &Path) -> Option<PathBuf> {
         return Some(generic);
     }
     None
+}
+
+fn manifest_has_key(bytes: &[u8], key: &str) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| l.trim_start().starts_with(&format!("{key}=")))
+}
+
+/// Replace (or append) a `key=` line in a manifest buffer.
+fn manifest_set_key(bytes: &mut Vec<u8>, key: &str, value: &str) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut replaced = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{key}=")) {
+            out.push(format!("{key}={value}"));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        if !out.is_empty() {
+            out.push(String::new()); // blank line separator
+        }
+        out.push(format!("{key}={value}"));
+    }
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    *bytes = joined.into_bytes();
+}
+
+/// Turn a runtime spec like `>=0.266.0` / `==0.266.0` / `0.266.0` into a
+/// `runtime=inka_runtime…` value.
+fn runtime_value(spec: &str) -> String {
+    let spec = spec.trim();
+    if spec.starts_with('>') || spec.starts_with('=') {
+        format!("inka_runtime{spec}")
+    } else {
+        format!("inka_runtime=={spec}")
+    }
+}
+
+/// Resolve the effective manifest bytes + a display label.
+/// 1) `--manifest <file>`  2) on-disk `*.manifest`/`inka.manifest`
+/// 3) auto-synthesized from package.json / deno.json permissions
+/// CLI `--runtime` / `--tested-against` override whatever was chosen.
+fn resolve_manifest(
+    source: &Path,
+    explicit: Option<&Path>,
+    cwd: &Path,
+    runtime_flag: Option<&str>,
+    tested_flag: Option<&str>,
+    perm_set: Option<&str>,
+) -> (Vec<u8>, String) {
+    const DEFAULT_RUNTIME: &str = ">=0.266.0";
+
+    // 1 & 2: an explicit/on-disk manifest wins over config.
+    let chosen: Option<(Vec<u8>, String, bool)> = if let Some(p) = explicit {
+        if !p.is_file() {
+            err(&format!("manifest file not found: {}", p.display()));
+        }
+        let bytes = fs::read(p).unwrap_or_else(|e| err(&format!("cannot read {}: {e}", p.display())));
+        Some((bytes, p.display().to_string(), true))
+    } else if let Some(p) = find_default_manifest(source) {
+        let bytes = fs::read(&p).unwrap_or_else(|e| err(&format!("cannot read {}: {e}", p.display())));
+        Some((bytes, p.display().to_string(), true))
+    } else {
+        None
+    };
+
+    let (mut bytes, label, from_file) = match chosen {
+        Some((b, l, f)) => (b, l, f),
+        None => {
+            let syn = crate::config::synthesize_manifest(cwd, perm_set);
+            for w in &syn.warnings {
+                eprintln!("warning: {w}");
+            }
+            (syn.bytes, "config (package.json/deno.json)".to_string(), false)
+        }
+    };
+
+    // Default floor only applies to auto-synthesized manifests (a hand-written
+    // .manifest may intentionally omit `runtime=` to accept any installed engine).
+    if !from_file && !manifest_has_key(&bytes, "runtime") && runtime_flag.is_none() {
+        manifest_set_key(&mut bytes, "runtime", &runtime_value(DEFAULT_RUNTIME));
+    }
+    if let Some(r) = runtime_flag {
+        manifest_set_key(&mut bytes, "runtime", &runtime_value(r));
+    }
+    if let Some(t) = tested_flag {
+        manifest_set_key(&mut bytes, "tested-against", t);
+    }
+    (bytes, label)
 }
 
 fn find_launcher() -> PathBuf {
