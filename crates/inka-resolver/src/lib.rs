@@ -37,10 +37,91 @@ pub enum Decision {
     Error(String),
 }
 
-/// Resolve a module specifier to a decision.
+/// Resolve a module specifier to a decision against the store pool only
+/// (no vendored tier). Equivalent to `resolve_v2(store, None, …)`.
 pub fn resolve(store: Option<&Path>, referrer: &str, specifier: &str) -> Decision {
-    // ---- explicit npm:/jsr: (the way to pin an exact version) ------
+    resolve_v2(store, None, referrer, specifier)
+}
+
+/// Two-tier resolution:
+///   - a referrer under the default `store` root is STORE tier: today's exact
+///     semantics (store pool + builtins first; never consults the project's
+///     vendored/);
+///   - any other referrer (user code, vendored code) is the APP/VENDOR tier:
+///     bare and pinned specifiers resolve vendored -> store -> builtins.
+pub fn resolve_v2(
+    store: Option<&Path>,
+    vendor: Option<&Path>,
+    referrer: &str,
+    specifier: &str,
+) -> Decision {
+    let in_store = match (store, referrer_file_path(referrer)) {
+        (Some(s), Some(p)) => p.starts_with(s),
+        _ => false,
+    };
+    if in_store {
+        store_tier_resolve(store.unwrap(), referrer, specifier)
+    } else {
+        app_vendor_resolve(store, vendor, referrer, specifier)
+    }
+}
+
+/// Resolution as seen from inside a default-store package. Preserves today's
+/// behavior exactly: pinned -> store pool; relative/schemes -> default; bare
+/// builtins core-win; bare packages resolve through the nearest node_modules.
+fn store_tier_resolve(store: &Path, referrer: &str, specifier: &str) -> Decision {
     if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
+        return match store_lookup(store, specifier) {
+            Ok(path) => Decision::File(path),
+            Err(e) => Decision::Error(e),
+        };
+    }
+    if has_scheme(specifier) {
+        if specifier.starts_with("http://") || specifier.starts_with("https://") {
+            return Decision::Error(format!(
+                "network module imports are disabled ('{specifier}'); \
+                 vendor the package with `inka pkg seed` instead"
+            ));
+        }
+        return Decision::UseDefault;
+    }
+    if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
+        return Decision::UseDefault;
+    }
+    // Bare Node built-ins resolve without the `node:` prefix (core wins).
+    if let Some(node_spec) = node_builtin_spec(specifier) {
+        return Decision::Builtin(node_spec);
+    }
+    if let Some(ref_path) = referrer_file_path(referrer) {
+        // inside a store package: resolve its installed dependency closure
+        return match store_bare_lookup(store, specifier, &ref_path) {
+            Ok(path) => Decision::File(path),
+            Err(e) => Decision::Error(e),
+        };
+    }
+    match store_bare_top(store, specifier) {
+        Ok(path) => Decision::File(path),
+        Err(e) => Decision::Error(e),
+    }
+}
+
+/// Resolution as seen from user code or a vendored package: vendored roots
+/// first, then the store pool, then builtins last (bare specifiers).
+fn app_vendor_resolve(
+    store: Option<&Path>,
+    vendor: Option<&Path>,
+    _referrer: &str,
+    specifier: &str,
+) -> Decision {
+    // ---- explicit npm:/jsr: pins: vendored (version-checked) then store ------
+    if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
+        if let Some(v) = vendor {
+            match vendor_pinned_lookup(v, specifier) {
+                Ok(Some(path)) => return Decision::File(path),
+                Ok(None) => {} // not vendored at the pinned version -> store below
+                Err(e) => return Decision::Error(e),
+            }
+        }
         let Some(s) = store else {
             return Decision::Error(
                 "this runtime has no package store configured (INKA_STORE is unset); \
@@ -58,7 +139,7 @@ pub fn resolve(store: Option<&Path>, referrer: &str, specifier: &str) -> Decisio
         if specifier.starts_with("http://") || specifier.starts_with("https://") {
             return Decision::Error(format!(
                 "network module imports are disabled ('{specifier}'); \
-                 vendor the package with `inka pkg seed` instead"
+                 vendor the package with `inka add` instead"
             ));
         }
         return Decision::UseDefault;
@@ -67,31 +148,70 @@ pub fn resolve(store: Option<&Path>, referrer: &str, specifier: &str) -> Decisio
     if specifier.starts_with("./") || specifier.starts_with("../") || specifier.starts_with('/') {
         return Decision::UseDefault;
     }
-    // Bare Node built-ins resolve without the `node:` prefix (core wins).
-    if let Some(node_spec) = node_builtin_spec(specifier) {
-        return Decision::Builtin(node_spec);
+    // ---- bare package name: vendored -> store -> builtin ----
+    let (name, _sub) = split_bare(specifier);
+    for ident in bare_store_identities(&name) {
+        if let Some(v) = vendor {
+            let pkg_root = v.join(&ident);
+            if pkg_root.is_dir() {
+                let sub = split_bare(specifier).1;
+                return match resolve_pkg_file(&pkg_root, sub.as_deref()) {
+                    Ok(path) => Decision::File(path),
+                    Err(e) => Decision::Error(e),
+                };
+            }
+        }
     }
-    // Bare package name -> the store pool (npm identity, then jsr mirror).
-    let Some(s) = store else {
-        return Decision::Error(format!(
-            "bare import '{specifier}' cannot be resolved: no package store configured \
-             (INKA_STORE is unset); run `inka pkg seed` to install it"
-        ));
-    };
-    if let Some(ref_path) = referrer_file_path(referrer) {
-        if ref_path.starts_with(s) {
-            // inside a vendored package: resolve its installed dependency closure
-            return match store_bare_lookup(s, specifier, &ref_path) {
+    if let Some(s) = store {
+        // Only consult the store when the package is actually installed there;
+        // a found-but-unservable entry (e.g. CommonJS) must surface its error
+        // rather than being mistaken for an absent package.
+        let present = bare_store_identities(&name)
+            .iter()
+            .any(|id| store_package_dir(s, id).is_dir());
+        if present {
+            return match store_bare_top(s, specifier) {
                 Ok(path) => Decision::File(path),
                 Err(e) => Decision::Error(e),
             };
         }
     }
-    // artifact/user code: resolve against the store's top-level packages
-    match store_bare_top(s, specifier) {
-        Ok(path) => Decision::File(path),
-        Err(e) => Decision::Error(e),
+    if let Some(node_spec) = node_builtin_spec(specifier) {
+        return Decision::Builtin(node_spec);
     }
+    match (vendor.is_some(), store.is_some()) {
+        (false, false) => Decision::Error(format!(
+            "bare import '{specifier}' cannot be resolved: no package store configured \
+             (INKA_STORE is unset); run `inka pkg seed` to install it"
+        )),
+        (_, true) => Decision::Error(format!(
+            "package '{name}' is not in the package store; run `inka pkg seed` to install it \
+             (or `inka add {name}` to vendor it for this project)"
+        )),
+        (true, false) => Decision::Error(format!(
+            "cannot resolve bare import '{specifier}' (not vendored and no default store); \
+             run `inka add {name}` to vendor it"
+        )),
+    }
+}
+
+/// If `spec` (npm:/jsr: pin) names a vendored package at the pinned version,
+/// return its entry file; Ok(None) when it isn't vendored at that version.
+fn vendor_pinned_lookup(vendor: &Path, spec: &str) -> Result<Option<PathBuf>, String> {
+    let ps = parse_pkg_specifier(spec)?;
+    let pkg_root = vendor.join(&ps.name);
+    if !pkg_root.is_dir() {
+        return Ok(None);
+    }
+    if let Some(req) = ps.req.as_deref() {
+        let Some(installed) = installed_version(&pkg_root) else {
+            return Err(format!("vendored package '{}' has no readable version", ps.name));
+        };
+        if !version_satisfies(&installed, req) {
+            return Ok(None); // pinned to a version we don't have vendored
+        }
+    }
+    resolve_pkg_file(&pkg_root, ps.sub.as_deref()).map(Some)
 }
 
 fn has_scheme(spec: &str) -> bool {
@@ -547,19 +667,21 @@ pub extern "C" fn inka_resolver_version() -> *const c_char {
 
 #[no_mangle]
 pub extern "C" fn inka_resolver_abi() -> c_int {
-    1
+    2
 }
 
-/// Resolve `specifier` (imported from `referrer`) against the store pool.
+/// Resolve `specifier` (imported from `referrer`) against the vendored roots
+/// (`vendor`) and the store pool (`store`).
 ///
-/// `store` may be "" (no store configured). On return `*a` (and `*b`, unused)
-/// may hold an owned C string that must be released with `inka_resolver_free`.
-/// Returns a `KIND_*` code; for KIND_FILE `*a` is the absolute file path; for
-/// KIND_BUILTIN `*a` is a full `node:<name>` specifier; for KIND_ERROR `*a` is
-/// the message.
+/// `store` / `vendor` may be "" (not configured). On return `*a` (and `*b`,
+/// unused) may hold an owned C string that must be released with
+/// `inka_resolver_free`. Returns a `KIND_*` code; for KIND_FILE `*a` is the
+/// absolute file path; for KIND_BUILTIN `*a` is a full `node:<name>` specifier;
+/// for KIND_ERROR `*a` is the message.
 #[no_mangle]
 pub unsafe extern "C" fn inka_resolver_resolve(
     store: *const c_char,
+    vendor: *const c_char,
     referrer: *const c_char,
     specifier: *const c_char,
     a: *mut *mut c_char,
@@ -573,9 +695,13 @@ pub unsafe extern "C" fn inka_resolver_resolve(
         s if s.is_empty() => None,
         s => Some(PathBuf::from(s)),
     };
+    let vendor = match opt_str(vendor) {
+        s if s.is_empty() => None,
+        s => Some(PathBuf::from(s)),
+    };
     let referrer = opt_str(referrer);
     let specifier = opt_str(specifier);
-    let decision = resolve(store.as_deref(), &referrer, &specifier);
+    let decision = resolve_v2(store.as_deref(), vendor.as_deref(), &referrer, &specifier);
     match decision {
         Decision::UseDefault => KIND_USE_DEFAULT,
         Decision::File(p) => {
@@ -788,5 +914,136 @@ mod tests {
             "got {d:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Build a vendored root (dir containing package roots by name) in tmp/vend.
+    fn seed_vendor(root: &Path, pkg: serde_json::Value, files: &[(&str, &str)]) {
+        let name = pkg.get("name").and_then(serde_json::Value::as_str).unwrap();
+        let dir = root.join("vend").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("package.json"), serde_json::to_string_pretty(&pkg).unwrap())
+            .unwrap();
+        for (rel, body) in files {
+            let p = dir.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, body).unwrap();
+        }
+    }
+
+    fn fresh_vendor() -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!("inkares-vnd-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let v = tmp.join("vend");
+        std::fs::create_dir_all(&v).unwrap();
+        v
+    }
+
+    #[test]
+    fn app_tier_serves_vendored_and_shadows_store() {
+        let tmp = fresh_store();
+        let v = fresh_vendor();
+        let vendored = tmp.join("vend");
+        let _ = &v;
+        // vendored widget (version 9) and a store widget (version 1)
+        seed_vendor(
+            &tmp,
+            serde_json::json!({ "name": "widget", "version": "9.0.0", "type": "module", "main": "index.js" }),
+            &[("index.js", "export const fromVendor = true;\n")],
+        );
+        // seed_vendor writes under root/vend/<name>; alias the vendor root used below.
+        seed_pkg(
+            &tmp,
+            "widget",
+            serde_json::json!({ "name": "widget", "version": "1.0.0", "type": "module", "main": "index.js" }),
+            &[("index.js", "export const fromStore = true;\n")],
+        );
+        let store_root = &tmp;
+        let vendor_root = &tmp.join("vend");
+        let d = resolve_v2(
+            Some(store_root),
+            Some(vendor_root),
+            "file:///app/main.ts",
+            "widget",
+        );
+        assert!(
+            matches!(&d, Decision::File(p) if p.starts_with(&tmp.join("vend/widget"))),
+            "expected the vendored copy for app code, got {d:?}"
+        );
+        // pinned to a vendored version is served from the vendor too
+        let d = resolve_v2(
+            Some(store_root),
+            Some(vendor_root),
+            "file:///app/main.ts",
+            "npm:widget@9.0.0",
+        );
+        assert!(matches!(&d, Decision::File(p) if p.starts_with(&tmp.join("vend/widget"))));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = vendored;
+    }
+
+    #[test]
+    fn store_referrer_ignores_vendor() {
+        let tmp = fresh_store();
+        // store copy of widget
+        seed_pkg(
+            &tmp,
+            "widget",
+            serde_json::json!({ "name": "widget", "version": "1.0.0", "type": "module", "main": "index.js" }),
+            &[("index.js", "export const fromStore = true;\n")],
+        );
+        // also a vendor copy
+        seed_vendor(
+            &tmp,
+            serde_json::json!({ "name": "widget", "version": "9.0.0", "type": "module", "main": "index.js" }),
+            &[("index.js", "export const fromVendor = true;\n")],
+        );
+        let store_root = &tmp;
+        let vendor_root = &tmp.join("vend");
+        // a store-internal referrer must resolve the STORE copy, never vendored/
+        let referrer = format!("file://{}", store_root.join("node_modules/widget/index.js").display());
+        let d = resolve_v2(
+            Some(store_root),
+            Some(vendor_root),
+            &referrer,
+            "widget",
+        );
+        assert!(
+            matches!(&d, Decision::File(p) if p.starts_with(&store_root.join("node_modules/widget"))),
+            "store-internal import must not see vendored, got {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn app_tier_builtin_fallback_and_no_store() {
+        // builtin still reachable when nothing vendored/store provides the name
+        let v = fresh_vendor();
+        let d = resolve_v2(None, Some(&v), "file:///app/main.ts", "vm");
+        assert_eq!(d, Decision::Builtin("node:vm".into()));
+        // unknown bare name with vendor only -> clear error
+        let d = resolve_v2(None, Some(&v), "file:///app/main.ts", "nosuchpkg");
+        assert!(matches!(&d, Decision::Error(m) if m.contains("nosuchpkg")));
+        let _ = std::fs::remove_dir_all(v.parent().unwrap());
+    }
+
+    #[test]
+    fn pinned_mismatch_falls_back_to_store_or_errors() {
+        let tmp = fresh_store();
+        let v = fresh_vendor();
+        // vendored widget only at 9.0.0
+        seed_vendor(
+            &tmp,
+            serde_json::json!({ "name": "widget", "version": "9.0.0", "type": "module", "main": "index.js" }),
+            &[("index.js", "export const v = 9;\n")],
+        );
+        let vendor_root = &tmp.join("vend");
+        // pinned to a version we don't have vendored, and no store configured
+        let d = resolve_v2(None, Some(vendor_root), "file:///app/main.ts", "npm:widget@1.0.0");
+        assert!(matches!(&d, Decision::Error(_)), "got {d:?}");
+        // pin matching the vendored version resolves from vendor
+        let d = resolve_v2(None, Some(vendor_root), "file:///app/main.ts", "npm:widget@9.0.0");
+        assert!(matches!(&d, Decision::File(p) if p.starts_with(&tmp.join("vend/widget"))));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let _ = v;
     }
 }

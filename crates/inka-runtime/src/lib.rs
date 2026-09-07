@@ -58,6 +58,9 @@ struct PkgLoader {
     /// Root of the global package store (`<store>/node_modules/<name>/…`, one
     /// hoisted pool).
     store_root: Option<PathBuf>,
+    /// Root of the artifact's embedded vendored package roots
+    /// (`<artifact-root>/vendored/<name>/…`, name-keyed, no node_modules).
+    vendor_root: Option<PathBuf>,
     /// True when the artifact's `.ts/.mts/.cts` payloads were transpiled at
     /// build time (`--transpile`); such files are served as plain JS.
     precompiled: bool,
@@ -65,6 +68,10 @@ struct PkgLoader {
 
 fn store_root_env() -> Option<PathBuf> {
     std::env::var_os("INKA_STORE").map(PathBuf::from)
+}
+
+fn vendor_root_env() -> Option<PathBuf> {
+    std::env::var_os("INKA_VENDOR").map(PathBuf::from)
 }
 
 fn precompiled_flag() -> bool {
@@ -83,13 +90,14 @@ type FnResolve = unsafe extern "C" fn(
     *const c_char,
     *const c_char,
     *const c_char,
+    *const c_char,
     *mut *mut c_char,
     *mut *mut c_char,
 ) -> c_int;
 type FnFree = unsafe extern "C" fn(*mut c_char);
 type FnAbi = unsafe extern "C" fn() -> c_int;
 
-const RESOLVER_ABI: c_int = 1;
+const RESOLVER_ABI: c_int = 2;
 const KIND_USE_DEFAULT: c_int = 0;
 const KIND_FILE: c_int = 1;
 const KIND_BUILTIN: c_int = 2;
@@ -122,7 +130,7 @@ fn init_resolver() -> Result<&'static ResolverApi, &'static str> {
             .get(b"inka_resolver_abi")
             .map_err(|_| "missing inka_resolver_abi in resolver library")?;
         if abi() != RESOLVER_ABI {
-            return Err("inka resolver ABI mismatch (expected 1); run `inka install` to update");
+            return Err("inka resolver ABI mismatch (expected 2); run `inka install` to update");
         }
     }
     let resolve: FnResolve = unsafe {
@@ -151,13 +159,18 @@ fn cstring(s: &str) -> CString {
 fn resolve_with_resolver(
     api: &ResolverApi,
     store: Option<&Path>,
+    vendor: Option<&Path>,
     specifier: &str,
     referrer: &str,
 ) -> ModuleResolveResponse {
     let store_s = store
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let vendor_s = vendor
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let store_c = cstring(&store_s);
+    let vendor_c = cstring(&vendor_s);
     let referrer_c = cstring(referrer);
     let spec_c = cstring(specifier);
     let mut a: *mut c_char = std::ptr::null_mut();
@@ -166,6 +179,7 @@ fn resolve_with_resolver(
     let kind = unsafe {
         (api.resolve)(
             store_c.as_ptr(),
+            vendor_c.as_ptr(),
             referrer_c.as_ptr(),
             spec_c.as_ptr(),
             &mut a,
@@ -257,7 +271,13 @@ impl ModuleLoader for PkgLoader {
         // (libinka_resolver). When it isn't installed we degrade to the small
         // built-in fallback (relative/file/node:/data: plus offline rejection).
         match resolver_api() {
-            Ok(api) => resolve_with_resolver(api, self.store_root.as_deref(), specifier, referrer),
+            Ok(api) => resolve_with_resolver(
+                api,
+                self.store_root.as_deref(),
+                self.vendor_root.as_deref(),
+                specifier,
+                referrer,
+            ),
             Err(reason) => fallback_resolve(specifier, referrer, reason),
         }
     }
@@ -706,6 +726,7 @@ fn run_tree(
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
             store_root: store_root_env(),
+            vendor_root: vendor_root_env(),
             precompiled: precompiled_flag(),
         });
         run_module_async(&url, args, permissions, loader).await

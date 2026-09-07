@@ -668,12 +668,16 @@ enforced at add. Imports in app/vendored code resolve vendored -> default store
 - `inka vendor list|status|release|ignore`: list/coverage + git posture toggle
   (release removes the vendored/ ignore line for committed/offline builds).
 - `inka build` embeds the vendored pool (whole-pool default; --vendor-closure is a
-  future flag) into the artifact and stamps `vendor=vendored` in the manifest.
-  Verified: 12-file archive (main.js + nanoid tree) + manifest marker.
-- **W4 pending (engine)**: embedded-vendored is INERT until resolution supports it —
-  today a bare import of a vendored-only package clean-errors against the store.
-  Resolver ordered roots [vendor(flat by name), store] scoped to app/vendored
-  referrers + launcher INKA_VENDOR + runtime = the W4 engine milestone (resolver
-  ABI v2, tuple co-shipped). Layout/lock/manifests/git are all testable now.
+  future flag) into the artifact. The launcher AUTO-DETECTS a `vendored/` dir under
+  the extracted root at run time (no manifest key needed).
+- **W4 LANDED (resolution)**: resolver ABI v2 with two tiers chosen by the referrer —
+  referrer under the default store root = store tier (today's semantics, builtins-first,
+  never consults vendored); any other referrer (user/app/vendored code) = app/vendor
+  tier: bare and npm:/jsr: pins resolve vendored/<name> (flat, jsr-mirror aware) ->
+  store -> builtins last. Runtime reads INKA_VENDOR (launcher sets it when an artifact
+  embeds vendored/), passes store+vendor to the resolver; expected ABI is 2. Layout/
+  lock/manifests/git unchanged. Artifacts with vendored packages are PORTABLE: verified
+  by copying the exe to a different directory and running offline. Store regression
+  matrix (effect/trio/ws/http/p3) green after the change.
 - Current CJS handling in `crates/inka` mirrors the resolver rule for detection
   (entry_is_commonjs). Scratch tests: /tmp/opencode/inkam0/vproj.

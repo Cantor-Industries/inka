@@ -572,6 +572,14 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // Auto-detect embedded vendored package roots: when the artifact
+            // carries a `vendored/` tree, point the resolver at it (vendored
+            // code resolves vendored-first, then the default store).
+            let vendor_dir = root.join("vendored");
+            if vendor_dir.is_dir() {
+                env::set_var("INKA_VENDOR", &vendor_dir);
+                debug_log!("[inka] embedded vendored packages at {}", vendor_dir.display());
+            }
             let code = load_and_run_dir(
                 &path,
                 &root.to_string_lossy(),

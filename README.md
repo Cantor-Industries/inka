@@ -250,6 +250,8 @@ import process from "process";
 
 Resolution happens at run time against a **package store** — one shared, hoisted `node_modules` pool on the machine (a normal npm project layout) — not by installing anything at run time. `node:` built-ins keep working as before.
 
+**Per-project vendoring (`inka add`/`remove`).** Packages the default store doesn't cover (or that a project wants to pin itself) are vendored into a project-relative `vendored/` folder of **name-keyed package roots** (no `node_modules`; jsr uses its npm-mirror identity), declared as a union in the project's `package.json` (`dependencies`) and `deno.json` (`imports`), pinned exactly in `vendored.lock`. `inka build` embeds those roots into the artifact; the launcher auto-detects them and resolution for **app/vendored code** is `vendored/<name>` → default store → builtins (so a vendored copy can override the store or a builtin), while **imports from inside default-store packages** keep today's store → builtins semantics and never consult a project's vendored set. Embedded vendored packages make the artifact portable (copy it anywhere; it re-extracts its own copy). `inka remove` un-vendors a package and prunes orphaned vendored deps; `inka vendor list|status|release|ignore` manages the set and the dev-gitignore vs release-commit posture.
+
 Store layout:
 
 ```
