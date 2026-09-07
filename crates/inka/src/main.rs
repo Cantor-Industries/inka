@@ -9,6 +9,7 @@ mod build;
 mod embed;
 mod pkg;
 mod transpile;
+mod vendor;
 
 use std::env;
 use std::fmt;
@@ -50,7 +51,7 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka pkg snapshot|seed|list (vendored-package store; see `inka pkg --help`)"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)"
     );
     std::process::exit(2);
 }
@@ -74,6 +75,9 @@ fn main() {
         "build" => build::cmd_build(&args[1..]),
         "install" => cmd_install(&args[1..]),
         "list" => cmd_list(&args[1..]),
+        "add" => vendor::cmd_add(&args[1..]),
+        "remove" => vendor::cmd_remove(&args[1..]),
+        "vendor" => vendor::cmd_vendor(&args[1..]),
         "pkg" => pkg::cmd_pkg(&args[1..]),
         _ => usage(),
     }

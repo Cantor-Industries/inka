@@ -642,3 +642,38 @@ our shared store for its npm/cache layers and keeping crates/inka-resolver as th
 policy seam. P0 is therefore reclassified as "Option B feasibility study + port
 design" rather than a quick probe. Keep the RealSys state-injection fix; do not
 half-wire node services without the full resolver stack.
+
+## 15. Per-project vendoring (W1–W3 landed; W4 = engine resolution milestone)
+
+New store model (design in plan.md §"default store + name-keyed per-project
+vendoring"): a machine default store (unchanged) PLUS per-project vendoring of
+packages it doesn't cover. Vendored/ holds NAME-KEYED package roots (no
+node_modules anywhere): vendored/ws/, vendored/@effect/platform/,
+vendored/@jsr/std__assert/ (jsr = npm-mirror identity). One version per name is
+enforced at add. Imports in app/vendored code resolve vendored -> default store
+-> builtins; imports from inside store packages never consult vendored/.
+
+- `inka add <pkg[@ver]>` (npm or jsr:@scope/name, exact x.y.z pins): dedupes when
+  the default store already satisfies it (--force overrides); npm-installs the
+  package alone, flattens the closure (conflict => error), auto-vendors any dep the
+  store can't satisfy at its exact version, converts CJS leaves at add time via the
+  shared inka-patcher + default patches (INKA_PATCHES / ./patches / <exe>/patches);
+  hard CJS without a patch spec errors with guidance. Writes vendored.lock
+  (roots+deps+conversions), syncs package.json dependencies AND deno.json imports
+  (union; creates package.json only when neither file exists), ensures vendored/ is
+  gitignored (dev posture).
+- `inka remove <pkg>`: vendored only. Store-only package = no-op notice. Deletes the
+  root + manifest lines, then pool-relative reverse-dep prunes orphaned vendored dep
+  entries (flat set -> trivial). Deleting a forced override just falls back to the store.
+- `inka vendor list|status|release|ignore`: list/coverage + git posture toggle
+  (release removes the vendored/ ignore line for committed/offline builds).
+- `inka build` embeds the vendored pool (whole-pool default; --vendor-closure is a
+  future flag) into the artifact and stamps `vendor=vendored` in the manifest.
+  Verified: 12-file archive (main.js + nanoid tree) + manifest marker.
+- **W4 pending (engine)**: embedded-vendored is INERT until resolution supports it —
+  today a bare import of a vendored-only package clean-errors against the store.
+  Resolver ordered roots [vendor(flat by name), store] scoped to app/vendored
+  referrers + launcher INKA_VENDOR + runtime = the W4 engine milestone (resolver
+  ABI v2, tuple co-shipped). Layout/lock/manifests/git are all testable now.
+- Current CJS handling in `crates/inka` mirrors the resolver rule for detection
+  (entry_is_commonjs). Scratch tests: /tmp/opencode/inkam0/vproj.

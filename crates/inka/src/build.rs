@@ -145,13 +145,24 @@ pub fn cmd_build(args: &[String]) {
     } else {
         crate::embed::Mode::Closure
     };
-    let files = match mode {
+    let mut files = match mode {
         crate::embed::Mode::Directory => crate::embed::collect_directory(&cwd, &entry_rel),
         crate::embed::Mode::Closure => crate::embed::collect(&cwd, &entry_rel),
     }
     .unwrap_or_else(|e| err(&e));
 
-    let is_multi = files.len() > 1;
+    // Embed the per-project vendored package roots (whole-pool by default) so a
+    // built artifact carries its overrides/extras; the launcher will resolve
+    // vendored-first against them at run time (see the manifest `vendor=` key).
+    let vendor_files = crate::embed::collect_vendored(&cwd).unwrap_or_else(|e| err(&e));
+    let has_vendor = !vendor_files.is_empty();
+    for (rel, bytes) in vendor_files {
+        if !files.iter().any(|(r, _)| r == &rel) {
+            files.push((rel, bytes));
+        }
+    }
+
+    let is_multi = files.len() > 1 || has_vendor;
 
     let launcher = find_launcher();
     let launcher_bytes = fs::read(&launcher)
@@ -190,7 +201,10 @@ pub fn cmd_build(args: &[String]) {
         let magic = if precompiled { MAGIC_V3 } else { MAGIC_V2 };
 
         let archive = encode_archive(&files);
-        let manifest_payload = set_module_line(&manifest_bytes, &entry_rel);
+        let mut manifest_payload = set_module_line(&manifest_bytes, &entry_rel);
+        if has_vendor {
+            append_manifest_key(&mut manifest_payload, "vendor=vendored");
+        }
         out.reserve(launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN);
         out.extend_from_slice(&launcher_bytes);
         out.extend_from_slice(&archive);
@@ -300,6 +314,17 @@ fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 
 /// Force the `module=` line to a given entry path (used for multi-file builds,
 /// where the entry lives at a cwd-relative path, not a bare filename).
+fn append_manifest_key(manifest: &mut Vec<u8>, key_value: &str) {
+    let s = String::from_utf8_lossy(manifest);
+    if s.lines().any(|l| l.trim_start().starts_with(&format!("{key_value}="))) {
+        return;
+    }
+    if !s.ends_with('\n') {
+        manifest.push(b'\n');
+    }
+    manifest.extend_from_slice(format!("{key_value}\n").as_bytes());
+}
+
 fn set_module_line(manifest: &[u8], entry_rel: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(manifest);
     let mut found = false;

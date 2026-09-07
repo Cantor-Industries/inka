@@ -19,6 +19,7 @@ pub enum Mode {
 }
 
 const IGNORE_DIRS: [&str; 5] = [".git", "target", "node_modules", ".inka", "dist"];
+const LOCK_FILE: &str = "vendored.lock";
 
 pub fn rel_from_cwd(cwd: &Path, p: &Path) -> Result<String, String> {
     let abs = if p.is_absolute() {
@@ -290,6 +291,52 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
                 continue;
             }
             walk(cwd, &ent.path(), files)?;
+        } else if ft.is_file() {
+            if let Ok(bytes) = fs::read(ent.path()) {
+                if let Ok(rel) = ent.path().strip_prefix(cwd) {
+                    let rel = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    files.insert(rel, bytes);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Collect the per-project vendored package roots (`vendored/<name>/…`) as
+/// cwd-relative entries, ready to embed into an artifact (whole-pool mode).
+/// The vendored lock/conversion bookkeeping files are not runtime modules.
+pub fn collect_vendored(cwd: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let vendored = cwd.join("vendored");
+    if !vendored.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    walk_vendored(cwd, &vendored, &mut files)?;
+    Ok(files.into_iter().collect())
+}
+
+fn walk_vendored(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+    let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
+    for ent in rd.flatten() {
+        let ft = ent.file_type().map_err(|e| e.to_string())?;
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue;
+        }
+        // bookkeeping files are not runtime modules
+        if name == LOCK_FILE || name == "vendor.json" {
+            continue;
+        }
+        if ft.is_dir() {
+            if name == "node_modules" || name == ".git" {
+                continue;
+            }
+            walk_vendored(cwd, &ent.path(), files)?;
         } else if ft.is_file() {
             if let Ok(bytes) = fs::read(ent.path()) {
                 if let Ok(rel) = ent.path().strip_prefix(cwd) {

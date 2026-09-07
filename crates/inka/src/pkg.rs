@@ -98,7 +98,7 @@ fn valid_version(s: &str) -> bool {
     a.is_some() && b.is_some() && c.is_some() && parts.next().is_none()
 }
 
-fn jsr_to_mirror(name: &str) -> Option<String> {
+pub(crate) fn jsr_to_mirror(name: &str) -> Option<String> {
     // jsr:@scope/name -> npm mirror @jsr/scope__name
     let body = name.strip_prefix('@')?;
     let (scope, pkg) = body.split_once('/')?;
@@ -135,14 +135,14 @@ fn install_target(spec: &SeedSpec) -> Result<String, String> {
     }
 }
 
-fn store_default() -> PathBuf {
+pub(crate) fn store_default() -> PathBuf {
     if let Ok(s) = std::env::var("INKA_STORE") {
         return PathBuf::from(s);
     }
     runtime_dir(None).join("store")
 }
 
-fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
+pub(crate) fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
     let status = cmd
         .status()
         .map_err(|e| format!("failed to spawn {what}: {e}"))?;
@@ -152,7 +152,7 @@ fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_bytes(bytes: &[u8]) -> String {
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
     hex(&Sha256::digest(bytes))
 }
 
@@ -243,7 +243,7 @@ fn discover_patch_specs(base: &Path) -> Vec<PathBuf> {
     out
 }
 
-fn patcher_binary() -> Result<PathBuf, String> {
+pub(crate) fn patcher_binary() -> Result<PathBuf, String> {
     if let Ok(p) = std::env::var("INKA_PATCHER") {
         if Path::new(&p).is_file() {
             return Ok(PathBuf::from(p));
