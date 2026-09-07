@@ -195,6 +195,23 @@ printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest   # optio
 
 `inka build` finds the launcher automatically: `$INKA_LAUNCHER`, else `inka-launcher` next to the `inka` binary (so build `-p inka-launcher` too and keep them together). Defaults: source = positional arg (or `-s/--source`), output = source name without its extension, manifest = `--manifest` → `<source-stem>.manifest` → `inka.manifest` → auto-generated from project config (`package.json` + `deno.json`/`deno.jsonc`; `deno.json` wins per-key). `module=` is always set to the entry.
 
+### `inka run` (dev execution)
+
+`inka run <file> [args…]` executes a `.ts`/`.js`/`.mjs`/`.cts` file directly through the installed runtime — no artifact build. Relative imports, vendored packages, the default store, and `node:` built-ins all resolve exactly as they would in a built artifact; `.ts` is transpiled at load. Options must precede the file; anything after it is passed to the program as its arguments, and the program's exit code is propagated.
+
+Permissions mirror `deno run` (deny by default, prompting disabled):
+
+```sh
+inka run app.ts                       # deny-by-default
+inka run -A app.ts                    # allow everything
+inka run -P server app.ts             # named permission set from the config
+inka run -P app.ts                    # bare -P = the config `default` set
+inka run --allow-read=./data --allow-net app.ts   # granular grants
+inka run -A --deny-read=./secrets app.ts          # allow-all, trimmed
+```
+
+Granular categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi` (`--allow-<cat>[=list]` / `--deny-<cat>[=list]`; no value = the whole category). `-A`/`--allow-all` cannot be combined with `-P` or `--allow-*` (but may be trimmed by `--deny-*`); `-P` cannot be combined with granular flags. `--runtime <ver>` picks a specific installed tuple instead of the newest.
+
 ### Manifest vs project config
 
 When no `.manifest` file exists, `inka build` synthesizes one. Permission lines

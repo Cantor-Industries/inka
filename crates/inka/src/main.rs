@@ -9,6 +9,7 @@ mod build;
 mod config;
 mod embed;
 mod pkg;
+mod run;
 mod transpile;
 mod vendor;
 
@@ -37,7 +38,7 @@ impl fmt::Display for Version {
     }
 }
 
-fn parse_version(s: &str) -> Option<Version> {
+pub(crate) fn parse_version(s: &str) -> Option<Version> {
     let s = s.trim();
     let mut parts = s.split('.');
     let a = parts.next()?.parse().ok()?;
@@ -52,7 +53,7 @@ fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
     );
     std::process::exit(2);
 }
@@ -81,6 +82,7 @@ fn main() {
         "vendor" => vendor::cmd_vendor(&args[1..]),
         "pkg" => pkg::cmd_pkg(&args[1..]),
         "doctor" => cmd_doctor(&args[1..]),
+        "run" => run::cmd_run(&args[1..]),
         _ => usage(),
     }
 }
@@ -356,8 +358,8 @@ fn cmd_list(args: &[String]) {
 }
 
 /// Scan a runtime dir for installed `libinka_runtime-*.so` / `libinka_resolver-*.so`
-/// files, sorted by version. Reused by `inka list` and `inka doctor`.
-fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
+/// files, sorted by version. Reused by `inka list`, `inka doctor`, and `inka run`.
+pub(crate) fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
     let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {

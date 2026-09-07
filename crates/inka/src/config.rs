@@ -459,6 +459,30 @@ pub struct Synth {
     pub warnings: Vec<String>,
 }
 
+/// Render the allow/deny permission DSL for an explicitly-selected named set
+/// (`inka run -P [<name>]`). Only the named set is honored — never
+/// `compile.permissions` or auto-defaults (dev-run intent). Returns the
+/// newline-joined DSL lines (empty = deny-by-default) plus informational notes.
+pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>) {
+    let (cfg, load_warns) = load(cwd);
+    let mut notes = load_warns;
+    let Some(map) = resolve_named_set(&cfg, name, "-P", &mut notes) else {
+        // resolve_named_set already recorded the unknown-name note.
+        return (String::new(), notes);
+    };
+    let mut allow: Vec<(String, String)> = Vec::new();
+    let mut deny: Vec<(String, String)> = Vec::new();
+    apply_category_map(&map, &mut allow, &mut deny, &mut notes);
+    let mut lines: Vec<String> = Vec::new();
+    for (cat, list) in allow {
+        lines.push(format!("allow-{cat}={list}"));
+    }
+    for (cat, list) in deny {
+        lines.push(format!("deny-{cat}={list}"));
+    }
+    (lines.join("\n"), notes)
+}
+
 pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
     let (cfg, load_warns) = load(cwd);
     let mut lines: Vec<String> = Vec::new();
