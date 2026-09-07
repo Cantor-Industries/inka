@@ -286,6 +286,15 @@ Resolution happens at run time against a **package store** — one shared, hoist
 
 **Per-project vendoring (`inka add`/`remove`).** Packages the default store doesn't cover (or that a project wants to pin itself) are vendored into a project-relative `vendored/` folder of **name-keyed package roots** (no `node_modules`; jsr uses its npm-mirror identity), declared as a union in the project's `package.json` (`dependencies`) and `deno.json` (`imports`), pinned exactly in `vendored.lock`. `inka build` embeds those roots into the artifact; the launcher auto-detects them and resolution for **app/vendored code** is `vendored/<name>` → default store → builtins (so a vendored copy can override the store or a builtin), while **imports from inside default-store packages** keep today's store → builtins semantics and never consult a project's vendored set. Embedded vendored packages make the artifact portable (copy it anywhere; it re-extracts its own copy). `inka remove` un-vendors a package and prunes orphaned vendored deps; `inka vendor list|status|release|ignore` manages the set and the dev-gitignore vs release-commit posture.
 
+**jsr packages use their npm-mirror identity.** `inka add jsr:@std/path` is installed and recorded under the name npm itself uses for jsr packages, `@jsr/std__path` — as the vendored dir `vendored/@jsr/std__path`, as the `package.json` dependency key, as the `deno.json` `imports` key, and in `vendored.lock`. A project whose `package.json` is later read by npm therefore needs an `.npmrc` so the `@jsr` scope resolves to jsr's registry (the same line inka writes into its own scratch installs):
+
+```sh
+# .npmrc
+@jsr:registry=https://npm.jsr.io
+```
+
+`inka remove` accepts either spelling — `inka remove jsr:@std/path` and `inka remove @jsr/std__path` both target the same vendored entry and clean the same manifest keys.
+
 Store layout:
 
 ```

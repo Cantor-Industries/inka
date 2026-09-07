@@ -178,7 +178,14 @@ fn store_has_packages(store: &Path) -> bool {
 // ---- spec parsing ----------------------------------------------------------
 
 struct AddSpec {
-    name: String, // npm identity (vendored dir name)
+    /// The canonical identity this package lives under everywhere inka records
+    /// it (vendored dir name, `package.json` dependency key, `deno.json`
+    /// imports key, `vendored.lock` entries, remove matching). jsr packages use
+    /// their npm-mirror identity (`jsr:@scope/pkg` -> `@jsr/scope__pkg`), which
+    /// is exactly what npm installs; `npm_identity()` is idempotent, so both
+    /// the original (`jsr:@scope/pkg`) and mirror (`@jsr/scope__pkg`) spellings
+    /// resolve here.
+    name: String,
     req: Option<String>,
     /// npm install target (identity + optional @version)
     target: String,
@@ -1825,5 +1832,27 @@ mod tests {
 
         let msg_specs = patcher_missing_message(&needs, true);
         assert!(msg_specs.contains("INKA_PATCHES"), "{msg_specs}");
+    }
+
+    // ---- WS2-3: canonical npm-mirror identity ----------------------------------
+
+    #[test]
+    fn npm_identity_uses_jsr_mirror_and_is_idempotent() {
+        assert_eq!(npm_identity("jsr:@std/path"), "@jsr/std__path");
+        // the mirror spelling is already canonical
+        assert_eq!(npm_identity("@jsr/std__path"), "@jsr/std__path");
+        // npm: prefix + mirror resolves the same way
+        assert_eq!(npm_identity("npm:@jsr/std__path"), "@jsr/std__path");
+        // a genuine npm scoped package is left as itself (no jsr rewrite)
+        assert_eq!(npm_identity("@scope/pkg"), "@scope/pkg");
+        assert_eq!(npm_identity("zod"), "zod");
+    }
+
+    #[test]
+    fn remove_by_original_and_mirror_target_the_same_entry() {
+        let original = parse_add_spec("jsr:@std/path").unwrap();
+        let mirror = parse_add_spec("@jsr/std__path").unwrap();
+        assert_eq!(original.name, "@jsr/std__path");
+        assert_eq!(mirror.name, "@jsr/std__path");
     }
 }
