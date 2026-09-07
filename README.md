@@ -311,6 +311,21 @@ Commands (`crates/inka`):
 
 Version policy: bare imports load the store's hoisted copy of a package. An explicit pinned/range import (`npm:effect@3.22.1`, `jsr:@std/assert@1.0.0`) must match that hoisted version, otherwise a clean error tells you to re-seed. Anything absent is a clean `run "inka pkg seed"` error. The engine never fetches modules: `http(s):` imports are rejected outright.
 
+### CJS→ESM conversion (patches + patcher)
+
+The engine is ESM-only, so when `inka add` vendors a package it cannot run as-is (genuine CommonJS leaves, or dual packages like `ws` whose import facade wraps CJS), it converts it to engine-viable pure ESM. That needs two pieces colocated with the `inka` binary (no repo tree required):
+
+- **Curated patch specs** — `patches/<name>/<version>/patch.json` (the repo ships `ws`/`undici`/`mime`/`msgpackr`). Discovered at `$INKA_PATCHES` → `./patches` → `<dir of inka binary>/patches`. When a curated spec exists it is applied automatically; otherwise inka synthesizes a generic `bundle-esm` conversion.
+- **The `inka-patcher` binary** — discovered at `$INKA_PATCHER` → `<dir of inka binary>/inka-patcher`. Build it with `cargo build --release` inside `crates/inka-patcher` (heavy rolldown stack; use the big-disk cargo home/target) and keep it next to the inka binary.
+
+Colocate both for a prefix in one step:
+
+```sh
+scripts/install-patches.sh <prefix-dir> [<path-to-built-inka-patcher>]
+```
+
+If a conversion is needed and either piece is missing, `inka add` fails cleanly and names the affected package(s) plus the install command above (and points at `INKA_PATCHES` when no spec directory is discoverable). Converted packages that can't be handled automatically fail with a scaffold error telling you the exact `patches/<name>/<version>/patch.json` to author — or you can keep the package in the default store instead.
+
 ## Building the real runtime
 
 `crates/inka-runtime` requires the heavy Deno dependency tree (V8, wgpu, …) and a one-time ~10–15 min build plus a snapshot-generation step. Point it at a roomy disk if your system drive is full:

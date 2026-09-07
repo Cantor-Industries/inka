@@ -516,25 +516,44 @@ fn entry_is_commonjs(pkg_root: &Path) -> bool {
     }
 }
 
-/// Default patch-spec dir: $INKA_PATCHES -> ./patches -> <dir of inka binary>/patches.
+/// Where curated patch specs are discovered, in order:
+/// $INKA_PATCHES -> ./patches -> <dir of inka binary>/patches.
+/// Returns the first path that qualifies (`INKA_PATCHES` wins even if it does
+/// not exist yet), falling back to the cwd `./patches` path.
 fn default_patches_base() -> PathBuf {
+    match curated_specs_source() {
+        Some(p) => p,
+        None => std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join("patches"),
+    }
+}
+
+/// `Some(dir)` when curated patch specs are discoverable: `INKA_PATCHES` is
+/// set, or `./patches` (cwd) is a dir, or `<dir of inka binary>/patches` is a
+/// dir. `None` when no spec directory is present anywhere inka would look.
+fn curated_specs_discoverable() -> bool {
+    curated_specs_source().is_some()
+}
+
+fn curated_specs_source() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("INKA_PATCHES") {
-        return PathBuf::from(p);
+        return Some(PathBuf::from(p));
     }
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let local = cwd.join("patches");
     if local.is_dir() {
-        return local;
+        return Some(local);
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let p = dir.join("patches");
             if p.is_dir() {
-                return p;
+                return Some(p);
             }
         }
     }
-    local
+    None
 }
 
 /// Pick the file target out of an `exports` "." condition value, preferring the
@@ -798,6 +817,29 @@ fn cjs_scaffold_error(name: &str, version: &str, reason: &str) -> String {
          add a patches/{name}/{version}/patch.json (see crates/inka-patcher), \
          neutralize/allow the env it reads, or keep the package in the default store"
     )
+}
+
+/// Error shown when a conversion is needed but the inka-patcher binary cannot
+/// be found: names the affected packages, explains how to build/install the
+/// patcher, and (when no curated specs are discoverable) points at INKA_PATCHES.
+fn patcher_missing_message(needs: &[(String, String)], specs_missing: bool) -> String {
+    let list = needs
+        .iter()
+        .map(|(n, v)| format!("{n}@{v}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut msg = format!(
+        "vendoring {list} requires CJS→ESM conversion, but the inka-patcher binary is missing.\n  \
+         build it with `cargo build --release` inside crates/inka-patcher (big-disk cargo \
+         home/target) and keep it next to this inka binary, or set INKA_PATCHER.\n  \
+         keep these packages in the default store instead, or add curated \
+         patches/<name>/<version>/patch.json specs and retry"
+    );
+    if specs_missing {
+        msg.push_str("\n  (curated patch specs were not found next to the inka binary; copy the \
+                      repo's patches/ there or set INKA_PATCHES=<dir>)");
+    }
+    msg
 }
 
 /// Run the patcher on a spec file against the scratch node_modules, returning
@@ -1129,6 +1171,29 @@ pub(crate) fn cmd_add(args: &[String]) {
         let ver = instances[&name].iter().next().cloned().unwrap_or_default();
         if !store_satisfies(&store, &name, Some(&ver)) {
             to_vendor.push((name, ver, "dep".to_string()));
+        }
+    }
+
+    // 4.5) fail fast if any leaf we must vendor needs CJS->ESM conversion but
+    //      the patcher is missing: name them all up front with install guidance
+    //      (never a per-package mystery, and never a partial install).
+    {
+        let base = default_patches_base();
+        let needs: Vec<(String, String)> = to_vendor
+            .iter()
+            .filter_map(|(name, ver, _why)| {
+                let root = nm.join(name);
+                let curated = base.join(name).join(ver).join("patch.json");
+                if curated.is_file() || entry_is_commonjs(&root) {
+                    Some((name.clone(), ver.clone()))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !needs.is_empty() && pkg::patcher_binary().is_err() {
+            let _ = fs::remove_dir_all(&work);
+            fail(&patcher_missing_message(&needs, !curated_specs_discoverable()));
         }
     }
 
@@ -1743,5 +1808,22 @@ mod tests {
         let dynamic =
             "a(__require(name)); b(__require(path + '/x')); c(__require(\"node:fs\"));\n";
         assert_eq!(scan_dynamic_requires(dynamic), 2);
+    }
+
+    // ---- WS2-2: missing-patcher message -----------------------------------
+
+    #[test]
+    fn patcher_missing_message_names_packages_and_guidance() {
+        let needs = vec![("ws".to_string(), "8.21.3".to_string())];
+        let msg = patcher_missing_message(&needs, false);
+        assert!(msg.contains("ws@8.21.3"), "{msg}");
+        assert!(msg.contains("cargo build --release"), "{msg}");
+        assert!(msg.contains("crates/inka-patcher"), "{msg}");
+        assert!(msg.contains("INKA_PATCHER"), "{msg}");
+        assert!(msg.contains("default store"), "{msg}");
+        assert!(!msg.contains("INKA_PATCHES"), "{msg}");
+
+        let msg_specs = patcher_missing_message(&needs, true);
+        assert!(msg_specs.contains("INKA_PATCHES"), "{msg_specs}");
     }
 }
