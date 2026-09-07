@@ -310,13 +310,49 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
 /// Collect the per-project vendored package roots (`vendored/<name>/…`) as
 /// cwd-relative entries, ready to embed into an artifact (whole-pool mode).
 /// The vendored lock/conversion bookkeeping files are not runtime modules.
+///
+/// Only genuine package roots are embedded. The pool is name-keyed flat:
+///   vendored/<name>/package.json                    (bare packages)
+///   vendored/@scope/<name>/package.json             (scoped packages)
+/// A top-level `vendored/` entry that is not a package root (a stray dir or
+/// file, `Go`-style vendor leftovers, etc.) is skipped so it never becomes
+/// artifact payload.
 pub fn collect_vendored(cwd: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     let vendored = cwd.join("vendored");
     if !vendored.is_dir() {
         return Ok(Vec::new());
     }
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    walk_vendored(cwd, &vendored, &mut files)?;
+    for ent in fs::read_dir(&vendored)
+        .map_err(|e| format!("cannot read dir {}: {e}", vendored.display()))?
+        .flatten()
+    {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') {
+            continue; // hidden entries (and bookkeeping dotfiles) are not packages
+        }
+        let ft = ent.file_type().map_err(|e| e.to_string())?;
+        if !ft.is_dir() {
+            continue; // a stray file at the pool root is not a package
+        }
+        let root = ent.path();
+        if root.join("package.json").is_file() {
+            walk_vendored(cwd, &root, &mut files)?;
+        } else if name.starts_with('@') {
+            // scope container (vendored/@scope/<name>/package.json): descend one
+            // level and embed only the child dirs that are real package roots.
+            for sub in fs::read_dir(&root)
+                .map_err(|e| format!("cannot read dir {}: {e}", root.display()))?
+                .flatten()
+            {
+                let ft = sub.file_type().map_err(|e| e.to_string())?;
+                if ft.is_dir() && sub.path().join("package.json").is_file() {
+                    walk_vendored(cwd, &sub.path(), &mut files)?;
+                }
+            }
+        }
+        // anything else: not a package root -> skip entirely.
+    }
     Ok(files.into_iter().collect())
 }
 
@@ -351,4 +387,71 @@ fn walk_vendored(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) 
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "inkaembed-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn mk(cwd: &Path, rel: &str, body: &str) {
+        let p = cwd.join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn collect_vendored_skips_non_package_entries() {
+        let cwd = scratch();
+        mk(&cwd, "vendored/ws/package.json", r#"{"name":"ws","version":"1.0.0"}"#);
+        mk(&cwd, "vendored/ws/index.js", "export const x = 1;\n");
+        // stray dir and stray top-level file: not package roots -> not embedded
+        mk(&cwd, "vendored/junk/file.txt", "stray\n");
+        mk(&cwd, "vendored/stray.txt", "top-level stray file\n");
+        let files = collect_vendored(&cwd).unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(
+            rels,
+            vec!["vendored/ws/index.js", "vendored/ws/package.json"],
+            "{rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_vendored_keeps_scoped_packages() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "vendored/@effect/platform/package.json",
+            r#"{"name":"@effect/platform","version":"1.0.0"}"#,
+        );
+        mk(&cwd, "vendored/@effect/platform/lib/mod.ts", "export const p = 1;\n");
+        // a stray file directly inside a scope container is not a package
+        mk(&cwd, "vendored/@junk/note.txt", "not a package\n");
+        let files = collect_vendored(&cwd).unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert_eq!(
+            rels,
+            vec![
+                "vendored/@effect/platform/lib/mod.ts",
+                "vendored/@effect/platform/package.json",
+            ],
+            "{rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
 }

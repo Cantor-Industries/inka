@@ -153,7 +153,11 @@ fn app_vendor_resolve(
     for ident in bare_store_identities(&name) {
         if let Some(v) = vendor {
             let pkg_root = v.join(&ident);
-            if pkg_root.is_dir() {
+            // A vendored entry is a package only when it is a real root (has a
+            // package.json); a stray dir must be skipped so the lookup order
+            // (store -> builtin -> error) continues, not surfaced as a bogus
+            // "cannot read package.json" failure.
+            if pkg_root.join("package.json").is_file() {
                 let sub = split_bare(specifier).1;
                 return match resolve_pkg_file(&pkg_root, sub.as_deref()) {
                     Ok(path) => Decision::File(path),
@@ -200,7 +204,9 @@ fn app_vendor_resolve(
 fn vendor_pinned_lookup(vendor: &Path, spec: &str) -> Result<Option<PathBuf>, String> {
     let ps = parse_pkg_specifier(spec)?;
     let pkg_root = vendor.join(&ps.name);
-    if !pkg_root.is_dir() {
+    // Only a real package root (with a package.json) can satisfy a pin; a stray
+    // dir falls through to the store instead of a confusing "no readable version".
+    if !pkg_root.join("package.json").is_file() {
         return Ok(None);
     }
     if let Some(req) = ps.req.as_deref() {
@@ -738,6 +744,7 @@ unsafe fn opt_str(p: *const c_char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn write_pkg(root: &Path, name: &str, version: &str, entry: &str) {
         let dir = root.join("node_modules").join(name);
@@ -835,9 +842,21 @@ mod tests {
     }
 
     fn fresh_store() -> std::path::PathBuf {
-        let tmp = std::env::temp_dir().join(format!("inkares-cjs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
-        tmp
+        scratch_dir("store")
+    }
+
+    /// A unique scratch dir per call. The resolver tests share this process's
+    /// temp namespace, so a fixed per-pid dir would be raced by the parallel
+    /// test harness (one test's remove_dir_all wipes another's fixtures).
+    fn scratch_dir(kind: &str) -> std::path::PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "inkares-{kind}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&d);
+        d
     }
 
     #[test]
@@ -931,8 +950,7 @@ mod tests {
     }
 
     fn fresh_vendor() -> std::path::PathBuf {
-        let tmp = std::env::temp_dir().join(format!("inkares-vnd-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&tmp);
+        let tmp = scratch_dir("vnd");
         let v = tmp.join("vend");
         std::fs::create_dir_all(&v).unwrap();
         v
@@ -1045,5 +1063,39 @@ mod tests {
         assert!(matches!(&d, Decision::File(p) if p.starts_with(&tmp.join("vend/widget"))));
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = v;
+    }
+
+    // A stray dir under vendored/ without a package.json is NOT a package: a
+    // bare import must fall through (store -> builtin -> clean error) instead
+    // of surfacing a bogus "cannot read …/package.json" failure.
+    #[test]
+    fn junk_vendor_dir_without_package_json_is_skipped() {
+        let v = fresh_vendor();
+        std::fs::create_dir_all(v.join("junk")).unwrap();
+        std::fs::write(v.join("junk").join("file.txt"), "stray\n").unwrap();
+        let d = resolve_v2(None, Some(&v), "file:///app/main.ts", "junk");
+        assert!(
+            matches!(&d, Decision::Error(m)
+                if m.contains("cannot resolve bare import 'junk'")
+                    && !m.contains("package.json")
+                    && !m.contains("cannot read")),
+            "got {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(v.parent().unwrap());
+    }
+
+    // The same guard applies to pinned (npm:/jsr:) lookups: a stray dir falls
+    // through to the store instead of a confusing "no readable version" error.
+    #[test]
+    fn vendor_pinned_stray_dir_falls_through() {
+        let v = fresh_vendor();
+        std::fs::create_dir_all(v.join("widget")).unwrap();
+        std::fs::write(v.join("widget").join("index.js"), "stray\n").unwrap();
+        let d = resolve_v2(None, Some(&v), "file:///app/main.ts", "npm:widget@1.0.0");
+        assert!(
+            matches!(&d, Decision::Error(m) if !m.contains("no readable version")),
+            "got {d:?}"
+        );
+        let _ = std::fs::remove_dir_all(v.parent().unwrap());
     }
 }

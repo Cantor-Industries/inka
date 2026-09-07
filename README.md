@@ -179,8 +179,9 @@ EOF
 
 # 2. manifest — optional. A `.manifest` file (app.manifest / inka.manifest) is
 #    honored when present; otherwise it is auto-generated from package.json /
-#    deno.json top-level `permissions` (and an `inka.runtime` block) with a
-#    default floor of runtime>=0.266.0 and deny-by-default permissions.
+#    deno.json explicit build-intent permissions (an `inka.runtime` block, or
+#    `compile.permissions`) with a default floor of runtime>=0.266.0 and
+#    deny-by-default permissions.
 printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest   # optional
 
 # 3. pack  (manifest auto-found as app.manifest; output auto-derived as "app")
@@ -196,16 +197,33 @@ printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest   # optio
 
 ### Manifest vs project config
 
-When no `.manifest` file exists, `inka build` synthesizes one from top-level fields:
+When no `.manifest` file exists, `inka build` synthesizes one. Permission lines
+are baked **only from explicit build-intent sources**, in this precedence order
+(matching Deno's model — config permissions are never trusted implicitly, since
+a script could modify `deno.json` to elevate them):
 
-| Config (package.json / deno.json) | Emits |
+| Source | Emits |
 |---|---|
-| `permissions.default.<cat>` (Deno shape) | `allow-<cat>=…` / `deny-<cat>=…` |
-| `deno.json.compile.permissions` | same (used instead of the default set) |
-| `inka.runtime` / `inka.tested-against` | `runtime=…` / `tested-against=…` |
+| `inka build -P <set>` | the named set, resolved from `deno.json.permissions.<set>` then `package.json.permissions.<set>` (deno.json wins per key when both define it) |
+| `deno.json.compile.permissions` (a category map, or a string naming a set) | the deno-compile analog; baked automatically because `inka build` *is* the compile step |
+| `inka.permissions = "<set>"` marker (under the `inka` block; deno.json wins) | that named set |
+| `permissions.default.<cat>` (Deno shape) with **no** marker above | **ignored** — this is dev-run intent (`deno run -P`); builds warn and stay deny-by-default |
 | *(none)* | deny-all + `runtime=inka_runtime>=0.266.0` |
 
-Deno's `ignore` sub-key and the `import` category have no inka equivalent (warned + skipped). `inka build -P <set>` selects a named permission set; `--runtime '<spec>'` / `--tested-against <ver>` override config on the command line.
+A plain `permissions.default` set exists so local runs (`deno task`, `deno run
+-P`) are frictionless; it must never silently become the permission policy of a
+shipped binary. To bake it anyway, select it explicitly (`-P default`,
+`compile.permissions: "default"`, or an `inka.permissions` marker). Note this
+auto-baking of `compile.permissions` is a deliberate divergence from Deno,
+which requires an explicit `-P` even for `compile`/`test`/`bench` permissions.
+
+`inka.runtime` / `inka.tested-against` emit `runtime=…` / `tested-against=…`.
+Deno's `ignore` sub-key and the `import` category have no inka equivalent
+(warned + skipped); scalar-string values like `"read": "./data"` are allowed.
+An unknown or malformed permission source (e.g. `-P nope`, a bad
+`compile.permissions`) warns and produces a deny-by-default artifact — never a
+silent fall-back. `--runtime '<spec>'` / `--tested-against <ver>` override
+config on the command line.
 
 ### Local imports & multi-file apps
 

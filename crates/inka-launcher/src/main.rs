@@ -550,6 +550,10 @@ fn main() {
         Trailer::Single { source, manifest: _ } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
             debug_log!("[inka] module '{}' payload {} bytes", m.module, source.len());
+            // A single-file artifact embeds no vendored packages; never let a
+            // caller-exported INKA_VENDOR point the resolver at an external tree.
+            env::remove_var("INKA_VENDOR");
+            debug_log!("[inka] single-file artifact; INKA_VENDOR cleared");
             load_and_run(&path, &m.module, source, &args, &m.perms)
         }
         Trailer::Archive {
@@ -574,11 +578,16 @@ fn main() {
             };
             // Auto-detect embedded vendored package roots: when the artifact
             // carries a `vendored/` tree, point the resolver at it (vendored
-            // code resolves vendored-first, then the default store).
+            // code resolves vendored-first, then the default store). When it
+            // does not, clear any caller-exported INKA_VENDOR so an external
+            // path is never consulted.
             let vendor_dir = root.join("vendored");
             if vendor_dir.is_dir() {
                 env::set_var("INKA_VENDOR", &vendor_dir);
                 debug_log!("[inka] embedded vendored packages at {}", vendor_dir.display());
+            } else {
+                env::remove_var("INKA_VENDOR");
+                debug_log!("[inka] no embedded vendored packages; INKA_VENDOR cleared");
             }
             let code = load_and_run_dir(
                 &path,

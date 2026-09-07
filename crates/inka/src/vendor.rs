@@ -143,6 +143,38 @@ fn store_satisfies(store: &Path, name: &str, req: Option<&str>) -> bool {
     }
 }
 
+/// Does the default store actually contain installed packages? A store without
+/// a `node_modules`, or whose `node_modules` holds no package root (bare at
+/// `node_modules/<name>` or scoped at `node_modules/@scope/<name>`), cannot
+/// provide anything — vendoring must carry the full closure.
+fn store_has_packages(store: &Path) -> bool {
+    let nm = store.join("node_modules");
+    if !nm.is_dir() {
+        return false;
+    }
+    let Ok(rd) = fs::read_dir(&nm) else {
+        return false;
+    };
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.join("package.json").is_file() {
+            return true;
+        }
+        if ent.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            // possible scope container (node_modules/@scope/<name>/package.json)
+            if let Ok(sub) = fs::read_dir(&p) {
+                if sub
+                    .flatten()
+                    .any(|e| e.path().join("package.json").is_file())
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 // ---- spec parsing ----------------------------------------------------------
 
 struct AddSpec {
@@ -593,6 +625,18 @@ pub(crate) fn cmd_add(args: &[String]) {
         }
     }
 
+    // 0.5) Before the dedupe/closure steps, surface a missing/empty default
+    // store: with no store, the dedupe is always false and the whole dependency
+    // closure is vendored, which silently defeats the two-tier model. Do not
+    // abort — full vendoring is the correct fallback — but say so.
+    if !store_has_packages(&store) {
+        println!(
+            "[inka] no default store installed ({}); dependencies it would normally provide \
+             will be vendored in full. Install one with: inka install <version>",
+            store.display()
+        );
+    }
+
     // 1) dedupe: default store already satisfies -> skip (unless --force)
     if !force && store_satisfies(&store, &spec.name, spec.req.as_deref()) {
         println!(
@@ -933,4 +977,72 @@ fn cmd_git_posture(ignore: bool, args: &[String]) {
         std::process::exit(1);
     });
     println!("[inka] vendored/ is no longer gitignored (commit it for release builds)");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch(kind: &str) -> PathBuf {
+        static N: std::sync::atomic::AtomicUsize =
+            std::sync::atomic::AtomicUsize::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!(
+            "inkavendor-{kind}-{}-{n}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write_file(root: &Path, rel: &str, body: &str) {
+        let p = root.join(rel);
+        fs::create_dir_all(p.parent().unwrap()).unwrap();
+        fs::write(p, body).unwrap();
+    }
+
+    #[test]
+    fn store_without_node_modules_has_no_packages() {
+        let store = scratch("no-nm");
+        assert!(!store_has_packages(&store));
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn empty_node_modules_has_no_packages() {
+        let store = scratch("empty-nm");
+        fs::create_dir_all(store.join("node_modules")).unwrap();
+        assert!(!store_has_packages(&store));
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn bare_package_counts_as_present() {
+        let store = scratch("bare");
+        write_file(&store, "node_modules/zod/package.json", r#"{"version":"3.23.0"}"#);
+        assert!(store_has_packages(&store));
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn scoped_package_counts_as_present() {
+        let store = scratch("scoped");
+        write_file(
+            &store,
+            "node_modules/@effect/platform/package.json",
+            r#"{"version":"1.0.0"}"#,
+        );
+        assert!(store_has_packages(&store));
+        let _ = fs::remove_dir_all(&store);
+    }
+
+    #[test]
+    fn junk_dirs_in_node_modules_do_not_count() {
+        let store = scratch("junk");
+        write_file(&store, "node_modules/README.md", "hi\n");
+        write_file(&store, "node_modules/stray/file.txt", "x\n");
+        assert!(!store_has_packages(&store));
+        let _ = fs::remove_dir_all(&store);
+    }
 }
