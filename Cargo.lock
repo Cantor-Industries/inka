@@ -4358,6 +4358,7 @@ name = "inka"
 version = "0.0.0"
 dependencies = [
  "deno_ast",
+ "inka-resolver",
  "serde",
  "serde_json",
  "sha2",

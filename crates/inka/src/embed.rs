@@ -6,7 +6,7 @@
 //
 // Entries are returned as (path-relative-to-cwd, bytes) pairs.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -79,6 +79,102 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
         out.push((k, v));
     }
     Ok(out)
+}
+
+/// Resolve a non-relative specifier to a cwd-relative `vendored/…` file that a
+/// `--vendor-closure` build should embed. Walks the pure resolver with the
+/// project's `vendored/` as the vendor root and no store: only a
+/// `Decision::File` under that root is embeddable; store/builtin/error results
+/// (and everything outside `vendored/`) are left for runtime resolution.
+fn vendored_target(cwd: &Path, vendor_root: &Path, from_rel: &str, spec: &str) -> Option<String> {
+    let referrer = url_from_rel(cwd, from_rel).to_string();
+    let decision = inka_resolver::resolve_v2(None, Some(vendor_root), &referrer, spec);
+    let inka_resolver::Decision::File(p) = decision else {
+        return None;
+    };
+    if !p.starts_with(vendor_root) {
+        return None;
+    }
+    let rel = p
+        .strip_prefix(cwd)
+        .ok()?
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    rel.starts_with("vendored/").then_some(rel)
+}
+
+/// Find the cwd-relative `package.json` of the vendored package root that owns
+/// `rel` (the nearest ancestor dir under `vendored/` that has one), so the
+/// runtime resolver can serve the package. None for files outside a root.
+fn package_json_for(cwd: &Path, rel: &str) -> Option<String> {
+    let mut dir = Path::new(rel).parent();
+    while let Some(d) = dir {
+        let s = d.to_string_lossy();
+        if cwd.join(d).join("package.json").is_file() {
+            return Some(format!("{s}/package.json"));
+        }
+        if s == "vendored" {
+            break;
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Collect only the vendored modules reachable from the entry's import graph
+/// (`--vendor-closure`). App files are walked (and returned only when they live
+/// under `vendored/`) so relative imports inside vendored packages and further
+/// bare imports are followed through the resolver. Store/builtin-only packages
+/// are not embedded — they are resolved from the machine default store at run
+/// time. Each reached package root's `package.json` is embedded too (the
+/// runtime resolver reads it). Entries are cwd-relative `vendored/…` paths, as
+/// in `collect_vendored`.
+pub fn collect_vendored_closure(
+    cwd: &Path,
+    entry_rel: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let vendor_root = cwd.join("vendored");
+    if !vendor_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<String> = vec![entry_rel.to_string()];
+    let mut warned = false;
+
+    while let Some(rel) = queue.pop() {
+        if !visited.insert(rel.clone()) {
+            continue;
+        }
+        let bytes = fs::read(cwd.join(&rel))
+            .map_err(|e| format!("cannot read {}: {e}", cwd.join(&rel).display()))?;
+        if rel.starts_with("vendored/") {
+            files.insert(rel.clone(), bytes.clone());
+            if let Some(pj) = package_json_for(cwd, &rel) {
+                if !files.contains_key(&pj) {
+                    if let Ok(b) = fs::read(cwd.join(&pj)) {
+                        files.insert(pj, b);
+                    }
+                }
+            }
+        }
+        for s in scan_specifiers(cwd, &rel, &bytes, &mut warned) {
+            if let Some(target) = resolve_local(cwd, &rel, &s) {
+                if !visited.contains(&target) {
+                    queue.push(target);
+                }
+            } else if let Some(vtarget) = vendored_target(cwd, &vendor_root, &rel, &s) {
+                if !visited.contains(&vtarget) {
+                    queue.push(vtarget);
+                }
+            }
+            // store / builtin / network specifiers are never embedded.
+        }
+    }
+
+    Ok(files.into_iter().collect())
 }
 
 /// Scan one source file for import specifiers: static imports/export-from via
@@ -451,6 +547,54 @@ mod tests {
                 "vendored/@effect/platform/package.json",
             ],
             "{rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // --vendor-closure: only the vendored modules reachable from the entry are
+    // embedded (walking through vendored relative imports); unrelated vendored
+    // packages and the app's own files are excluded.
+    #[test]
+    fn collect_vendored_closure_embeds_only_reachable_vendored() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "app.js",
+            "import { once } from \"onetime\";\nimport \"./util.js\";\nconsole.log(once);\n",
+        );
+        mk(&cwd, "util.js", "export const u = 1;\n");
+        mk(
+            &cwd,
+            "vendored/onetime/package.json",
+            r#"{"name":"onetime","version":"7.2.0","type":"module","exports":{".":"./index.js"}}"#,
+        );
+        mk(
+            &cwd,
+            "vendored/onetime/index.js",
+            "import { x } from \"./lib/x.js\";\nexport function once() { return x; }\n",
+        );
+        mk(&cwd, "vendored/onetime/lib/x.js", "export const x = 1;\n");
+        // unrelated vendored package nothing imports
+        mk(
+            &cwd,
+            "vendored/extra/package.json",
+            r#"{"name":"extra","version":"1.0.0","type":"module","main":"index.js"}"#,
+        );
+        mk(&cwd, "vendored/extra/index.js", "export const e = 2;\n");
+
+        let files = collect_vendored_closure(&cwd, "app.js").unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        for want in [
+            "vendored/onetime/index.js",
+            "vendored/onetime/lib/x.js",
+            "vendored/onetime/package.json",
+        ] {
+            assert!(rels.contains(&want.to_string()), "missing {want}: {rels:?}");
+        }
+        assert!(rels.iter().all(|r| !r.starts_with("vendored/extra")), "{rels:?}");
+        assert!(
+            rels.iter().all(|r| r != "app.js" && r != "util.js"),
+            "app files must not be returned: {rels:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
     }

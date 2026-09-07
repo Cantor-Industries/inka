@@ -37,6 +37,8 @@ fn help() -> ! {
          \x20 -P, --permission-set <name>  use this named permission set from the config\n\
          \x20     --transpile       compile TypeScript to JavaScript now (single- and multi-file; default: the runtime transpiles at load)\n\
          \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
+         \x20     --vendor-closure  embed only the vendored modules reachable from the entry's import graph\n\
+         \x20     --no-vendor       skip vendored embedding entirely (artifact relies on the machine default store)\n\
          \x20 -h, --help            show this help\n\
          \n\
          launcher is found at $INKA_LAUNCHER or next to the inka binary."
@@ -58,6 +60,8 @@ pub fn cmd_build(args: &[String]) {
     let mut perm_set: Option<String> = None;
     let mut transpile = false;
     let mut embed_dir = false;
+    let mut vendor_closure = false;
+    let mut no_vendor = false;
     let mut positional: Vec<PathBuf> = Vec::new();
 
     let mut it = args.iter();
@@ -71,6 +75,8 @@ pub fn cmd_build(args: &[String]) {
             "-P" | "--permission-set" => perm_set = Some(next_str(&mut it, a)),
             "--transpile" => transpile = true,
             "--embed-dir" => embed_dir = true,
+            "--vendor-closure" => vendor_closure = true,
+            "--no-vendor" => no_vendor = true,
             "-h" | "--help" => help(),
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{other}'");
@@ -138,6 +144,13 @@ pub fn cmd_build(args: &[String]) {
         Err(e) => err(&e),
     };
 
+    if vendor_closure && no_vendor {
+        err("--vendor-closure and --no-vendor are mutually exclusive");
+    }
+    if (vendor_closure || no_vendor) && embed_dir {
+        err("--vendor-closure/--no-vendor do not apply with --embed-dir (whole-tree embed already includes vendored/)");
+    }
+
     let mode = if embed_dir {
         crate::embed::Mode::Directory
     } else {
@@ -149,10 +162,18 @@ pub fn cmd_build(args: &[String]) {
     }
     .unwrap_or_else(|e| err(&e));
 
-    // Embed the per-project vendored package roots (whole-pool by default) so a
-    // built artifact carries its overrides/extras. The launcher auto-detects a
-    // `vendored/` dir under the extracted artifact root at run time.
-    let vendor_files = crate::embed::collect_vendored(&cwd).unwrap_or_else(|e| err(&e));
+    // Embed the per-project vendored package roots so a built artifact carries
+    // its overrides/extras. Default is the whole pool; `--vendor-closure` embeds
+    // only the vendored modules reachable from the entry graph; `--no-vendor`
+    // skips vendored embedding (the artifact uses the machine default store).
+    // The launcher auto-detects a `vendored/` dir under the extracted root.
+    let vendor_files = if no_vendor {
+        Vec::new()
+    } else if vendor_closure {
+        crate::embed::collect_vendored_closure(&cwd, &entry_rel).unwrap_or_else(|e| err(&e))
+    } else {
+        crate::embed::collect_vendored(&cwd).unwrap_or_else(|e| err(&e))
+    };
     let has_vendor = !vendor_files.is_empty();
     for (rel, bytes) in vendor_files {
         if !files.iter().any(|(r, _)| r == &rel) {

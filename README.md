@@ -240,6 +240,11 @@ Embedding is automatic. When imports exist, `inka build` walks the import graph 
 - **Import closure (default):** static imports/exports, literal `import("./x.js")`, and `.json` are discovered from the entry (via `deno_ast`) and embedded, preserving the cwd-relative tree. A non-literal dynamic `import(...)` can't be seen statically → a warning suggests `--embed-dir`.
 - **`--embed-dir`:** embed the whole current-directory tree (skipping `.git`, `target`, `node_modules`, `.inka`, `dist`) for projects that use computed dynamic imports.
 
+Vendored packages are embedded whole-pool by default so a built artifact is self-contained. Two flags tune that (import-closure builds only; combining either with `--embed-dir` errors):
+
+- **`--vendor-closure`:** embed only the vendored modules reachable from the entry's import graph (walking *through* vendored packages; each reached root's `package.json` is included). Packages the app never touches stay out of the artifact, shrinking it — a package only satisfied by the default store is still resolved from the store at run time.
+- **`--no-vendor`:** skip vendored embedding entirely; the artifact relies on the machine default store (clean store-lookup error if a package is only vendored).
+
 TS is transpiled per file at run time by the tuple by default (so extensionless `./math` → `math.ts` etc. resolve like Deno). With `--transpile`, modules are compiled at build time instead (single- and multi-file). Bundled-module reads are part of the program and don't count against the `read` permission; `Deno.readTextFileSync` and other file/network ops remain permission-gated.
 
 ### TypeScript
