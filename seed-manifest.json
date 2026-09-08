@@ -4,6 +4,7 @@
     { "name": "@std/assert", "version": "1.0.0", "registry": "jsr" },
     { "name": "effect", "version": "3.22.1" },
     { "name": "@effect/platform", "version": "0.97.1" },
-    { "name": "@effect/platform-node", "version": "0.108.1" }
+    { "name": "@effect/platform-node", "version": "0.108.1" },
+    { "name": "hono", "version": "4.13.7" }
   ]
 }
