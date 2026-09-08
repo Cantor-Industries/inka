@@ -1,41 +1,50 @@
 // inka run: execute a .ts/.js file directly via the installed runtime tuple,
 // without building an artifact. Mirrors the launcher's multi-file execution:
-// dlopen the chosen runtime and call inka_runtime_run_module_dir with
-// dir = the current working directory and entry = the file's cwd-relative path,
-// so relative imports, vendored packages, the default store, and node built-ins
-// all resolve the way a built artifact would.
+// dlopen the chosen runtime and call inka_runtime_run_module_dir with dir =
+// the execution root and entry = the file's path relative to it, so relative
+// imports, vendored packages, the default store, and node built-ins all resolve
+// the way a built artifact would.
 //
-// Permissions mirror `deno run`: deny-by-default, with explicit grants only:
-//   -A / --allow-all                      everything (trimmed by any --deny-*)
-//   -P [<name>] / --permission-set[=<n>]  a named config permission set
-//                                         (bare -P = the config `default` set)
-//   --allow-<cat>[=list] / --deny-<cat>[=list]   granular per-category grants
-// Only -P/config/flag-grants apply — compile.permissions/auto-defaults never do.
+// Permissions mirror `deno run --no-prompt`: deny-by-default, with explicit
+// grants only:
+//   -A / --allow-all                            everything (trimmed by --deny-*)
+//   -R/-W/-N/-E/-S[=list]                       deno short forms (read/write/net/
+//                                               env/sys) + long --allow-<cat>
+//   -P [<name>] / --permission-set[=<n>]        a named config permission set
+//                                               (bare -P = the config `default`)
+//   --deny-<cat>[=list]                         trim an allowed category
+// `--` ends option parsing. Only -P/config/flag-grants apply — compile.permissions
+// and auto-defaults never do.
 
 use std::env;
 use std::ffi::CStr;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use crate::embed;
 use crate::Version;
 
 const CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
 
 fn usage() -> ! {
     eprintln!(
-        "usage: inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n\
+        "usage: inka run [options] <file> [args...]\n\
          \n\
          executes <file> (.ts/.js/...) via the installed runtime. Options must precede the\n\
-         file; anything after <file> is passed to the program as its arguments.\n\
+         file; anything after <file> (or after `--`) is passed to the program as its\n\
+         arguments.\n\
          \n\
-         permissions (deny by default):\n\
+         permissions (deny by default; no prompting):\n\
          \x20 -A, --allow-all            allow everything (trimmed by any --deny-*)\n\
+         \x20 -R, -W, -N, -E, -S         allow read/write/net/env/sys (whole category)\n\
+         \x20 -R=<list>, -N=<list>, ...   same, scoped to the given list\n\
+         \x20     --allow-<cat>[=list]    grant category read|write|net|env|run|sys|ffi\n\
+         \x20     --deny-<cat>[=list]     deny within an allowed category\n\
          \x20 -P[=<name>], --permission-set[=<name>]\n\
          \x20                             apply a named permission set from the config\n\
          \x20                             (bare -P uses the `default` set)\n\
-         \x20     --allow-<cat>[=list]    grant category read|write|net|env|run|sys|ffi\n\
-         \x20     --deny-<cat>[=list]     deny within an allowed category\n\
+         \x20     --runtime <ver>        use a specific installed runtime tuple\n\
+         \x20     --                     end of options (file may start with '-')\n\
          \x20 -h, --help                  show this help"
     );
     exit(0);
@@ -51,6 +60,39 @@ struct Flags {
 fn fail(msg: &str) -> ! {
     eprintln!("error: {msg}");
     exit(2);
+}
+
+fn cat_for_short(short: char) -> Option<&'static str> {
+    match short {
+        'R' => Some("read"),
+        'W' => Some("write"),
+        'N' => Some("net"),
+        'E' => Some("env"),
+        'S' => Some("sys"),
+        _ => None,
+    }
+}
+
+/// Merge repeated per-category entries: `*` wins over lists; explicit lists are
+/// joined with commas (one DSL line per category).
+fn merge_cat(entries: &[(String, String)]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for (cat, list) in entries {
+        match out.iter_mut().find(|(c, _)| c == cat) {
+            Some((_, cur)) => {
+                if list == "*" {
+                    *cur = "*".to_string();
+                } else if cur != "*" {
+                    if !cur.is_empty() {
+                        cur.push(',');
+                    }
+                    cur.push_str(list);
+                }
+            }
+            None => out.push((cat.clone(), list.clone())),
+        }
+    }
+    out
 }
 
 fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
@@ -74,12 +116,40 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
             "-h" | "--help" => usage(),
             "-A" | "--allow-all" => f.allow_all = true,
             "-P" => f.permset = Some("default".to_string()),
+            "--" => {
+                // end of options: the next token is the file (may start with '-')
+                if i + 1 >= args.len() {
+                    usage();
+                }
+                file = Some(PathBuf::from(&args[i + 1]));
+                prog = args[i + 2..].to_vec();
+                break;
+            }
             "--runtime" => {
                 // consume <ver> (validated by choose_runtime); skip it here
                 i += 1;
                 if i >= args.len() {
                     fail("--runtime needs a version like 0.266.0");
                 }
+            }
+            _ if a.len() >= 2 && cat_for_short(a.as_bytes()[1] as char).is_some() => {
+                let short = a.as_bytes()[1] as char;
+                let cat = cat_for_short(short).unwrap().to_string();
+                let body = &a[2..];
+                let list = if body.is_empty() {
+                    "*".to_string()
+                } else if let Some(v) = body.strip_prefix('=') {
+                    if v.is_empty() {
+                        "*".to_string()
+                    } else {
+                        v.to_string()
+                    }
+                } else {
+                    fail(&format!(
+                        "option '{a}' takes an optional '=<list>' value (e.g. -{short}=./data)"
+                    ));
+                };
+                f.allow.push((cat, list));
             }
             _ if a.starts_with("-P=") => f.permset = Some(a["-P=".len()..].to_string()),
             "--permission-set" => {
@@ -126,43 +196,43 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
     (f, file, prog)
 }
 
-/// Render the permission DSL string from the parsed flags.
-fn permission_dsl(cwd: &Path, f: &Flags) -> String {
+/// Render the permission DSL string from the parsed flags (against `root`,
+/// whose config supplies any -P-selected permission set).
+fn permission_dsl(root: &Path, f: &Flags) -> String {
     if f.allow_all {
         let mut lines = vec!["permissions=all".to_string()];
-        for (cat, list) in &f.deny {
+        for (cat, list) in merge_cat(&f.deny) {
             lines.push(format!("deny-{cat}={list}"));
         }
         return lines.join("\n");
     }
     if let Some(name) = &f.permset {
-        let (dsl, notes) = crate::config::permission_set_dsl(cwd, name);
+        let (dsl, notes) = crate::config::permission_set_dsl(root, name);
         for n in &notes {
             eprintln!("warning: {n}");
         }
         return dsl;
     }
     let mut lines = Vec::new();
-    for (cat, list) in &f.allow {
+    for (cat, list) in merge_cat(&f.allow) {
         lines.push(format!("allow-{cat}={list}"));
     }
-    for (cat, list) in &f.deny {
+    for (cat, list) in merge_cat(&f.deny) {
         lines.push(format!("deny-{cat}={list}"));
     }
     lines.join("\n")
 }
 
 /// Choose the runtime .so: newest installed, or an exact --runtime <ver>.
-/// Only option tokens before the file are considered (program args after the
-/// file are never scanned).
+/// Only option tokens before the file (or before `--`) are considered.
 fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
     let dir = crate::runtime_dir(None);
     let (runtimes, _) = crate::installed_parts(&dir);
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
-        if !a.starts_with('-') {
-            break; // first positional = the file
+        if !a.starts_with('-') || a == "--" {
+            break; // first positional (or the `--` terminator) ends the options
         }
         if a == "--runtime" {
             let ver = args.get(i + 1).map(String::as_str).unwrap_or("");
@@ -198,7 +268,64 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
     }
 }
 
-fn set_default_env(lib: &Path) {
+fn is_project_root(dir: &Path) -> bool {
+    dir.join("vendored").is_dir()
+        || dir.join("package.json").is_file()
+        || dir.join("deno.json").is_file()
+}
+
+fn join_components(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+/// Determine the execution root and the entry's path relative to it. A file
+/// under the cwd uses the cwd as root (today's behavior). An outside-cwd file
+/// roots at the nearest ancestor project (vendored/ | package.json | deno.json),
+/// falling back to the file's own directory.
+fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> {
+    let canon = fs::canonicalize(file)
+        .map_err(|e| format!("cannot resolve {}: {e}", file.display()))?;
+    if !canon.is_file() {
+        return Err(format!("'{}' is not a file", file.display()));
+    }
+    let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+
+    if let Ok(rel) = canon.strip_prefix(&canon_cwd) {
+        let entry = join_components(rel);
+        if entry.is_empty() {
+            return Err(format!("cannot run a directory: {}", file.display()));
+        }
+        return Ok((cwd.to_path_buf(), entry));
+    }
+
+    // Outside the cwd: find the nearest ancestor project root.
+    let file_dir = match canon.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return Err(format!("no parent directory for {}", file.display())),
+    };
+    let mut root = file_dir.clone();
+    let mut cur = file_dir;
+    loop {
+        if is_project_root(&cur) {
+            root = cur;
+            break;
+        }
+        match cur.parent() {
+            Some(p) if p != cur => cur = p.to_path_buf(),
+            _ => break,
+        }
+    }
+    let rel = canon
+        .strip_prefix(&root)
+        .map_err(|_| format!("cannot relate {} to {}", file.display(), root.display()))?;
+    let entry = join_components(rel);
+    Ok((root, entry))
+}
+
+fn set_default_env(lib: &Path, root: &Path) {
     // INKA_STORE defaults to a `store/` dir next to the runtime when present.
     if env::var_os("INKA_STORE").is_none() {
         if let Some(dir) = lib.parent() {
@@ -220,8 +347,8 @@ fn set_default_env(lib: &Path) {
             );
         }
     }
-    // INKA_VENDOR: only an embedded/this-project vendored/ dir counts.
-    let vroot = crate::vendor::vendor_root();
+    // INKA_VENDOR: only a vendored/ dir under the execution root counts.
+    let vroot = root.join("vendored");
     if vroot.is_dir() {
         env::set_var("INKA_VENDOR", &vroot);
     } else {
@@ -248,24 +375,36 @@ pub(crate) fn cmd_run(args: &[String]) {
         eprintln!("error: cannot determine current directory: {e}");
         exit(2);
     });
-    // The entry must live inside the cwd tree so relative-import and vendored
-    // resolution stay coherent (same constraint as `inka build`).
-    let entry = match embed::rel_from_cwd(&cwd, &file) {
+    let (root, entry) = match execution_root(&cwd, &file) {
         Ok(r) => r,
         Err(e) => fail(&e),
     };
-    let perms = permission_dsl(&cwd, &flags);
+    let perms = permission_dsl(&root, &flags);
+
+    // Informational guard: config declares a default set but nothing was
+    // selected for this run (permissions are still deny-by-default).
+    if !flags.allow_all
+        && flags.permset.is_none()
+        && flags.allow.is_empty()
+        && flags.deny.is_empty()
+        && crate::config::config_has_default_grants(&root)
+    {
+        eprintln!(
+            "[inka] note: config declares permissions but none were selected for this run; \
+             the program is deny-by-default (use -P, -A, or --allow-*)"
+        );
+    }
 
     let (lib, chosen) = choose_runtime(args);
     if env::var_os("INKA_DEBUG").is_some() {
         eprintln!(
             "[inka] running {} in {} with runtime {}",
             entry,
-            cwd.display(),
+            root.display(),
             chosen.map(|v| v.to_string()).unwrap_or_default()
         );
     }
-    set_default_env(&lib);
+    set_default_env(&lib, &root);
 
     let library = match unsafe { libloading::Library::new(&lib) } {
         Ok(l) => l,
@@ -313,7 +452,7 @@ pub(crate) fn cmd_run(args: &[String]) {
             }
         };
 
-        let dir_c = match std::ffi::CString::new(cwd.to_string_lossy().into_owned()) {
+        let dir_c = match std::ffi::CString::new(root.to_string_lossy().into_owned()) {
             Ok(c) => c,
             Err(_) => exit(2),
         };
@@ -321,7 +460,8 @@ pub(crate) fn cmd_run(args: &[String]) {
             Ok(c) => c,
             Err(_) => exit(2),
         };
-        let perms_c = std::ffi::CString::new(perms).unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
+        let perms_c =
+            std::ffi::CString::new(perms).unwrap_or_else(|_| std::ffi::CString::new("").unwrap());
         let argv: Vec<std::ffi::CString> = prog
             .iter()
             .map(|a| std::ffi::CString::new(a.as_str()).expect("nul byte in arg"))
@@ -343,7 +483,10 @@ pub(crate) fn cmd_run(args: &[String]) {
             perms_c.as_ptr(),
         );
         if !err_msg.is_null() {
-            eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+            eprintln!(
+                "[inka] runtime error message: {}",
+                CStr::from_ptr(err_msg).to_string_lossy()
+            );
         }
         destroy(rt);
         if rc != 0 {
@@ -372,6 +515,14 @@ mod tests {
     }
 
     #[test]
+    fn double_dash_allows_dash_prefixed_file() {
+        let (f, file, prog) = parsed(&["--", "-weird.js", "arg"]);
+        assert_eq!(file, PathBuf::from("-weird.js"));
+        assert_eq!(prog, vec!["arg"]);
+        assert!(!f.allow_all && f.permset.is_none());
+    }
+
+    #[test]
     fn granular_flags_render_into_dsl() {
         let (f, file, prog) = parsed(&[
             "--allow-read=data.txt",
@@ -385,6 +536,34 @@ mod tests {
         assert!(dsl.contains("allow-read=data.txt"), "{dsl}");
         assert!(dsl.contains("allow-net=*"), "{dsl}");
         assert!(dsl.contains("deny-net=1.2.3.4"), "{dsl}");
+    }
+
+    #[test]
+    fn short_flags_map_to_categories() {
+        let (f, file, _) = parsed(&["-R", "-W", "-N", "-E", "-S", "app.js"]);
+        assert_eq!(file, PathBuf::from("app.js"));
+        let cats: Vec<&str> = f.allow.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(cats, vec!["read", "write", "net", "env", "sys"]);
+        assert!(f.allow.iter().all(|(_, l)| l == "*"));
+    }
+
+    #[test]
+    fn short_flag_with_value() {
+        let (f, _, _) = parsed(&["-R=./data", "app.js"]);
+        assert_eq!(f.allow, vec![("read".to_string(), "./data".to_string())]);
+    }
+
+    #[test]
+    fn repeated_flags_merge_per_category() {
+        let (f, _, _) = parsed(&["--allow-read=./a", "--allow-read=./b", "app.js"]);
+        let dsl = permission_dsl(Path::new("."), &f);
+        assert!(dsl.contains("allow-read=./a,./b"), "{dsl}");
+
+        // "*" wins over explicit lists
+        let (f2, _, _) = parsed(&["--allow-net=a.com", "--allow-net", "app.js"]);
+        let dsl2 = permission_dsl(Path::new("."), &f2);
+        assert!(dsl2.contains("allow-net=*"), "{dsl2}");
+        assert!(!dsl2.contains("a.com"), "{dsl2}");
     }
 
     #[test]

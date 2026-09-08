@@ -197,20 +197,22 @@ printf 'runtime=inka_runtime>=0.266.0\nmodule=app.js\n' > app.manifest   # optio
 
 ### `inka run` (dev execution)
 
-`inka run <file> [args…]` executes a `.ts`/`.js`/`.mjs`/`.cts` file directly through the installed runtime — no artifact build. Relative imports, vendored packages, the default store, and `node:` built-ins all resolve exactly as they would in a built artifact; `.ts` is transpiled at load. Options must precede the file; anything after it is passed to the program as its arguments, and the program's exit code is propagated.
+`inka run <file> [args…]` executes a `.ts`/`.js`/`.mjs`/`.cts` file directly through the installed runtime — no artifact build. Relative imports, vendored packages, the default store, and `node:` built-ins all resolve exactly as they would in a built artifact; `.ts` is transpiled at load. Options must precede the file; anything after it (or after `--`) is passed to the program as its arguments, and the program's exit code is propagated. The execution root is the current directory when the file is under it; an outside-cwd file is rooted at its nearest ancestor project (a `vendored/`, `package.json`, or `deno.json`) or its own directory otherwise.
 
-Permissions mirror `deno run` (deny by default, prompting disabled):
+Permissions mirror `deno run --no-prompt` (deny by default, no prompting):
 
 ```sh
 inka run app.ts                       # deny-by-default
 inka run -A app.ts                    # allow everything
+inka run -R app.ts                    # deno short form: allow read (also -W/-N/-E/-S)
+inka run -R=./data app.ts             # scoped short form
 inka run -P server app.ts             # named permission set from the config
 inka run -P app.ts                    # bare -P = the config `default` set
 inka run --allow-read=./data --allow-net app.ts   # granular grants
 inka run -A --deny-read=./secrets app.ts          # allow-all, trimmed
 ```
 
-Granular categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi` (`--allow-<cat>[=list]` / `--deny-<cat>[=list]`; no value = the whole category). `-A`/`--allow-all` cannot be combined with `-P` or `--allow-*` (but may be trimmed by `--deny-*`); `-P` cannot be combined with granular flags. `--runtime <ver>` picks a specific installed tuple instead of the newest.
+Granular categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi` (`--allow-<cat>[=list]` / `--deny-<cat>[=list]`; no value = the whole category; repeated flags merge per category). `-A`/`--allow-all` cannot be combined with `-P` or `--allow-*` (but may be trimmed by `--deny-*`); `-P` cannot be combined with granular flags. `--runtime <ver>` picks a specific installed tuple instead of the newest. When run with no permission flags and the config declares a non-empty `permissions.default`, a hint reminds you that the run is deny-by-default (permissions are never auto-applied).
 
 ### Manifest vs project config
 

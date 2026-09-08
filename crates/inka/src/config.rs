@@ -483,6 +483,20 @@ pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>
     (lines.join("\n"), notes)
 }
 
+/// Does the project config declare a non-empty `permissions.default` set that
+/// would grant something? Used by `inka run` to hint when a dev-run has no
+/// permission flags selected. Never applies the set.
+pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
+    let (cfg, _) = load(cwd);
+    [cfg.deno.as_ref(), cfg.pkg.as_ref()]
+        .iter()
+        .any(|file| {
+            named_set_in(*file, "default")
+                .map(|set| set_declares_grants(&set))
+                .unwrap_or(false)
+        })
+}
+
 pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
     let (cfg, load_warns) = load(cwd);
     let mut lines: Vec<String> = Vec::new();
@@ -983,6 +997,25 @@ mod tests {
         assert_eq!(s, "");
         assert!(has_note(&warns, "package.json"), "{warns:?}");
         assert!(has_note(&warns, "cannot be read"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // WS-`inka run`: the config hint helper only fires for a default set that
+    // would actually grant something.
+    #[test]
+    fn config_has_default_grants_detects_nonempty_default() {
+        let cwd = PathBuf::from("/tmp/inkaconf-rungrants");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+        assert!(!config_has_default_grants(&cwd));
+        write(&cwd, "deno.json", r#"{ "permissions": { "default": {} } }"#);
+        assert!(!config_has_default_grants(&cwd), "empty default grants nothing");
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "permissions": { "default": { "run": true } } }"#,
+        );
+        assert!(config_has_default_grants(&cwd));
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }
