@@ -54,7 +54,15 @@ Output: `target/inka_<ver>_amd64.deb`. Install with
 installed by the package — each user then runs:
 
 ```sh
-inka install <version> --from <release-base-url>   # runtime + resolver (+ store payload)
+inka install <version> --from <release-base-url>   # runtime + resolver
+inka pkg seed   --from <release-base-url>           # default store (flat GitHub release assets)
+```
+
+> GitHub Release assets are flat files, so the store payload (`store.tar.gz` +
+> `seed-manifest.json`) is seeded with `inka pkg seed --from <base>`. A
+> **directory/static-host** release may instead lay the store under a `store/`
+> subdir (`store/seed-manifest.json`, `store/store.tar.gz`), in which case
+> `inka install` seeds it automatically.
 inka doctor                                        # health check
 ```
 

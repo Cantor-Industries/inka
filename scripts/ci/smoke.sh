@@ -26,8 +26,12 @@ export INKA_STORE="$SCRATCH/runtime/store"
 export HOME="$SCRATCH/home"   # keep the launcher's fallback away from the host
 mkdir -p "$INKA_RUNTIME_HOME" "$HOME"
 
-echo "== install runtime + resolver (+ store payload) from staged release =="
+echo "== install runtime + resolver from staged release =="
 "$STAGE/inka" install "$DENO" --from "$STAGE"
+
+# GitHub Release assets are flat; seed the store the way a consumer does.
+echo "== seed default store from staged release =="
+"$STAGE/inka" pkg seed --from "$STAGE"
 
 echo "== doctor =="
 "$STAGE/inka" doctor

@@ -148,8 +148,10 @@ jobs:
             - `store.tar.gz` + `seed-manifest.json` — default store snapshot
             - `versions.json` — version/identity record
 
-            Install the toolchain with `apt install ./inka_*.deb`, then a runtime with
-            `inka install ${{ env.DENO }} --from <release-url>`.
+            Install the toolchain with `apt install ./inka_*.deb`, then fetch the
+            runtime and seed the store from the release:
+            `inka install ${{ env.DENO }} --from <release-url>`
+            `inka pkg seed --from <release-url>`
           draft: false
           files: |
             ${{ env.STAGE }}/inka_${{ env.REL }}_amd64.deb
