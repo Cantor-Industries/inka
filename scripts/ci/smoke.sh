@@ -45,17 +45,27 @@ for pair in \
     name="${pair%%|*}"; code="${pair#*|}"
     printf '%s\n' "$code" > "$name.js"
     out="$("$STAGE/inka" run -A "$name.js")"
-    echo "$out" | grep -q "smoke-" || { echo "smoke: no expected output from $name" >&2; exit 1; }
+    case "$out" in
+        *smoke-*) ;;
+        *) echo "smoke: no expected output from $name" >&2; exit 1 ;;
+    esac
 done
 
 echo "== build + run an artifact =="
 printf 'console.log("smoke-artifact");\n' > artifact.js
 "$STAGE/inka" build artifact.js -o artifact
-"$SCRATCH/apps/artifact" | grep -q "smoke-artifact"
+out="$("$SCRATCH/apps/artifact")"
+case "$out" in
+    *smoke-artifact*) ;;
+    *) echo "smoke: artifact output missing" >&2; exit 1 ;;
+esac
 
 echo "== vendored auto-conversion (patched CJS leaf) =="
 mkdir -p "$SCRATCH/vendor" && cd "$SCRATCH/vendor"
-"$STAGE/inka" add ms | grep -q "ms@" || { echo "smoke: inka add ms failed" >&2; exit 1; }
+if ! "$STAGE/inka" add ms >/dev/null 2>&1; then
+    echo "smoke: inka add ms failed" >&2
+    exit 1
+fi
 [ -f "$SCRATCH/vendor/vendored/ms/esm.js" ] || { echo "smoke: ms was not auto-converted" >&2; exit 1; }
 
 echo "smoke: OK"
