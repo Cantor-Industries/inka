@@ -24,6 +24,8 @@ cd "$ROOT"
 
 VERSION="${INKA_DEB_VERSION:-$(git describe --tags --abbrev=0 2>/dev/null || true)}"
 VERSION="${VERSION:-0.1.0}"
+# Debian upstream versions must start with a digit; strip a leading "v" from tags.
+VERSION="${VERSION#v}"
 case "$VERSION" in
     *[!0-9A-Za-z.+~-]*) echo "error: invalid Debian version '$VERSION'" >&2; exit 1 ;;
 esac
@@ -57,12 +59,34 @@ cp -R patches/. "$LIB/patches/"
 ln -s ../lib/inka/inka "$STAGE/usr/bin/inka"
 
 cat > "$STAGE/usr/share/doc/inka/copyright" <<EOF
-inka — single-file executables that load a shared Deno runtime
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: inka
 
-Copyright holders: see the upstream source repository.
+Files: *
+Copyright: 2026 Cantor Industries Authors
+License: MIT
 
-This package is distributed under the terms of its upstream license.
-See https://${HOMEPAGE#https://} for the source and full license text.
+License: MIT
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in all
+ copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ SOFTWARE.
+
+Third-party code linked into the binaries retains its own licenses and copyrights
+(e.g. the Deno authors for the embedded runtime; see the upstream repository).
 EOF
 install -m 0644 README.md "$STAGE/usr/share/doc/inka/README.md"
 

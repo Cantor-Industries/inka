@@ -2,6 +2,8 @@
 
 Tiny single-file executables for JavaScript/TypeScript that run on a **shared, tuple-versioned Deno runtime** instead of bundling one into every binary.
 
+The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment](#acknowledgments--deno) below.
+
 ## How it works: the launcher, the manifest, and the embed model
 
 Normal "compiled" JS binaries (`deno compile`, `bun build --compile`) work by **fusing the JS engine into the file**. Result: a ~100 MB "Hello World". The engine (V8 + snapshot + ICU) is huge, and every artifact carries its own copy.
@@ -410,3 +412,17 @@ Without the embedded snapshot, inka cold-starts at ~0.6 s; the snapshot brings i
 - Successful runs are silent; set `INKA_DEBUG=1` to see launcher diagnostics (`resolved …`, `runtime … reports: …`) on stderr. Genuine errors always print with a `[inka]` prefix.
 - `inka install` verifies SHA-256 integrity but not authenticity — production distribution should sign checksums (e.g. minisign) and pin a trust anchor.
 - HTTP fetch of runtimes shells out to `curl` (TLS handled by curl); a native TLS client would remove that dependency.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE) (Copyright (c) 2026 Cantor Industries Authors).
+
+## Acknowledgments — Deno
+
+The inka engine is built on [Deno](https://deno.com), the work of the Deno
+authors (Copyright (c) the Deno authors), distributed under the MIT license with
+portions under Apache-2.0. See <https://github.com/denoland/deno>. Crates that
+link Deno-project code (and the specific crates used) are acknowledged in their
+own READMEs: `crates/inka-runtime` (`deno_core`, `deno_runtime`, `deno_error`,
+`deno_semver`), `crates/inka` (`deno_ast`), and `crates/inka-resolver`
+(`deno_semver`).
