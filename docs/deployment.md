@@ -160,3 +160,7 @@ Runner setup: register a self-hosted runner (label `self-hosted`) and give its
 environment `CARGO_HOME` and `CARGO_TARGET_DIR` pointing at a roomy disk (the
 Deno runtime build needs several GB and ~10–15 minutes). Tag releases as
 `v<ver>` and protect the tag with a rule requiring signatures.
+
+After a release is published, run the checklist in
+[Verifying a published release](verifying-a-release.md) (integrity checks,
+clean install, store seed, store-mode + vendored smokes).

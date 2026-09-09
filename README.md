@@ -115,6 +115,7 @@ inka doctor              # machine state: runtimes, resolver, store, vendored po
 - [CLI reference](docs/cli.md)
 - [Architecture](docs/architecture.md) — how the launcher, tuples, and ABI work
 - [Deployment](docs/deployment.md) — shipping inka and the executables it builds
+- [Verifying a release](docs/verifying-a-release.md) — checklist for a published release
 
 ## License
 
