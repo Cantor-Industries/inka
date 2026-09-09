@@ -1,0 +1,164 @@
+# Release pipeline for inka.
+#
+# Triggered by every `v*` tag. On a self-hosted runner:
+#   - builds the toolchain (inka, inka-launcher, inka-resolver),
+#   - builds the heavy runtime + patcher,
+#   - builds a store snapshot,
+#   - stages and smoke-tests the whole release,
+#   - publishes the artifacts as GitHub Release assets for the tag.
+#
+# Runner requirements:
+#   - runs-on: self-hosted
+#   - the runner's own environment provides CARGO_HOME and CARGO_TARGET_DIR
+#     (a big disk; the Deno runtime build is ~10-15 min and needs several GB).
+#   - network (npm install for the store snapshot).
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: self-hosted
+    timeout-minutes: 300
+    env:
+      STAGE: ${{ runner.temp }}/inka-release
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Prepare dirs
+        run: |
+          set -euo pipefail
+          : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR must be set on the runner}"
+          : "${CARGO_HOME:?CARGO_HOME must be set on the runner}"
+          mkdir -p "$CARGO_TARGET_DIR" "$STAGE"
+          echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+          echo "CARGO_HOME=$CARGO_HOME"
+
+      - name: Discover versions
+        run: |
+          set -euo pipefail
+          eval "$(scripts/ci/version.sh "${GITHUB_REF_NAME}")"
+          echo "REL=$release" >> "$GITHUB_ENV"
+          echo "DENO=$deno" >> "$GITHUB_ENV"
+          echo "RES=$resolver" >> "$GITHUB_ENV"
+          echo "release=$release deno=$deno resolver=$resolver"
+
+      - name: Build toolchain
+        run: |
+          set -euo pipefail
+          cargo build --release -p inka -p inka-launcher -p inka-resolver
+
+      - name: Build inka-patcher
+        run: |
+          set -euo pipefail
+          cd crates/inka-patcher
+          cargo build --release
+
+      - name: Build runtime (always; tuple = deno_runtime pin)
+        run: |
+          set -euo pipefail
+          cargo build --release -p inka-runtime
+          test -f "$CARGO_TARGET_DIR/release/libinka_runtime.so"
+
+      - name: Build store snapshot
+        run: |
+          set -euo pipefail
+          INKA_PATCHER="$CARGO_TARGET_DIR/release/inka-patcher" \
+          "$CARGO_TARGET_DIR/release/inka" pkg snapshot \
+            --seed-manifest seed-manifest.json \
+            --patches patches \
+            --out "$STAGE"
+          test -f "$STAGE/store.tar.gz"
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          BIN="$CARGO_TARGET_DIR/release"
+          cp "$BIN/inka" "$STAGE/inka"
+          cp "$BIN/inka-launcher" "$STAGE/inka-launcher"
+          cp "$BIN/inka-patcher" "$STAGE/inka-patcher"
+          cp -R patches/. "$STAGE/patches/"
+          cp "$BIN/libinka_resolver.so" "$STAGE/libinka_resolver-$RES.so"
+          cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$DENO.so"
+          chmod +x "$STAGE/inka" "$STAGE/inka-launcher" "$STAGE/inka-patcher"
+
+          # .deb (toolchain bundle: binaries + patches + patcher)
+          INKA_PATCHER="$BIN/inka-patcher" \
+          INKA_DEB_VERSION="$REL" \
+          DEB_OUT="$STAGE/inka_${REL}_amd64.deb" \
+          scripts/build-deb.sh
+
+          # sha256 sidecars (bare hex, as the installer expects)
+          for f in inka inka-launcher inka-patcher \
+                   "libinka_runtime-$DENO.so" "libinka_resolver-$RES.so" \
+                   "inka_${REL}_amd64.deb"; do
+            (cd "$STAGE" && sha256sum "$f" | awk '{print $1}' > "$f.sha256")
+          done
+
+          # machine-readable version/identity record
+          RT_SHA="$(cat "$STAGE/libinka_runtime-$DENO.so.sha256")"
+          cat > "$STAGE/versions.json" <<EOF
+          {
+            "release": "$REL",
+            "deno_runtime": "$DENO",
+            "resolver": "$RES",
+            "runtime_sha256": "$RT_SHA"
+          }
+          EOF
+          echo "staged:"; ls -1 "$STAGE"
+
+      - name: Smoke test (never publish a broken release)
+        run: scripts/ci/smoke.sh "$STAGE"
+
+      - name: Ensure no release exists for this tag
+        run: |
+          set -euo pipefail
+          code="$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
+          if [ "$code" = "200" ]; then
+            echo "error: a release already exists for ${GITHUB_REF_NAME}" >&2
+            exit 1
+          fi
+          echo "no existing release for ${GITHUB_REF_NAME} (http $code)"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: inka ${{ env.REL }}
+          body: |
+            inka ${{ env.REL }} — runtime tuple ${{ env.DENO }}, resolver ${{ env.RES }}.
+
+            - `inka_${{ env.REL }}_amd64.deb` — Linux toolchain (CLI + launcher + patcher + curated patches)
+            - `libinka_runtime-${{ env.DENO }}.so` — shared runtime tuple
+            - `libinka_resolver-${{ env.RES }}.so` — resolution engine
+            - `store.tar.gz` + `seed-manifest.json` — default store snapshot
+            - `versions.json` — version/identity record
+
+            Install the toolchain with `apt install ./inka_*.deb`, then a runtime with
+            `inka install ${{ env.DENO }} --from <release-url>`.
+          draft: false
+          files: |
+            ${{ env.STAGE }}/inka_${{ env.REL }}_amd64.deb
+            ${{ env.STAGE }}/libinka_runtime-${{ env.DENO }}.so
+            ${{ env.STAGE }}/libinka_resolver-${{ env.RES }}.so
+            ${{ env.STAGE }}/store.tar.gz
+            ${{ env.STAGE }}/seed-manifest.json
+            ${{ env.STAGE }}/versions.json
+            ${{ env.STAGE }}/libinka_runtime-${{ env.DENO }}.so.sha256
+            ${{ env.STAGE }}/libinka_resolver-${{ env.RES }}.so.sha256
+            ${{ env.STAGE }}/store.tar.gz.sha256
+            ${{ env.STAGE }}/inka_${{ env.REL }}_amd64.deb.sha256

@@ -34,13 +34,23 @@ MAINTAINER="${DEB_MAINTAINER:-Inka Developers <dev@inka.invalid>}"
 HOMEPAGE="${DEB_HOMEPAGE:-https://inka.invalid}"
 PATCHER="${INKA_PATCHER:-/media/kook/641ee182-ef10-4fc8-96b8-2de6f780603f/inka-build/target/release/inka-patcher}"
 
-echo "== build toolchain release (inka, inka-launcher, inka-resolver) =="
-cargo build --release -p inka -p inka-launcher -p inka-resolver
+# Binaries come from the cargo release dir (CARGO_TARGET_DIR when set, e.g. the
+# CI runner; else the repo-local target/release).
+if [ -n "${CARGO_TARGET_DIR:-}" ]; then
+    BIN_DIR="$CARGO_TARGET_DIR/release"
+else
+    BIN_DIR="$ROOT/target/release"
+fi
 
-[ -x target/release/inka ] || { echo "error: target/release/inka missing" >&2; exit 1; }
-[ -x target/release/inka-launcher ] || { echo "error: target/release/inka-launcher missing" >&2; exit 1; }
+echo "== build toolchain release (inka, inka-launcher, inka-resolver) =="
+if [ ! -x "$BIN_DIR/inka" ] || [ ! -x "$BIN_DIR/inka-launcher" ]; then
+    cargo build --release -p inka -p inka-launcher -p inka-resolver
+fi
+
+[ -x "$BIN_DIR/inka" ] || { echo "error: $BIN_DIR/inka missing" >&2; exit 1; }
+[ -x "$BIN_DIR/inka-launcher" ] || { echo "error: $BIN_DIR/inka-launcher missing" >&2; exit 1; }
 [ -f "$PATCHER" ] || { echo "error: inka-patcher not found at $PATCHER (set INKA_PATCHER)" >&2; exit 1; }
-[ -d patches ] || { echo "error: patches/ dir missing" >&2; exit 1; }
+[ -d "$ROOT/patches" ] || { echo "error: patches/ dir missing" >&2; exit 1; }
 
 STAGE="$(mktemp -d "${TMPDIR:-/tmp}/inka-deb.XXXXXX")"
 trap 'rm -rf "$STAGE"' EXIT
@@ -48,11 +58,11 @@ trap 'rm -rf "$STAGE"' EXIT
 LIB="$STAGE/usr/lib/inka"
 mkdir -p "$LIB" "$STAGE/usr/bin" "$STAGE/usr/share/doc/inka" "$STAGE/DEBIAN"
 
-install -m 0755 target/release/inka "$LIB/inka"
-install -m 0755 target/release/inka-launcher "$LIB/inka-launcher"
+install -m 0755 "$BIN_DIR/inka" "$LIB/inka"
+install -m 0755 "$BIN_DIR/inka-launcher" "$LIB/inka-launcher"
 install -m 0755 "$PATCHER" "$LIB/inka-patcher"
 mkdir -p "$LIB/patches"
-cp -R patches/. "$LIB/patches/"
+cp -R "$ROOT/patches/." "$LIB/patches/"
 
 # /usr/bin/inka -> /usr/lib/inka/inka (current_exe resolves the real path, so
 # adjacency discovery for launcher/patcher/patches keeps working).
@@ -88,7 +98,7 @@ License: MIT
 Third-party code linked into the binaries retains its own licenses and copyrights
 (e.g. the Deno authors for the embedded runtime; see the upstream repository).
 EOF
-install -m 0644 README.md "$STAGE/usr/share/doc/inka/README.md"
+install -m 0644 "$ROOT/README.md" "$STAGE/usr/share/doc/inka/README.md"
 
 INSTALLED_KB="$(du -sk "$LIB" | cut -f1)"
 cat > "$STAGE/DEBIAN/control" <<EOF
@@ -112,6 +122,7 @@ EOF
 ( cd "$STAGE" && find . -type f ! -path './DEBIAN/*' -exec md5sum {} \; \
     | sed 's|^\./||' > DEBIAN/md5sums )
 
-OUT="target/inka_${VERSION}_${ARCH}.deb"
+OUT="${DEB_OUT:-$ROOT/target/inka_${VERSION}_${ARCH}.deb}"
+mkdir -p "$(dirname "$OUT")"
 dpkg-deb --build "$STAGE" "$OUT" >/dev/null
 echo "built $OUT"

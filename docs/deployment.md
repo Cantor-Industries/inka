@@ -128,3 +128,27 @@ deterministic store-mode resolution) and only the resulting exe copied in.
 - Releases carry `.sha256` sidecars and are verified on install. Today that
   verifies integrity, not authenticity — sign checksums (e.g. minisign) and pin
   a trust anchor for production distribution.
+
+## Release CI (tags → GitHub Release assets)
+
+`.github/workflows/release.yml` runs on a self-hosted runner whenever a `v*`
+tag is pushed. It builds and publishes everything in one pass:
+
+1. **Build** the toolchain (`inka`, `inka-launcher`, `inka-resolver`), the
+   `inka-patcher`, and the runtime `.so` (always — the runtime tuple filename is
+   the `deno_runtime` pin, e.g. `0.266.0`, so a runtime bump is just a bump of
+   that pin in `crates/inka-runtime/Cargo.toml`).
+2. **Snapshot** the default store (`inka pkg snapshot`) with the built patcher.
+3. **Stage + package**: toolchain binaries, curated `patches/`, the runtime +
+   resolver `.so`, `store.tar.gz` + `seed-manifest.json`, the `.deb`, and
+   `.sha256` sidecars + `versions.json`.
+4. **Smoke** the staged release in a throwaway `INKA_RUNTIME_HOME`/`INKA_STORE`
+   (doctor, store-mode `effect`/`hono`/`ws`, an artifact build+run, and a
+   vendored auto-conversion). Any failure aborts before publishing.
+5. **Publish** the assets to the GitHub Release for the tag (automatic; refuses
+   to re-publish a tag that already has a release).
+
+Runner setup: register a self-hosted runner (label `self-hosted`) and give its
+environment `CARGO_HOME` and `CARGO_TARGET_DIR` pointing at a roomy disk (the
+Deno runtime build needs several GB and ~10–15 minutes). Tag releases as
+`v<ver>` and protect the tag with a rule requiring signatures.
