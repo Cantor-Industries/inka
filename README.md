@@ -373,6 +373,15 @@ Install the result as a tuple:
 cp target/release/libinka_runtime.so ~/.inka-runtime/libinka_runtime-0.266.0.so
 ```
 
+## Packaging a `.deb` (toolchain)
+
+`scripts/build-deb.sh` builds a standalone, upgrade-aware `.deb` that installs
+the toolchain (`inka`, `inka-launcher`, `inka-patcher`, curated `patches/`) into
+`/usr/lib/inka` with a `/usr/bin/inka` symlink — deliberately **without** a
+runtime or store, which stay per-user under `~/.inka-runtime` via
+`inka install <ver> --from <base>`. See `docs/deployment.md` for the layout,
+upgrade/versioning rules, and app/container deployment guidance.
+
 ## Measured on Linux x86_64 (deno_runtime 0.266.0)
 
 `console.log("hello world")`:
