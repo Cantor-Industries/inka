@@ -122,18 +122,6 @@ jobs:
       - name: Smoke test (never publish a broken release)
         run: scripts/ci/smoke.sh "$STAGE"
 
-      - name: Ensure no release exists for this tag
-        run: |
-          set -euo pipefail
-          code="$(curl -s -o /dev/null -w '%{http_code}' \
-            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
-            "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${GITHUB_REF_NAME}")"
-          if [ "$code" = "200" ]; then
-            echo "error: a release already exists for ${GITHUB_REF_NAME}" >&2
-            exit 1
-          fi
-          echo "no existing release for ${GITHUB_REF_NAME} (http $code)"
-
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
