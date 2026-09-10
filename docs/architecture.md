@@ -66,12 +66,13 @@ The launcher `dlopen`s the runtime and calls a frozen C ABI:
 
 - `inka_runtime_version() -> const char*`
 - `inka_runtime_create() -> *mut void`
-- `inka_runtime_run_module[_perm](rt, name, payload, len, argc, argv, out_exit, out_err, perms)`
+- `inka_runtime_run_module_perm(rt, name, payload, len, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_run_module_dir(rt, dir, entry, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_destroy(rt)`
 
-A runtime that predates `_perm`/`_dir` is refused (exit 4) rather than run with
-the wrong semantics.
+`_perm` and `_dir` are mandatory: a runtime that lacks either is refused
+(exit 4) rather than run with the wrong semantics. There is no permission-less
+entry point, so deny-by-default cannot degrade to allow-all.
 
 ## Resolution
 

@@ -315,16 +315,6 @@ fn load_and_run(
 
     type FnVersion = unsafe extern "C" fn() -> *const c_char;
     type FnCreate = unsafe extern "C" fn() -> *mut c_void;
-    type FnRun = unsafe extern "C" fn(
-        *mut c_void,
-        *const c_char,
-        *const c_char,
-        usize,
-        c_int,
-        *const *const c_char,
-        *mut c_int,
-        *mut *mut c_char,
-    ) -> c_int;
     type FnRunPerm = unsafe extern "C" fn(
         *mut c_void,
         *const c_char,
@@ -365,46 +355,34 @@ fn load_and_run(
         let mut exit_code: c_int = 0;
         let mut err_msg: *mut c_char = std::ptr::null_mut();
 
-        let call = |rt, spec, exit_code, err_msg| {
-            if let Ok(perm_sym) = library.get::<FnRunPerm>(b"inka_runtime_run_module_perm") {
-                perm_sym(
-                    rt,
-                    spec,
-                    payload.as_ptr() as *const c_char,
-                    payload.len(),
-                    argv.len() as c_int,
-                    argv_ptrs.as_ptr(),
-                    exit_code,
-                    err_msg,
-                    perms_c.as_ptr(),
-                )
-            } else {
-                if !perms.is_empty() {
+        // The permission-aware entry point is mandatory: without it we cannot
+        // enforce the manifest's DSL, and there is no permission-less fallback
+        // (so deny-by-default can never silently degrade to allow-all).
+        let run_perm: libloading::Symbol<FnRunPerm> =
+            match library.get(b"inka_runtime_run_module_perm") {
+                Ok(s) => s,
+                Err(_) => {
                     eprintln!(
-                        "[inka] artifact declares permissions but runtime {} lacks support \
-                         (inka_runtime_run_module_perm); refusing to run allow-all",
+                        "[inka] runtime {} does not support permissions \
+                         (missing inka_runtime_run_module_perm); install a newer runtime",
                         lib.display()
                     );
                     destroy(rt);
                     std::process::exit(4);
                 }
-                let legacy: libloading::Symbol<FnRun> = library
-                    .get(b"inka_runtime_run_module")
-                    .expect("missing inka_runtime_run_module");
-                legacy(
-                    rt,
-                    spec,
-                    payload.as_ptr() as *const c_char,
-                    payload.len(),
-                    argv.len() as c_int,
-                    argv_ptrs.as_ptr(),
-                    exit_code,
-                    err_msg,
-                )
-            }
-        };
+            };
 
-        let rc = call(rt, spec.as_ptr(), &mut exit_code, &mut err_msg);
+        let rc = run_perm(
+            rt,
+            spec.as_ptr(),
+            payload.as_ptr() as *const c_char,
+            payload.len(),
+            argv.len() as c_int,
+            argv_ptrs.as_ptr(),
+            &mut exit_code,
+            &mut err_msg,
+            perms_c.as_ptr(),
+        );
 
         if !err_msg.is_null() {
             eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());

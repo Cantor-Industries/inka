@@ -285,6 +285,86 @@ fn apply_category_map(map: &Value, allow: &mut Vec<(String, String)>, deny: &mut
     }
 }
 
+/// True when a permission descriptor looks like a relative filesystem path
+/// (not `*`, not absolute, not a URL/scheme).
+fn is_relative_path(item: &str) -> bool {
+    !item.is_empty()
+        && item != "*"
+        && !item.starts_with('/')
+        && !item.contains("://")
+}
+
+/// Append the scalar string items of a category value (`true` counts as `*`).
+fn collect_permission_items(v: &Value, out: &mut Vec<String>) {
+    match v {
+        Value::String(s) => out.push(s.clone()),
+        Value::Array(items) => {
+            for i in items {
+                if let Some(s) = i.as_str() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+        Value::Bool(true) => out.push("*".to_string()),
+        _ => {}
+    }
+}
+
+/// Warn about category values that will not survive the permission DSL:
+///  - relative `read`/`write` grants resolve at run time against the launch
+///    directory, not the build directory;
+///  - an item containing a comma or newline cannot be represented (comma is the
+///    list separator; the manifest is line-oriented).
+fn validate_category_map(map: &Value, warns: &mut Vec<String>) {
+    let Some(obj) = map.as_object() else { return };
+    for (cat, val) in obj {
+        let mut items: Vec<String> = Vec::new();
+        match val {
+            Value::Object(o) => {
+                if let Some(a) = o.get("allow") {
+                    collect_permission_items(a, &mut items);
+                }
+                if let Some(d) = o.get("deny") {
+                    collect_permission_items(d, &mut items);
+                }
+            }
+            other => collect_permission_items(other, &mut items),
+        }
+        for item in items {
+            if (cat == "read" || cat == "write") && is_relative_path(&item) {
+                warns.push(format!(
+                    "permission '{cat}' grants relative path '{item}'; it resolves at run time \
+                     against the launch directory, not the build directory (use an absolute path \
+                     to pin it)"
+                ));
+            }
+            if item.contains(',') || item.contains('\n') {
+                warns.push(format!(
+                    "permission item '{item}' contains a comma or newline, which the permission \
+                     DSL cannot represent; the grant may be malformed"
+                ));
+            }
+        }
+    }
+}
+
+/// Warn about `deny-<cat>` entries that cannot trim anything because the
+/// category was never allowed (the artifact is deny-by-default).
+fn warn_ineffective_denies(
+    allow: &[(String, String)],
+    deny: &[(String, String)],
+    warns: &mut Vec<String>,
+) {
+    for (cat, _) in deny {
+        if !allow.iter().any(|(a, _)| a == cat) {
+            warns.push(format!(
+                "deny-{cat} has no matching allow-{cat} (or permissions=all); the artifact is \
+                 deny-by-default, so the deny has no effect"
+            ));
+        }
+    }
+}
+
 /// Look up a named permission set inside one config file's `permissions`
 /// table. Returns `None` when the file, the table, or the named set is absent.
 fn named_set_in(file: Option<&Value>, name: &str) -> Option<Value> {
@@ -473,6 +553,8 @@ pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>
     let mut allow: Vec<(String, String)> = Vec::new();
     let mut deny: Vec<(String, String)> = Vec::new();
     apply_category_map(&map, &mut allow, &mut deny, &mut notes);
+    validate_category_map(&map, &mut notes);
+    warn_ineffective_denies(&allow, &deny, &mut notes);
     let mut lines: Vec<String> = Vec::new();
     for (cat, list) in allow {
         lines.push(format!("allow-{cat}={list}"));
@@ -521,6 +603,8 @@ pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
         let mut allow: Vec<(String, String)> = Vec::new();
         let mut deny: Vec<(String, String)> = Vec::new();
         apply_category_map(&map, &mut allow, &mut deny, &mut warns);
+        validate_category_map(&map, &mut warns);
+        warn_ineffective_denies(&allow, &deny, &mut warns);
         for (cat, list) in allow {
             lines.push(format!("allow-{cat}={list}"));
         }
@@ -656,7 +740,7 @@ mod tests {
     }
 
     // Deno allows scalar-string category values ("read": "./data"); they must
-    // be baked, not silently dropped.
+    // be baked, not silently dropped. A relative read path now also warns.
     #[test]
     fn scalar_string_permission_value_is_an_allow_entry() {
         let cwd = PathBuf::from("/tmp/inkaconf-scalar");
@@ -676,7 +760,7 @@ mod tests {
         let (s, warns) = read_synth(&cwd, None);
         assert!(s.contains("allow-read=./data"), "{s}");
         assert!(s.contains("allow-run=git,curl"), "{s}");
-        assert!(warns.is_empty(), "{warns:?}");
+        assert!(has_note(&warns, "relative path"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -1016,6 +1100,58 @@ mod tests {
             r#"{ "permissions": { "default": { "run": true } } }"#,
         );
         assert!(config_has_default_grants(&cwd));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn relative_read_path_warns() {
+        let cwd = PathBuf::from("/tmp/inkaconf-relpath");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["./data"] } } }"#,
+        );
+        let (s, warns) = read_synth(&cwd, None);
+        assert!(s.contains("allow-read=./data"), "{s}");
+        assert!(has_note(&warns, "relative path"), "{warns:?}");
+        // an absolute path must not warn
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["/etc"] } } }"#,
+        );
+        let (_, warns) = read_synth(&cwd, None);
+        assert!(!has_note(&warns, "relative path"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn deny_without_allow_warns() {
+        let cwd = PathBuf::from("/tmp/inkaconf-denyonlywarn");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": { "deny": ["/etc"] } } } }"#,
+        );
+        let (s, warns) = read_synth(&cwd, None);
+        assert!(!s.contains("allow-read"), "{s}");
+        assert!(has_note(&warns, "has no effect"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn comma_in_permission_item_warns() {
+        let cwd = PathBuf::from("/tmp/inkaconf-commaitem");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["/a,b"] } } }"#,
+        );
+        let (_, warns) = read_synth(&cwd, None);
+        assert!(has_note(&warns, "comma or newline"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

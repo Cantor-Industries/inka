@@ -5,7 +5,7 @@ executable.
 
 ```sh
 inka build [source] [-s|--source <file>] [-o|--output <file>]
-           [--manifest <file>] [--runtime <spec>] [--tested-against <ver>]
+           [--runtime <spec>] [--tested-against <ver>]
            [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
 ```
 
@@ -17,28 +17,29 @@ inka build [source] [-s|--source <file>] [-o|--output <file>]
 - **Launcher** — found at `$INKA_LAUNCHER`, else `inka-launcher` next to the
   `inka` binary.
 
-## The manifest
+## The embedded manifest
 
-A manifest is a few `key=value` lines that tell the runtime what an artifact
-needs and may do:
+`inka build` derives a small `key=value` manifest from your project config and
+embeds it in the executable. It tells the runtime what the artifact needs and
+may do:
 
 ```
 runtime=inka_runtime>=0.266.0     # minimum engine floor
 tested-against=0.266.0            # optional cap: never auto-run on something newer
-module=app.js                     # entry name
+module=app.js                     # entry name (always derived from the build)
 allow-read=./data,/etc            # permissions
 ```
 
-Discovery order: `--manifest <file>` → `<source-stem>.manifest` →
-`inka.manifest` → **auto-generated** from your project config. `module=` is
-always set to the entry. On-disk manifests are optional — most projects don't
-need one.
+There is **no on-disk manifest input**: `module=` is always the packed entry,
+and the runtime requirement comes from `inka.runtime` (or `--runtime`) with a
+default floor of `>=0.266.0`. The floor is always embedded, so an artifact can
+never select a runtime too old to enforce its permissions.
 
 ## Permissions from project config
 
-When no manifest file exists, permission lines are baked **only from explicit
-build-intent sources**, never from a bare dev-run `permissions.default` (matching
-Deno's model — a script could modify `deno.json` to elevate permissions):
+Permission lines are baked **only from explicit build-intent sources**, never
+from a bare dev-run `permissions.default` (matching Deno's model — a script
+could modify `deno.json` to elevate permissions):
 
 | Source | Result |
 |---|---|

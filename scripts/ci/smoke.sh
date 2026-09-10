@@ -61,6 +61,24 @@ case "$out" in
     *) echo "smoke: artifact output missing" >&2; exit 1 ;;
 esac
 
+echo "== permissions: deny-by-default + baked compile.permissions =="
+mkdir -p "$SCRATCH/perms" && cd "$SCRATCH/perms"
+printf 'secret\n' > secret.txt
+printf 'try { Deno.readTextFileSync("secret.txt"); console.log("perm-allow"); } catch (e) { console.log("perm-denied"); }\n' > deny.js
+out="$("$STAGE/inka" run deny.js)"
+case "$out" in
+    *perm-denied*) ;;
+    *) echo "smoke: deny-by-default did not deny read ($out)" >&2; exit 1 ;;
+esac
+printf '{ "compile": { "permissions": { "read": ["./"] } } }\n' > deno.json
+printf 'console.log("perm-allow", Deno.readTextFileSync("secret.txt").trim());\n' > allow.js
+"$STAGE/inka" build allow.js -o allow
+out="$("$SCRATCH/perms/allow")"
+case "$out" in
+    *perm-allow*) ;;
+    *) echo "smoke: baked read permission did not allow ($out)" >&2; exit 1 ;;
+esac
+
 echo "== vendored auto-conversion (patched CJS leaf) =="
 mkdir -p "$SCRATCH/vendor" && cd "$SCRATCH/vendor"
 if ! "$STAGE/inka" add ms >/dev/null 2>&1; then

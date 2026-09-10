@@ -71,6 +71,12 @@ Sets live in `deno.json` (and `package.json`) in the Deno shape:
 
 See [`inka build`](build.md) for the full precedence table and edge cases.
 
+> `package.json` is not a Deno config file, so its top-level `permissions` key is
+> an inka extension. If some other tool also uses a `permissions` key there,
+> inka will interpret it as Deno permission sets. Only explicit build-intent
+> sources (`-P`, `compile.permissions`, an `inka.permissions` marker) actually
+> bake, so the collision is inert unless one of those selects the set.
+
 ## Relative paths resolve at run time
 
 `allow-read`/`allow-write` entries are passed through verbatim and interpreted
@@ -78,8 +84,9 @@ at **run time against the directory the executable is launched from** (Deno
 semantics) — not the project dir at build time. Copying an exe to another
 directory changes which paths a relative grant covers. This is convenient in
 dev but easy to misread for a portable artifact. To pin grants to the build
-layout, write **absolute paths** in your config or `.manifest`; the trade-off is
-that absolute paths tie the artifact to a machine's path layout.
+layout, write **absolute paths** in your config; the trade-off is that absolute
+paths tie the artifact to a machine's path layout. `inka build` warns when it
+bakes a relative `read`/`write` grant.
 
 ## Hardening notes
 

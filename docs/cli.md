@@ -1,7 +1,7 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--manifest <file>] [--transpile] [--embed-dir]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka install [pkg[@ver]...] [--force] [--prod]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]

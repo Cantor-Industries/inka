@@ -11,10 +11,11 @@ launcher:
    matching the manifest's `runtime=` floor and `tested-against=` cap,
 3. dlopens it and calls the frozen C ABI
    (`inka_runtime_create` / `inka_runtime_destroy` /
-   `inka_runtime_run_module(_perm|_dir)`) with the payload, argv, and the
-   manifest's permission DSL,
-4. fails closed (exit 4) if the installed runtime predates the `_perm`/`_dir`
-   ABI an artifact requires.
+   `inka_runtime_run_module_perm` / `inka_runtime_run_module_dir`) with the
+   payload, argv, and the manifest's permission DSL,
+4. fails closed (exit 4) if the installed runtime lacks the `_perm`/`_dir`
+   entry points. There is no permission-less fallback, so deny-by-default can
+   never degrade to allow-all.
 
 It also sets up the environment the runtime reads: default `INKA_STORE` to a
 `store/` dir next to the runtime, default `INKA_RESOLVER` to the newest

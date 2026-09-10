@@ -10,14 +10,13 @@ best matching installed tuple.
 
 - `inka_runtime_version()` — version string reported by the runtime,
 - `inka_runtime_create()` / `inka_runtime_destroy()` — session lifecycle,
-- `inka_runtime_run_module()` — legacy single-file entry (deny-by-default on
-  current builds),
-- `inka_runtime_run_module_perm()` — additive, permission-aware single-file,
+- `inka_runtime_run_module_perm()` — permission-aware single-file entry,
 - `inka_runtime_run_module_dir()` — multi-file: a `dir` root + `entry` path,
   resolving relative imports, with runtime TS transpile per file.
 
-Missing `_perm`/`_dir` symbols on an old runtime cause the launcher to fail
-closed (exit 4) rather than run with wrong permissions.
+There is no permission-less entry point. A runtime missing `_perm`/`_dir`
+causes the launcher to fail closed (exit 4) rather than run with wrong
+permissions.
 
 ## Permissions
 

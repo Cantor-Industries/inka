@@ -530,8 +530,10 @@ fn parse_perm_dsl(dsl: &str) -> Result<PermSpec, String> {
         if !PERM_CATEGORIES.contains(&cat) {
             return Err(format!("unknown permission category in '{key}'"));
         }
+        // Lists are comma-separated (Deno's separator). We deliberately do not
+        // split on spaces, so descriptors that contain spaces survive intact.
         let items: Vec<String> = value
-            .split([',', ' '])
+            .split(',')
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string())
@@ -617,6 +619,11 @@ fn build_options_permissions(
         deny_sys: cat_deny("sys"),
         allow_ffi: cat_allow("ffi"),
         deny_ffi: cat_deny("ffi"),
+        // `import` is not part of the manifest DSL (inka rejects http(s) imports
+        // outright), but `permissions=all` must still match `Permissions::allow_all()`
+        // across every kind. Without this, `all` + any `deny-*` would leave import
+        // denied while plain `all` allows it.
+        allow_import: if spec.all { Some(Vec::new()) } else { None },
         ..Default::default()
     };
 
@@ -825,7 +832,7 @@ unsafe fn run_from_raw(
     argv: *const *const c_char,
     exit_code: *mut c_int,
     err_msg: *mut *mut c_char,
-    perms: Option<*const c_char>,
+    perms: *const c_char,
 ) -> c_int {
     if exit_code.is_null() {
         return -1;
@@ -858,9 +865,10 @@ unsafe fn run_from_raw(
         }
     }
 
-    let dsl = match perms {
-        Some(p) if !p.is_null() => Some(CStr::from_ptr(p).to_string_lossy().into_owned()),
-        _ => None,
+    let dsl = if perms.is_null() {
+        None
+    } else {
+        Some(CStr::from_ptr(perms).to_string_lossy().into_owned())
     };
 
     match run_inner(&specifier, src, &args, dsl.as_deref()) {
@@ -876,26 +884,8 @@ unsafe fn run_from_raw(
     }
 }
 
-/// Legacy run entry point (same signature as the original ABI). Behaves like
-/// `inka_runtime_run_module_perm` with empty permissions: deny-by-default.
-#[no_mangle]
-pub unsafe extern "C" fn inka_runtime_run_module(
-    _rt: *mut c_void,
-    specifier: *const c_char,
-    source: *const c_char,
-    source_len: usize,
-    argc: c_int,
-    argv: *const *const c_char,
-    exit_code: *mut c_int,
-    err_msg: *mut *mut c_char,
-) -> c_int {
-    run_from_raw(
-        specifier, source, source_len, argc, argv, exit_code, err_msg, None,
-    )
-}
-
-/// Permission-aware run entry point. `perms` is a newline-joined string of
-/// manifest permission lines (or null/empty for deny-by-default).
+/// Permission-aware single-file run entry point. `perms` is a newline-joined
+/// string of manifest permission lines (or null/empty for deny-by-default).
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_run_module_perm(
     _rt: *mut c_void,
@@ -916,7 +906,7 @@ pub unsafe extern "C" fn inka_runtime_run_module_perm(
         argv,
         exit_code,
         err_msg,
-        Some(perms),
+        perms,
     )
 }
 
@@ -979,5 +969,49 @@ pub unsafe extern "C" fn inka_runtime_run_module_dir(
             set_err_msg(err_msg, e);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use deno_runtime::deno_permissions::CheckSpecifierKind;
+
+    fn import_allowed(dsl: &str) -> bool {
+        let perms = permissions_from_dsl(dsl).expect("valid dsl");
+        let url = Url::parse("https://example.com/mod.js").unwrap();
+        perms
+            .check_specifier(&url, CheckSpecifierKind::Static)
+            .is_ok()
+    }
+
+    #[test]
+    fn comma_lists_preserve_spaces() {
+        let spec = parse_perm_dsl("allow-read=./My Data,/etc").unwrap();
+        assert_eq!(
+            find(&spec.allow, "read").unwrap(),
+            &vec!["./My Data".to_string(), "/etc".to_string()]
+        );
+    }
+
+    #[test]
+    fn empty_dsl_denies_import() {
+        assert!(!import_allowed(""));
+        assert!(!import_allowed("permissions=none"));
+    }
+
+    // `permissions=all` (and `all` trimmed by a deny) must allow every kind,
+    // matching `Permissions::allow_all()` — including `import`, which is not
+    // part of the manifest DSL.
+    #[test]
+    fn all_with_deny_still_allows_import() {
+        assert!(import_allowed("permissions=all"));
+        assert!(import_allowed("permissions=all\ndeny-read=./secrets"));
+    }
+
+    #[test]
+    fn deny_without_allow_is_deny_by_default() {
+        // A lone deny cannot grant anything.
+        assert!(!import_allowed("deny-read=./secrets"));
     }
 }

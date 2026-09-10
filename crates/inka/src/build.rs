@@ -1,12 +1,14 @@
-// inka build: pack one or more source files + a manifest onto the launcher.
+// inka build: pack one or more source files + an embedded manifest onto the launcher.
 //
-//   inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
-//             [--transpile] [--embed-dir]
+//   inka build [source] [-s|--source <file>] [-o|--output <file>]
+//             [--runtime <spec>] [--tested-against <ver>] [-P <set>]
+//             [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
 //
 // Defaults:
 //   source    first positional argument (or -s/--source)
 //   output    source path with its final extension stripped (app.js -> app)
-//   manifest  --manifest, else <source-stem>.manifest then inka.manifest in cwd
+//   manifest  always derived from package.json / deno.json(.jsonc) and embedded;
+//             there is no on-disk manifest input
 //   launcher  $INKA_LAUNCHER, else <dir of inka binary>/inka-launcher
 //   embed     import closure by default; --embed-dir embeds the whole cwd tree
 
@@ -23,15 +25,15 @@ const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>] [--transpile] [--embed-dir]\n\
+        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n\
          \n\
          packs <source> (and the files it imports) onto the launcher into a single executable.\n\
+         The manifest is always derived from package.json / deno.json(.jsonc) permissions\n\
+         and embedded; there is no on-disk manifest input.\n\
          \n\
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-         \x20     --manifest <file> manifest file (default: <source-stem>.manifest, then inka.manifest,\n\
-         \x20                      then auto-generated from package.json / deno.json permissions)\n\
          \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.0' or '==0.266.0' (overrides config)\n\
          \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
          \x20 -P, --permission-set <name>  use this named permission set from the config\n\
@@ -54,7 +56,6 @@ fn err(msg: &str) -> ! {
 pub fn cmd_build(args: &[String]) {
     let mut source_flag: Option<PathBuf> = None;
     let mut output_flag: Option<PathBuf> = None;
-    let mut manifest_flag: Option<PathBuf> = None;
     let mut runtime_flag: Option<String> = None;
     let mut tested_flag: Option<String> = None;
     let mut perm_set: Option<String> = None;
@@ -69,10 +70,15 @@ pub fn cmd_build(args: &[String]) {
         match a.as_str() {
             "-s" | "--source" => source_flag = Some(next_val(&mut it, a)),
             "-o" | "--output" => output_flag = Some(next_val(&mut it, a)),
-            "--manifest" => manifest_flag = Some(next_val(&mut it, a)),
             "--runtime" => runtime_flag = Some(next_str(&mut it, a)),
             "--tested-against" => tested_flag = Some(next_str(&mut it, a)),
+            // `-P <name>` is the documented build form (README: `-P server app.ts`),
+            // so it consumes the next token; `-P=<name>` and the long forms also work.
             "-P" | "--permission-set" => perm_set = Some(next_str(&mut it, a)),
+            _ if a.starts_with("-P=") => perm_set = Some(a["-P=".len()..].to_string()),
+            _ if a.starts_with("--permission-set=") => {
+                perm_set = Some(a["--permission-set=".len()..].to_string())
+            }
             "--transpile" => transpile = true,
             "--embed-dir" => embed_dir = true,
             "--vendor-closure" => vendor_closure = true,
@@ -130,14 +136,16 @@ pub fn cmd_build(args: &[String]) {
 
     let cwd = env::current_dir()
         .unwrap_or_else(|e| err(&format!("cannot determine current directory: {e}")));
-    let (manifest_bytes, manifest_label) = resolve_manifest(
-        &source,
-        manifest_flag.as_deref(),
+    let (manifest_bytes, manifest_warnings) = resolve_manifest(
         &cwd,
         runtime_flag.as_deref(),
         tested_flag.as_deref(),
         perm_set.as_deref(),
     );
+    for w in &manifest_warnings {
+        eprintln!("warning: {w}");
+    }
+    let manifest_label = "config (package.json/deno.json)";
 
     let entry_rel = match crate::embed::rel_from_cwd(&cwd, &source) {
         Ok(r) => r,
@@ -283,11 +291,15 @@ pub fn cmd_build(args: &[String]) {
         }
     }
 
-    let (manifest_payload, module_warning) =
-        effective_manifest(&source_name, &manifest_bytes, transpile, ts_source);
-    if let Some(w) = module_warning {
-        eprintln!("warning: {w}");
-    }
+    let module_name = if transpiled {
+        Path::new(&source_name)
+            .with_extension("js")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        source_name.clone()
+    };
+    let manifest_payload = set_module_line(&manifest_bytes, &module_name);
 
     out.reserve(launcher_bytes.len() + payload.len() + manifest_payload.len() + FOOTER_LEN);
     out.extend_from_slice(&launcher_bytes);
@@ -328,30 +340,25 @@ fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-/// Force the `module=` line to a given entry path (used for multi-file builds,
-/// where the entry lives at a cwd-relative path, not a bare filename).
-fn set_module_line(manifest: &[u8], entry_rel: &str) -> Vec<u8> {
+/// Force the `module=` line to the packed entry path. The manifest is always
+/// derived from config (which never emits `module=`), so this replaces a stale
+/// line if present and appends otherwise.
+fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(manifest);
     let mut found = false;
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
         let trimmed = line.trim_start();
-        if let Some(val) = trimmed.strip_prefix("module=") {
+        if trimmed.starts_with("module=") {
             found = true;
-            let val = val.trim();
-            if val != entry_rel {
-                eprintln!(
-                    "warning: manifest 'module={val}' overridden to entry '{entry_rel}' (required for multi-file artifacts)"
-                );
-            }
             let lead_len = line.len() - line.trim_start().len();
-            out.push(format!("{}module={entry_rel}", &line[..lead_len]));
+            out.push(format!("{}module={entry}", &line[..lead_len]));
         } else {
             out.push(line.to_string());
         }
     }
     if !found {
-        out.push(format!("module={entry_rel}"));
+        out.push(format!("module={entry}"));
     }
     let mut joined = out.join("\n");
     if text.ends_with('\n') {
@@ -372,66 +379,6 @@ fn ts_family(name: &str) -> bool {
 
 fn jsx_family(name: &str) -> bool {
     matches!(ext_of(name).as_deref(), Some("tsx" | "jsx"))
-}
-
-/// Returns the effective manifest: the original bytes, but with a canonical
-/// `module=` line matching what is actually packed.
-///
-/// - No `module=` line -> append one derived from the source name
-///   (`.ts`/`.mts`/`.cts` preserved for runtime transpile; `.js` when
-///   `--transpile` already produced JavaScript).
-/// - Explicit `module=` conflicting with the packed code's language -> warn.
-fn effective_manifest(
-    source_name: &str,
-    manifest: &[u8],
-    transpiled_to_js: bool,
-    ts_source: bool,
-) -> (Vec<u8>, Option<String>) {
-    let text = String::from_utf8_lossy(manifest);
-    let mut found_module = false;
-    let mut warning = None;
-
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if let Some(val) = trimmed.strip_prefix("module=") {
-            found_module = true;
-            let val = val.trim().to_string();
-            let mut newval = val.clone();
-            if transpiled_to_js {
-                if ts_family(&val) {
-                    newval = Path::new(&val).with_extension("js").to_string_lossy().into();
-                }
-            } else if ts_source && !ts_family(&val) {
-                warning = Some(format!(
-                    "manifest 'module={val}' is not a TypeScript name but source is '{source_name}'; \
-                     the runtime will not transpile it. Set module={source_name}, omit the module= line, \
-                     or pass --transpile."
-                ));
-            }
-            let lead_len = line.len() - line.trim_start().len();
-            out.push(format!("{}module={newval}", &line[..lead_len]));
-        } else {
-            out.push(line.to_string());
-        }
-    }
-    if !found_module {
-        let module = if transpiled_to_js {
-            Path::new(source_name)
-                .with_extension("js")
-                .to_string_lossy()
-                .into_owned()
-        } else {
-            source_name.to_string()
-        };
-        out.push(format!("module={module}"));
-    }
-
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    (joined.into_bytes(), warning)
 }
 
 fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
@@ -463,20 +410,6 @@ fn strip_extension(path: &Path) -> Option<PathBuf> {
     let mut out = path.to_path_buf();
     out.set_file_name(stem);
     Some(out)
-}
-
-fn find_default_manifest(source: &Path) -> Option<PathBuf> {
-    let cwd = env::current_dir().ok()?;
-    let stem = source.file_stem()?.to_string_lossy();
-    let stem_manifest = cwd.join(format!("{stem}.manifest"));
-    if stem_manifest.is_file() {
-        return Some(stem_manifest);
-    }
-    let generic = cwd.join("inka.manifest");
-    if generic.is_file() {
-        return Some(generic);
-    }
-    None
 }
 
 fn manifest_has_key(bytes: &[u8], key: &str) -> bool {
@@ -523,57 +456,33 @@ fn runtime_value(spec: &str) -> String {
     }
 }
 
-/// Resolve the effective manifest bytes + a display label.
-/// 1) `--manifest <file>`  2) on-disk `*.manifest`/`inka.manifest`
-/// 3) auto-synthesized from package.json / deno.json permissions
-/// CLI `--runtime` / `--tested-against` override whatever was chosen.
+/// Derive the embedded manifest from project config and CLI overrides. There is
+/// no on-disk manifest: permission lines and the runtime requirement come only
+/// from package.json / deno.json(.jsonc), plus `--runtime`/`--tested-against`.
+/// Returns the manifest bytes and any non-fatal warnings.
 fn resolve_manifest(
-    source: &Path,
-    explicit: Option<&Path>,
     cwd: &Path,
     runtime_flag: Option<&str>,
     tested_flag: Option<&str>,
     perm_set: Option<&str>,
-) -> (Vec<u8>, String) {
+) -> (Vec<u8>, Vec<String>) {
     const DEFAULT_RUNTIME: &str = ">=0.266.0";
 
-    // 1 & 2: an explicit/on-disk manifest wins over config.
-    let chosen: Option<(Vec<u8>, String, bool)> = if let Some(p) = explicit {
-        if !p.is_file() {
-            err(&format!("manifest file not found: {}", p.display()));
-        }
-        let bytes = fs::read(p).unwrap_or_else(|e| err(&format!("cannot read {}: {e}", p.display())));
-        Some((bytes, p.display().to_string(), true))
-    } else if let Some(p) = find_default_manifest(source) {
-        let bytes = fs::read(&p).unwrap_or_else(|e| err(&format!("cannot read {}: {e}", p.display())));
-        Some((bytes, p.display().to_string(), true))
-    } else {
-        None
-    };
+    let syn = crate::config::synthesize_manifest(cwd, perm_set);
+    let mut bytes = syn.bytes;
 
-    let (mut bytes, label, from_file) = match chosen {
-        Some((b, l, f)) => (b, l, f),
-        None => {
-            let syn = crate::config::synthesize_manifest(cwd, perm_set);
-            for w in &syn.warnings {
-                eprintln!("warning: {w}");
-            }
-            (syn.bytes, "config (package.json/deno.json)".to_string(), false)
-        }
-    };
-
-    // Default floor only applies to auto-synthesized manifests (a hand-written
-    // .manifest may intentionally omit `runtime=` to accept any installed engine).
-    if !from_file && !manifest_has_key(&bytes, "runtime") && runtime_flag.is_none() {
-        manifest_set_key(&mut bytes, "runtime", &runtime_value(DEFAULT_RUNTIME));
-    }
+    // Runtime precedence: --runtime > config `inka.runtime` > default floor. The
+    // floor is always embedded so an artifact can never select a runtime too old
+    // to enforce its permission DSL.
     if let Some(r) = runtime_flag {
         manifest_set_key(&mut bytes, "runtime", &runtime_value(r));
+    } else if !manifest_has_key(&bytes, "runtime") {
+        manifest_set_key(&mut bytes, "runtime", &runtime_value(DEFAULT_RUNTIME));
     }
     if let Some(t) = tested_flag {
         manifest_set_key(&mut bytes, "tested-against", t);
     }
-    (bytes, label)
+    (bytes, syn.warnings)
 }
 
 fn find_launcher() -> PathBuf {
@@ -596,4 +505,87 @@ fn find_launcher() -> PathBuf {
         "cannot find the '{LAUNCHER_BIN}' launcher (build it with `cargo build --release -p inka-launcher`, \
          keep it next to this inka binary, or set INKA_LAUNCHER)"
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn scratch() -> PathBuf {
+        static N: AtomicUsize = AtomicUsize::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        let d = std::env::temp_dir().join(format!("inkabuild-{}-{n}", std::process::id()));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn write(cwd: &Path, name: &str, body: &str) {
+        fs::write(cwd.join(name), body).unwrap();
+    }
+
+    fn manifest(
+        cwd: &Path,
+        runtime: Option<&str>,
+        tested: Option<&str>,
+        pset: Option<&str>,
+    ) -> String {
+        let (bytes, _) = resolve_manifest(cwd, runtime, tested, pset);
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn default_runtime_floor_always_embedded() {
+        let cwd = scratch();
+        let m = manifest(&cwd, None, None, None);
+        assert!(m.contains("runtime=inka_runtime>=0.266.0"), "{m}");
+        assert!(!m.contains("allow-"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn runtime_flag_overrides_default_and_config() {
+        let cwd = scratch();
+        write(&cwd, "deno.json", r#"{ "inka": { "runtime": ">=0.300.0" } }"#);
+        // config `inka.runtime` wins over the default floor...
+        let m = manifest(&cwd, None, None, None);
+        assert!(m.contains("runtime=inka_runtime>=0.300.0"), "{m}");
+        // ...but --runtime beats config.
+        let m = manifest(&cwd, Some("==0.266.0"), None, None);
+        assert!(m.contains("runtime=inka_runtime==0.266.0"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn tested_against_flag_embedded() {
+        let cwd = scratch();
+        let m = manifest(&cwd, None, Some("0.266.0"), None);
+        assert!(m.contains("tested-against=0.266.0"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn permission_set_is_baked() {
+        let cwd = scratch();
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "permissions": { "server": { "net": ["0.0.0.0:80"] } } }"#,
+        );
+        let m = manifest(&cwd, None, None, Some("server"));
+        assert!(m.contains("allow-net=0.0.0.0:80"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn module_line_appended_and_replaced() {
+        let appended = set_module_line(b"runtime=x\n", "app.js");
+        assert_eq!(
+            String::from_utf8(appended).unwrap(),
+            "runtime=x\nmodule=app.js\n"
+        );
+        let replaced = set_module_line(b"module=old.js\n", "sub/main.ts");
+        assert_eq!(String::from_utf8(replaced).unwrap(), "module=sub/main.ts\n");
+    }
 }
