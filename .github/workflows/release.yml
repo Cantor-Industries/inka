@@ -82,6 +82,29 @@ jobs:
             --out "$STAGE"
           test -f "$STAGE/store.tar.gz"
 
+      - name: Decide .deb payload (bundle engine only when it changed)
+        run: |
+          set -euo pipefail
+          PREV_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download"
+          prev_deno="$(curl -fsSL "$PREV_BASE/versions.json" 2>/dev/null \
+            | sed -n 's/.*"deno_runtime"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)"
+          prev_store="$(curl -fsSL "$PREV_BASE/seed-manifest.json" 2>/dev/null \
+            | sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1 || true)"
+          new_store="$(sed -n 's/.*"sha256"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$STAGE/seed-manifest.json" | head -1)"
+
+          if [ -z "$prev_deno" ] || [ "$prev_deno" != "$DENO" ]; then
+            echo "BUNDLE_RUNTIME=1" >> "$GITHUB_ENV"
+          else
+            echo "BUNDLE_RUNTIME=0" >> "$GITHUB_ENV"
+          fi
+          if [ -z "$prev_store" ] || [ "$prev_store" != "$new_store" ]; then
+            echo "BUNDLE_STORE=1" >> "$GITHUB_ENV"
+          else
+            echo "BUNDLE_STORE=0" >> "$GITHUB_ENV"
+          fi
+          echo "prev_deno=${prev_deno:-<none>} deno=$DENO bundle_runtime=$([ -z "$prev_deno" ] || [ "$prev_deno" != "$DENO" ] && echo 1 || echo 0)"
+          echo "prev_store=${prev_store:-<none>} new_store=$new_store"
+
       - name: Stage release assets
         run: |
           set -euo pipefail
@@ -94,10 +117,21 @@ jobs:
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$DENO.so"
           chmod +x "$STAGE/inka" "$STAGE/inka-launcher" "$STAGE/inka-patcher"
 
-          # .deb (toolchain bundle: binaries + patches + patcher)
+          # .deb: toolchain + resolver, plus the runtime/store only when changed
+          # (keeps toolchain-only releases small while first installs stay offline-capable).
+          DEB_ARGS=(INKA_DEB_RESOLVER_SO="$STAGE/libinka_resolver-$RES.so")
+          if [ "${BUNDLE_RUNTIME:-0}" = "1" ]; then
+            DEB_ARGS+=(INKA_DEB_RUNTIME_SO="$STAGE/libinka_runtime-$DENO.so")
+          fi
+          if [ "${BUNDLE_STORE:-0}" = "1" ]; then
+            DEB_ARGS+=(INKA_DEB_STORE_TAR="$STAGE/store.tar.gz"
+                       INKA_DEB_STORE_MANIFEST="$STAGE/seed-manifest.json")
+          fi
+          DEB_ARGS+=(INKA_DEB_RELEASE_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download")
           INKA_PATCHER="$BIN/inka-patcher" \
           INKA_DEB_VERSION="$REL" \
           DEB_OUT="$STAGE/inka_${REL}_amd64.deb" \
+          "${DEB_ARGS[@]}" \
           scripts/build-deb.sh
 
           # sha256 sidecars (bare hex, as the installer expects)
@@ -130,16 +164,16 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.DENO }}, resolver ${{ env.RES }}.
 
-            - `inka_${{ env.REL }}_amd64.deb` — Linux toolchain (CLI + launcher + patcher + curated patches)
+            - `inka_${{ env.REL }}_amd64.deb` — Linux toolchain (CLI + launcher + patcher + curated patches);
+              bundles the shared runtime and store only when they changed
             - `libinka_runtime-${{ env.DENO }}.so` — shared runtime tuple
             - `libinka_resolver-${{ env.RES }}.so` — resolution engine
             - `store.tar.gz` + `seed-manifest.json` — default store snapshot
             - `versions.json` — version/identity record
 
-            Install the toolchain with `apt install ./inka_*.deb`, then fetch the
-            runtime and seed the store from the release:
-            `inka install ${{ env.DENO }} --from <release-url>`
-            `inka pkg seed --from <release-url>`
+            Install the toolchain with `apt install ./inka_*.deb` (the postinst
+            installs the bundled runtime/store when present, else runs `inka update`).
+            Keep the machine current with `inka update`.
           draft: false
           files: |
             ${{ env.STAGE }}/inka_${{ env.REL }}_amd64.deb
