@@ -20,7 +20,7 @@ fn run() -> Result<()> {
     let mut it = args.iter();
     if let Some(first) = it.next() {
         if first == "apply" {
-            // accepted subcommand token (inka pkg snapshot invokes `apply --spec …`)
+            // accepted subcommand token (inka internal snapshot-store invokes `apply --spec …`)
         } else if first == "--help" || first == "-h" {
             eprintln!(
                 "usage: inka-patcher apply --spec <patch.json> --node-modules <store node_modules>\n\

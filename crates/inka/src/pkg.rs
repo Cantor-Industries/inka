@@ -1,8 +1,9 @@
-// inka pkg: the vendored-package store.
+// inka store: the shared vendored-package store + release snapshot builder.
 //
-//   inka pkg snapshot [--seed-manifest <file>] [--out <dir>]
-//   inka pkg seed     [--from <dir-or-url>] [--store <dir>] [--insecure]
-//   inka pkg list     [--store <dir>]
+// The user-facing entry points are `inka update` (syncs the store with the
+// newest release) and `inka add`/`install` (project vendoring). The only
+// non-user-facing entry point here is the release-time snapshot builder,
+// invoked by CI as `inka internal snapshot-store`.
 //
 // The store is ONE shared, hoisted `node_modules` pool (a normal npm project
 // layout), so independent packages can carry different versions of a shared
@@ -15,11 +16,11 @@
 //     seed-manifest.json     record of installed top-levels + snapshot sha
 //     node_modules/…         the whole resolved tree
 //
-// Distribution is a whole-store snapshot: `snapshot` npm-installs the seed set
-// together (pre/postinstall already run there, before the tar is made) and
-// packages the resolved node_modules as store.tar.gz. `seed` (and `inka
-// install`, for a release's store/ payload) only downloads -> verifies ->
-// replaces node_modules. Nothing installs or runs on the consumer machine.
+// Distribution is a whole-store snapshot: the snapshot builder npm-installs the
+// seed set together (pre/postinstall already run there, before the tar is made)
+// and packages the resolved node_modules as store.tar.gz. `inka update` only
+// downloads -> verifies -> replaces node_modules. Nothing installs or runs on
+// the consumer machine.
 //
 // CommonJS packages that the engine cannot run are converted to engine-viable
 // pure ESM at snapshot time, inside the scratch node_modules BEFORE the tar:
@@ -39,8 +40,6 @@ use std::process::Command;
 use crate::{fetch_with_sidecar, hex};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-
-const PKG_HELP: &str = "usage:\n  inka pkg snapshot [--seed-manifest <file>] [--patches <dir>] [--out <dir>]   build a whole-store snapshot tar (network)\n  inka pkg seed     [--from <dir-or-url>] [--store <dir>] [--insecure]   install a snapshot into the store\n  inka pkg list     [--store <dir>]";
 
 const SNAPSHOT_TAR: &str = "store.tar.gz";
 const STORE_MANIFEST: &str = "seed-manifest.json";
@@ -133,13 +132,6 @@ fn install_target(spec: &SeedSpec) -> Result<String, String> {
         }
         other => Err(format!("unknown registry '{}' (expected npm or jsr)", other)),
     }
-}
-
-pub(crate) fn store_default() -> PathBuf {
-    if let Ok(s) = std::env::var("INKA_STORE") {
-        return PathBuf::from(s);
-    }
-    crate::default_store_dir()
 }
 
 pub(crate) fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
@@ -512,7 +504,7 @@ fn lint_unpatched_cjs(node_modules: &Path, patched: &[PatchRecord], seeds: &[See
         let key = format!("{name}@{version}");
         if !patched_keys.contains(&key) {
             eprintln!(
-                "[inka] pkg snapshot: warning: seeded package {key} has a CommonJS entry and \
+                "[inka] snapshot-store: warning: seeded package {key} has a CommonJS entry and \
                  no patches/ spec; it will fail cleanly at run time if imported — add a patch \
                  spec under patches/{} or exclude it",
                 pkg.get("name").and_then(Value::as_str).unwrap_or(&name)
@@ -523,7 +515,7 @@ fn lint_unpatched_cjs(node_modules: &Path, patched: &[PatchRecord], seeds: &[See
 
 // ---- snapshot ---------------------------------------------------------------
 
-fn cmd_snapshot(args: &[String]) {
+pub(crate) fn cmd_snapshot_store(args: &[String]) {
     let mut seed_manifest: Option<String> = None;
     let mut patches: Option<String> = None;
     let mut out = PathBuf::from(".");
@@ -538,11 +530,14 @@ fn cmd_snapshot(args: &[String]) {
             }
             "--out" => out = PathBuf::from(it.next().unwrap_or_else(|| fail("--out needs a dir"))),
             "--help" | "-h" => {
-                eprintln!("{PKG_HELP}");
+                eprintln!(
+                    "usage: inka internal snapshot-store [--seed-manifest <file>] \
+                     [--patches <dir>] [--out <dir>]"
+                );
                 std::process::exit(0);
             }
             other => {
-                eprintln!("error: unknown `inka pkg snapshot` argument '{other}'");
+                eprintln!("error: unknown `snapshot-store` argument '{other}'");
                 std::process::exit(2);
             }
         }
@@ -566,7 +561,7 @@ fn cmd_snapshot(args: &[String]) {
     fs::write(work.join(".npmrc"), "@jsr:registry=https://npm.jsr.io\n")
         .unwrap_or_else(|e| fail(&format!("cannot write .npmrc: {e}")));
     println!(
-        "[inka] pkg snapshot: resolving {} package(s) from {} (network)…",
+        "[inka] snapshot-store: resolving {} package(s) from {} (network)…",
         targets.len(),
         manifest_path.display()
     );
@@ -593,7 +588,7 @@ fn cmd_snapshot(args: &[String]) {
             });
     for p in &patched {
         println!(
-            "[inka] pkg snapshot: patched {}@{} ({})",
+            "[inka] snapshot-store: patched {}@{} ({})",
             p.name, p.version, p.kind
         );
     }
@@ -632,7 +627,7 @@ fn cmd_snapshot(args: &[String]) {
 
     let _ = fs::remove_dir_all(&work);
     println!(
-        "[inka] pkg snapshot: wrote {} ({} bytes, sha256 {}), manifest {}",
+        "[inka] snapshot-store: wrote {} ({} bytes, sha256 {}), manifest {}",
         tar_file.display(),
         tar_bytes.len(),
         &sha[..12],
@@ -682,71 +677,6 @@ fn fetch_record_and_tar(base: &str, rel_dir: &str) -> Result<(SeedRecord, Vec<u8
         }
     }
     Ok((record, tbytes))
-}
-
-fn cmd_seed(args: &[String]) {
-    let mut from: Option<String> = None;
-    let mut store = store_default();
-    let mut insecure = false;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--from" => from = Some(it.next().unwrap_or_else(|| fail("--from needs a value")).clone()),
-            "--store" => store = PathBuf::from(it.next().unwrap_or_else(|| fail("--store needs a dir"))),
-            "--insecure" => insecure = true,
-            "--help" | "-h" => {
-                eprintln!("{PKG_HELP}");
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("error: unknown `inka pkg seed` argument '{other}'");
-                std::process::exit(2);
-            }
-        }
-    }
-    let Some(base) = from.or_else(|| std::env::var("INKA_PKG_SOURCE").ok()) else {
-        eprintln!("error: `inka pkg seed` needs a source (use --from <dir-or-url> or INKA_PKG_SOURCE)");
-        std::process::exit(2);
-    };
-
-    let (record, tbytes) = match fetch_record_and_tar(&base, "") {
-        Ok(x) => x,
-        Err(e) if !insecure => fail(&e),
-        Err(e) => {
-            // --insecure: tolerate a missing manifest/sha but still need a tar
-            let rel = SNAPSHOT_TAR.to_string();
-            let (tb, _) = match fetch_with_sidecar(&base, &rel) {
-                Ok(x) => x,
-                Err(e2) => fail(&format!("{e}; also failed to fetch {rel}: {e2}")),
-            };
-            (
-                SeedRecord {
-                    seeded: Vec::new(),
-                    patched: Vec::new(),
-                    tar: None,
-                    sha256: None,
-                },
-                tb,
-            )
-        }
-    };
-
-    if let Err(e) = swap_node_modules(&store, &tbytes) {
-        fail(&e);
-    }
-    let seeded = scan_installed(&store);
-    let out_record = SeedRecord {
-        seeded: seeded.clone(),
-        patched: record.patched.clone(),
-        tar: record.tar,
-        sha256: record.sha256,
-    };
-    write_record(&store.join(STORE_MANIFEST), &out_record).unwrap_or_else(|e| fail(&e));
-    println!(
-        "[inka] pkg seed: store updated at {} ({} packages)",
-        store.display(),
-        seeded.len()
-    );
 }
 
 // ---- install payload --------------------------------------------------------
@@ -844,56 +774,4 @@ pub(crate) fn apply_store_record(
     };
     write_record(&store.join(STORE_MANIFEST), &out_record)?;
     Ok(seeded.len())
-}
-
-// ---- list -------------------------------------------------------------------
-
-fn cmd_list(args: &[String]) {
-    let mut store = store_default();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--store" => store = PathBuf::from(it.next().unwrap_or_else(|| fail("--store needs a dir"))),
-            "--help" | "-h" => {
-                eprintln!("{PKG_HELP}");
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("error: unknown `inka pkg list` argument '{other}'");
-                std::process::exit(2);
-            }
-        }
-    }
-    let rows = scan_installed(&store);
-    if rows.is_empty() {
-        println!("(no packages in store {})", store.display());
-        return;
-    }
-    for r in rows {
-        println!("{}@{}", r.name, r.version);
-    }
-}
-
-// ---- dispatch ---------------------------------------------------------------
-
-pub(crate) fn cmd_pkg(args: &[String]) {
-    let Some(cmd) = args.first() else {
-        eprintln!("{PKG_HELP}");
-        std::process::exit(2);
-    };
-    let rest = &args[1..];
-    match cmd.as_str() {
-        "snapshot" | "tar" => cmd_snapshot(rest),
-        "seed" => cmd_seed(rest),
-        "list" => cmd_list(rest),
-        "--help" | "-h" => {
-            eprintln!("{PKG_HELP}");
-            std::process::exit(0);
-        }
-        other => {
-            eprintln!("error: unknown `inka pkg` subcommand '{other}'");
-            eprintln!("{PKG_HELP}");
-            std::process::exit(2);
-        }
-    }
 }

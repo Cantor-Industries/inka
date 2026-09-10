@@ -434,7 +434,7 @@ enum EsmContext {
 fn cjs_error(pkg_name: &str, file: &Path) -> String {
     format!(
         "'{}' (package '{pkg_name}') is CommonJS, which this engine cannot run; \
-         vendor the patched ESM store (`inka pkg snapshot` applies its `patches/`) \
+         vendor the patched ESM store (`inka internal snapshot-store` applies its `patches/`) \
          or use an ESM alternative",
         file.display()
     )

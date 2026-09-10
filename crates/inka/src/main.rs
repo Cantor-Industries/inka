@@ -53,7 +53,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
     );
     std::process::exit(2);
 }
@@ -151,10 +151,21 @@ fn main() {
         "add" => vendor::cmd_add(&args[1..]),
         "remove" => vendor::cmd_remove(&args[1..]),
         "vendor" => vendor::cmd_vendor(&args[1..]),
-        "pkg" => pkg::cmd_pkg(&args[1..]),
         "doctor" => cmd_doctor(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
+        "internal" => cmd_internal(&args[1..]),
         _ => usage(),
+    }
+}
+
+/// Hidden release-time tooling (not advertised in `usage`).
+fn cmd_internal(args: &[String]) {
+    match args.first().map(String::as_str) {
+        Some("snapshot-store") => pkg::cmd_snapshot_store(&args[1..]),
+        _ => {
+            eprintln!("error: unknown internal command");
+            std::process::exit(2);
+        }
     }
 }
 

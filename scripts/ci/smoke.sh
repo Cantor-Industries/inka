@@ -29,9 +29,10 @@ mkdir -p "$INKA_RUNTIME_HOME" "$HOME"
 echo "== install runtime + resolver from staged release =="
 "$STAGE/inka" update "$DENO" --from "$STAGE"
 
-# GitHub Release assets are flat; seed the store the way a consumer does.
+# GitHub Release assets are flat; a no-version update syncs the store from the
+# same staged base (runtime/resolver are already current, so only the store moves).
 echo "== seed default store from staged release =="
-"$STAGE/inka" pkg seed --from "$STAGE"
+"$STAGE/inka" update --from "$STAGE"
 
 echo "== doctor =="
 "$STAGE/inka" doctor

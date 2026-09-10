@@ -76,7 +76,7 @@ jobs:
         run: |
           set -euo pipefail
           INKA_PATCHER="$CARGO_TARGET_DIR/release/inka-patcher" \
-          "$CARGO_TARGET_DIR/release/inka" pkg snapshot \
+          "$CARGO_TARGET_DIR/release/inka" internal snapshot-store \
             --seed-manifest seed-manifest.json \
             --patches patches \
             --out "$STAGE"
