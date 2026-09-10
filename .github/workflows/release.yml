@@ -128,11 +128,11 @@ jobs:
                        INKA_DEB_STORE_MANIFEST="$STAGE/seed-manifest.json")
           fi
           DEB_ARGS+=(INKA_DEB_RELEASE_BASE="https://github.com/${GITHUB_REPOSITORY}/releases/latest/download")
-          INKA_PATCHER="$BIN/inka-patcher" \
-          INKA_DEB_VERSION="$REL" \
-          DEB_OUT="$STAGE/inka_${REL}_amd64.deb" \
-          "${DEB_ARGS[@]}" \
-          scripts/build-deb.sh
+          env INKA_PATCHER="$BIN/inka-patcher" \
+              INKA_DEB_VERSION="$REL" \
+              DEB_OUT="$STAGE/inka_${REL}_amd64.deb" \
+              "${DEB_ARGS[@]}" \
+              scripts/build-deb.sh
 
           # sha256 sidecars (bare hex, as the installer expects)
           for f in inka inka-launcher inka-patcher \
