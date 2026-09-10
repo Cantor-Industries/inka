@@ -7,8 +7,8 @@ launcher:
 1. parses its own trailer (single-file payload, or an `INKFOOT3`/`INKFOOT4`
    multi-file archive, optionally TS pre-transpiled),
 2. finds a compatible runtime tuple (`libinka_runtime-<v>.so`) under
-   `INKA_RUNTIME_HOME`/`~/.inka-runtime` matching the manifest's `runtime=`
-   floor and `tested-against=` cap,
+   `INKA_RUNTIME_HOME` / `~/.local/share/inka/runtime` / `/usr/local/lib/inka-runtime`
+   matching the manifest's `runtime=` floor and `tested-against=` cap,
 3. dlopens it and calls the frozen C ABI
    (`inka_runtime_create` / `inka_runtime_destroy` /
    `inka_runtime_run_module(_perm|_dir)`) with the payload, argv, and the

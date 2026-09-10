@@ -18,13 +18,16 @@ See the [repository README](../../README.md) for the full architecture and
   relies on the machine default store.
 - `inka run` — execute a `.ts`/`.js` file directly through the installed
   runtime (deno-run-style permission flags, `-A`/`-P`/granular `--allow-*`).
-- `inka install <ver> --from <base>` — install a runtime tuple + resolver +
-  optional store payload into `~/.inka-runtime` (sha256-verified).
+- `inka install [pkg[@ver]...]` — vendor this project's dependencies
+  (`package.json`/`deno.json`) or the given packages into `vendored/`.
+- `inka update [<ver>] [--from <base>]` — reconcile the shared runtime, resolver,
+  and package store with the newest release (or install a specific tuple),
+  sha256-verified.
 - `inka list` / `inka doctor` — show installed tuples / a diagnostic report.
 - `inka add` / `inka remove` — per-project vendoring into `vendored/`,
   including automatic and curated CJS→ESM conversion.
 - `inka vendor …` — vendored-set list/status and git posture.
-- `inka pkg snapshot|seed|list` — build/install/inspect the default store.
+- `inka internal snapshot-store` — hidden release-time store snapshot builder.
 
 ## Build & test
 

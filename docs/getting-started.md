@@ -26,15 +26,18 @@ installed next, per user.
 
 ## 2. Install a runtime
 
-The runtime is the shared engine your executables load at run time. Install one
-tuple into `~/.inka-runtime`:
+The runtime is the shared engine your executables load at run time. The `.deb`
+may already bundle it (plus the resolver and a seeded package store); to install
+or update to the newest, run:
 
 ```sh
-inka install 0.266.0 --from <release-base>
+inka update
 ```
 
-> Releases publish runtime tuples (with checksums) at a release base URL. Newer
-> versions than `0.266.0` are fine — inka rolls forward automatically.
+> Releases publish runtime tuples (with checksums) at a release base URL.
+> `inka update` resolves the newest automatically; `inka update <version>
+> --from <base>` installs a specific tuple, and newer versions are fine — inka
+> rolls forward automatically.
 
 ## 3. Check that everything is ready
 
@@ -77,7 +80,7 @@ Only needed for platforms without a release, or to hack on inka itself.
 The toolchain is a normal Rust workspace:
 
 ```sh
-git clone https://github.com/skyguardAfrica/inka
+git clone https://github.com/Cantor-Industries/inka
 cd inka
 cargo build --release -p inka -p inka-launcher -p inka-resolver
 # target/release/inka
@@ -88,7 +91,7 @@ takes ~10–15 minutes and wants a roomy disk:
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
-cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.inka-runtime/libinka_runtime-0.266.0.so
+cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.local/share/inka/runtime/libinka_runtime-0.266.0.so
 ```
 
 Keep `inka-launcher` next to the `inka` binary, or set `INKA_LAUNCHER`. See

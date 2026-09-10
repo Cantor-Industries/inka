@@ -38,7 +38,7 @@ in place to an installed package. Callers:
 - `inka add` — applies a curated spec when present, or auto-converts a CJS leaf
   by synthesizing a `bundle-esm` spec (hard cases name the exact
   `patches/<pkg>/<version>/patch.json` to create).
-- `inka pkg snapshot` — patches curated CJS leaves (ws/undici/mime/msgpackr)
+- `inka internal snapshot-store` — patches curated CJS leaves (ws/undici/mime/msgpackr)
   into the store snapshot.
 
 ## Build (heavy)

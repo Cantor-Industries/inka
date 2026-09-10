@@ -20,7 +20,7 @@ and `-0.1.0.so` tuples).
 
 ```sh
 cargo build --release -p inka-runtime-stub
-cp target/release/libinka_runtime_stub.so ~/.inka-runtime/libinka_runtime-<ver>.so
+cp target/release/libinka_runtime_stub.so ~/.local/share/inka/runtime/libinka_runtime-<ver>.so
 ```
 
 ## License

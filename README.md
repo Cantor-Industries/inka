@@ -18,10 +18,12 @@ Pick the row for your machine, then install a runtime and check that everything 
 | **Windows** | Install **WSL2** with Ubuntu, then run the same `.deb` command inside it (inka targets Linux and runs in WSL transparently) |
 | **macOS / other OS** | **Build from source** — release binaries for those platforms aren't shipped yet (see below) |
 
-After the toolchain, install a runtime tuple (this is the shared engine inka executables load):
+After the toolchain, install or update the shared engine (runtime + resolver +
+package store). The `.deb` may already bundle these; `inka update` fetches the
+newest from the release channel:
 
 ```sh
-inka install 0.266.0 --from <release-base>
+inka update
 ```
 
 > Newer runtime versions are fine — inka rolls forward to the newest installed tuple that satisfies each executable's manifest.
@@ -42,14 +44,14 @@ The toolchain is a normal Rust workspace — clone the repo and build:
 cargo build --release -p inka -p inka-launcher -p inka-resolver
 ```
 
-The **runtime** is the heavy part (a Deno/V8 build, ~10–15 min on a roomy disk). Until release binaries exist for your platform, build it too and copy the `.so` into `~/.inka-runtime`:
+The **runtime** is the heavy part (a Deno/V8 build, ~10–15 min on a roomy disk). Until release binaries exist for your platform, build it too and copy the `.so` into `~/.local/share/inka/runtime`:
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
-cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.inka-runtime/libinka_runtime-0.266.0.so
+cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.local/share/inka/runtime/libinka_runtime-0.266.0.so
 ```
 
-See [Building from source](docs/install-and-upgrade.md#building-from-source) for details.
+See [Building from source](docs/getting-started.md#5-building-from-source) for details.
 
 ## Get started
 
@@ -96,8 +98,10 @@ import { z } from "zod";
 ```
 
 ```sh
-inka add nanoid          # vendor a package the store doesn't provide (project-local)
-inka doctor              # machine state: runtimes, resolver, store, vendored pool
+inka install              # vendor every dependency declared in package.json/deno.json
+inka add nanoid           # vendor a single package the store doesn't provide
+inka update               # fetch the newest runtime + resolver + store for this machine
+inka doctor               # machine state: runtimes, resolver, store, vendored pool
 ```
 
 - **Permissions** — inka executables are **deny-by-default**; you grant access explicitly at build or run time. Nothing is allowed until you say so.
