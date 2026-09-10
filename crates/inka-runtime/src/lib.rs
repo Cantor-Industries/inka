@@ -119,7 +119,7 @@ fn resolver_api() -> Result<&'static ResolverApi, &'static str> {
 
 fn init_resolver() -> Result<&'static ResolverApi, &'static str> {
     let path = resolver_path_env().ok_or(
-        "no inka resolver configured (INKA_RESOLVER is unset); install it with `inka install`",
+        "no inka resolver configured (INKA_RESOLVER is unset); install it with `inka update`",
     )?;
     // Safety: we dlopen a path supplied by the launcher (or INKA_RESOLVER) and
     // read the exported resolver symbols below.
@@ -130,7 +130,7 @@ fn init_resolver() -> Result<&'static ResolverApi, &'static str> {
             .get(b"inka_resolver_abi")
             .map_err(|_| "missing inka_resolver_abi in resolver library")?;
         if abi() != RESOLVER_ABI {
-            return Err("inka resolver ABI mismatch (expected 2); run `inka install` to update");
+            return Err("inka resolver ABI mismatch (expected 2); run `inka update`");
         }
     }
     let resolve: FnResolve = unsafe {
@@ -235,7 +235,7 @@ fn fallback_resolve(specifier: &str, referrer: &str, reason: &str) -> ModuleReso
     if specifier.starts_with("http://") || specifier.starts_with("https://") {
         return Err(JsErrorBox::generic(format!(
             "network module imports are disabled ('{specifier}'); \
-             vendor the package with `inka pkg seed` instead"
+             vendor the package with `inka update` instead"
         )));
     }
     if has_scheme(specifier)

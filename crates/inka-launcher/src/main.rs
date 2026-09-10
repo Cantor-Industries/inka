@@ -198,13 +198,24 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
     m
 }
 
+/// `$XDG_DATA_HOME` when absolute, else `$HOME/.local/share`.
+fn xdg_data_root() -> Option<PathBuf> {
+    if let Some(x) = env::var_os("XDG_DATA_HOME") {
+        let p = PathBuf::from(x);
+        if p.is_absolute() {
+            return Some(p);
+        }
+    }
+    env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
+}
+
 fn runtime_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(h) = env::var_os("INKA_RUNTIME_HOME") {
         out.push(PathBuf::from(h));
     }
-    if let Some(h) = env::var_os("HOME") {
-        out.push(PathBuf::from(h).join(".inka-runtime"));
+    if let Some(d) = xdg_data_root() {
+        out.push(d.join("inka/runtime"));
     }
     out.push(PathBuf::from("/usr/local/lib/inka-runtime"));
     out
@@ -523,12 +534,12 @@ fn main() {
         std::process::exit(3);
     };
 
-    // Default the vendored-package store to a `store/` directory next to the
-    // resolved runtime (e.g. ~/.inka-runtime/store), unless the caller already
+    // Default the vendored-package store to the per-user XDG store
+    // (~/.local/share/inka/store) when present, unless the caller already
     // pointed INKA_STORE somewhere.
     if env::var_os("INKA_STORE").is_none() {
-        if let Some(dir) = path.parent() {
-            let candidate = dir.join("store");
+        if let Some(d) = xdg_data_root() {
+            let candidate = d.join("inka/store");
             if candidate.is_dir() {
                 env::set_var("INKA_STORE", &candidate);
                 debug_log!("[inka] package store {}", candidate.display());

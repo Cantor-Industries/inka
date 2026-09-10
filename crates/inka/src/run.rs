@@ -226,8 +226,8 @@ fn permission_dsl(root: &Path, f: &Flags) -> String {
 /// Choose the runtime .so: newest installed, or an exact --runtime <ver>.
 /// Only option tokens before the file (or before `--`) are considered.
 fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
-    let dir = crate::runtime_dir(None);
-    let (runtimes, _) = crate::installed_parts(&dir);
+    let dirs = crate::runtime_search_dirs();
+    let (runtimes, _) = crate::installed_parts_all(&dirs);
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -244,9 +244,8 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
                         }
                     }
                     fail(&format!(
-                        "no runtime {} installed in {} (have: {})",
+                        "no runtime {} installed (have: {})",
                         v,
-                        dir.display(),
                         runtimes
                             .iter()
                             .map(|(v, _)| v.to_string())
@@ -261,10 +260,16 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
     }
     match runtimes.last() {
         Some((v, p)) => (p.clone(), Some(v.clone())),
-        None => fail(&format!(
-            "no runtime installed in {}; run `inka install <version>` first",
-            dir.display()
-        )),
+        None => {
+            let searched = dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            fail(&format!(
+                "no runtime installed (searched: {searched}); run `inka update` first"
+            ))
+        }
     }
 }
 
@@ -325,20 +330,18 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
     Ok((root, entry))
 }
 
-fn set_default_env(lib: &Path, root: &Path) {
-    // INKA_STORE defaults to a `store/` dir next to the runtime when present.
+fn set_default_env(root: &Path) {
+    // INKA_STORE defaults to the per-user XDG store when present.
     if env::var_os("INKA_STORE").is_none() {
-        if let Some(dir) = lib.parent() {
-            let candidate = dir.join("store");
-            if candidate.is_dir() {
-                env::set_var("INKA_STORE", &candidate);
-            }
+        let candidate = crate::default_store_dir();
+        if candidate.is_dir() {
+            env::set_var("INKA_STORE", &candidate);
         }
     }
-    // INKA_RESOLVER defaults to the newest installed resolver.
+    // INKA_RESOLVER defaults to the newest installed resolver across search dirs.
     if env::var_os("INKA_RESOLVER").is_none() {
-        let dir = crate::runtime_dir(None);
-        let (_, resolvers) = crate::installed_parts(&dir);
+        let dirs = crate::runtime_search_dirs();
+        let (_, resolvers) = crate::installed_parts_all(&dirs);
         if let Some((_, p)) = resolvers.last() {
             env::set_var("INKA_RESOLVER", p);
         } else {
@@ -404,7 +407,7 @@ pub(crate) fn cmd_run(args: &[String]) {
             chosen.map(|v| v.to_string()).unwrap_or_default()
         );
     }
-    set_default_env(&lib, &root);
+    set_default_env(&root);
 
     let library = match unsafe { libloading::Library::new(&lib) } {
         Ok(l) => l,

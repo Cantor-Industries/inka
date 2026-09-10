@@ -80,7 +80,7 @@ fn store_tier_resolve(store: &Path, referrer: &str, specifier: &str) -> Decision
         if specifier.starts_with("http://") || specifier.starts_with("https://") {
             return Decision::Error(format!(
                 "network module imports are disabled ('{specifier}'); \
-                 vendor the package with `inka pkg seed` instead"
+                 vendor the package with `inka update` instead"
             ));
         }
         return Decision::UseDefault;
@@ -125,7 +125,7 @@ fn app_vendor_resolve(
         let Some(s) = store else {
             return Decision::Error(
                 "this runtime has no package store configured (INKA_STORE is unset); \
-                 run `inka pkg seed` to install vendored packages"
+                 run `inka update` to install vendored packages"
                     .into(),
             );
         };
@@ -186,10 +186,10 @@ fn app_vendor_resolve(
     match (vendor.is_some(), store.is_some()) {
         (false, false) => Decision::Error(format!(
             "bare import '{specifier}' cannot be resolved: no package store configured \
-             (INKA_STORE is unset); run `inka pkg seed` to install it"
+             (INKA_STORE is unset); run `inka update` to install it"
         )),
         (_, true) => Decision::Error(format!(
-            "package '{name}' is not in the package store; run `inka pkg seed` to install it \
+            "package '{name}' is not in the package store; run `inka update` to install it \
              (or `inka add {name}` to vendor it for this project)"
         )),
         (true, false) => Decision::Error(format!(
@@ -370,7 +370,7 @@ fn resolve_store_package(
     let pkg_root = store_package_dir(store, npm_name);
     if !pkg_root.is_dir() {
         return Err(format!(
-            "package '{}' is not in the package store; run `inka pkg seed` to install it",
+            "package '{}' is not in the package store; run `inka update` to install it",
             npm_display(npm_name)
         ));
     }
@@ -379,7 +379,7 @@ fn resolve_store_package(
             if !version_satisfies(&installed, r) {
                 return Err(format!(
                     "package '{}' is installed at {installed}, which does not satisfy '{r}'; \
-                     run `inka pkg seed` to install the requested version",
+                     run `inka update` to install the requested version",
                     npm_display(npm_name)
                 ));
             }
@@ -413,7 +413,7 @@ fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!(
-        "package '{name}' is not in the package store; run `inka pkg seed` to install it"
+        "package '{name}' is not in the package store; run `inka update` to install it"
     ))
 }
 
@@ -648,7 +648,7 @@ fn store_bare_lookup(store: &Path, spec: &str, referrer: &Path) -> Result<PathBu
     }
     Err(format!(
         "cannot resolve '{spec}' from the store (not an installed dependency); \
-         run `inka pkg seed` to install it"
+         run `inka update` to install it"
     ))
 }
 

@@ -1,5 +1,7 @@
 // inka vendor: per-project vendoring of packages not covered by the default store.
 //
+//   inka install             vendor every root declared in package.json/deno.json
+//   inka install <pkg[@ver]>… vendor the given packages (deno-install style)
 //   inka add <pkg[@ver]>     vendor a package (npm identity or jsr:@scope/name)
 //   inka remove <pkg>        un-vendor a package (+ prune orphaned vendored deps)
 //   inka vendor list|status  show the vendored set / store coverage
@@ -21,7 +23,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-use crate::{pkg, runtime_dir};
+use crate::pkg;
 
 const VENDOR_DIR: &str = "vendored";
 const LOCK_FILE: &str = "vendored.lock";
@@ -32,7 +34,7 @@ fn fail(msg: &str) -> ! {
 }
 
 pub(crate) fn cmd_vendor(args: &[String]) {
-    let help = "usage:\n  inka add <pkg[@ver]>            vendor a package (or `inka vendor add …`)\n  inka remove <pkg>               un-vendor a package (or `inka vendor remove …`)\n  inka vendor list                show vendored packages\n  inka vendor status              vendored + default-store coverage\n  inka vendor release|ignore      git posture for vendored/ (commit vs ignore)";
+    let help = "usage:\n  inka install [pkg[@ver]...]   vendor this project's dependencies\n  inka add <pkg[@ver]>            vendor a package (or `inka vendor add …`)\n  inka remove <pkg>               un-vendor a package (or `inka vendor remove …`)\n  inka vendor list                show vendored packages\n  inka vendor status              vendored + default-store coverage\n  inka vendor release|ignore      git posture for vendored/ (commit vs ignore)";
     if args.is_empty() {
         eprintln!("{help}");
         std::process::exit(2);
@@ -64,7 +66,7 @@ pub(crate) fn store_dir() -> PathBuf {
     if let Ok(s) = std::env::var("INKA_STORE") {
         PathBuf::from(s)
     } else {
-        runtime_dir(None).join("store")
+        crate::default_store_dir()
     }
 }
 
@@ -189,6 +191,10 @@ struct AddSpec {
     req: Option<String>,
     /// npm install target (identity + optional @version)
     target: String,
+    /// True when the requirement came from a declared range (`^1.2`, `~1.2.3`,
+    /// `1.x`, `>=…`): the concrete version is only known after the scratch
+    /// install, so store dedupe happens then instead of up front.
+    declared_range: bool,
 }
 
 fn parse_add_spec(raw: &str) -> Result<AddSpec, String> {
@@ -204,7 +210,119 @@ fn parse_add_spec(raw: &str) -> Result<AddSpec, String> {
         Some(v) => format!("{name}@{v}"),
         None => name.clone(),
     };
-    Ok(AddSpec { name, req, target })
+    Ok(AddSpec {
+        name,
+        req,
+        target,
+        declared_range: false,
+    })
+}
+
+/// Build a spec from a package identity + requirement (exact, range, or empty).
+fn build_spec(base: &str, req: &str) -> Result<AddSpec, String> {
+    let name = npm_identity(base);
+    if name.starts_with('/') || name.ends_with('/') || name.is_empty() {
+        return Err(format!("invalid package name '{base}'"));
+    }
+    let req = req.trim();
+    if req.is_empty() || req == "*" || req == "latest" {
+        Ok(AddSpec {
+            target: name.clone(),
+            name,
+            req: None,
+            declared_range: false,
+        })
+    } else if valid_version(req.trim_start_matches('=')) {
+        let exact = req.trim_start_matches('=').to_string();
+        Ok(AddSpec {
+            target: format!("{name}@{exact}"),
+            name,
+            req: Some(exact),
+            declared_range: false,
+        })
+    } else {
+        Ok(AddSpec {
+            target: format!("{name}@{req}"),
+            name,
+            req: None,
+            declared_range: true,
+        })
+    }
+}
+
+/// Parse a `deno.json` `imports` value (e.g. `npm:zod@3.23.8`,
+/// `jsr:@std/assert@0.221.0`). Non-package specifiers are rejected.
+fn parse_import_spec(raw: &str) -> Result<AddSpec, String> {
+    let raw = raw.trim();
+    if raw.is_empty()
+        || raw.starts_with("./")
+        || raw.starts_with("../")
+        || raw.starts_with('/')
+        || raw.contains("://")
+        || raw.starts_with("node:")
+        || raw.starts_with("file:")
+        || raw.starts_with("data:")
+        || raw.starts_with("bun:")
+    {
+        return Err(format!("not a package specifier: {raw}"));
+    }
+    let (base, req) = match raw.rfind('@') {
+        Some(i) if i > 0 => (&raw[..i], &raw[i + 1..]),
+        _ => (raw, ""),
+    };
+    build_spec(base, req)
+}
+
+/// Roots declared by this project: `package.json` `dependencies` plus
+/// `deno.json` `imports` (deno wins on conflict), sorted by canonical name.
+/// `devDependencies` are intentionally ignored in v1.
+fn declared_root_specs(cwd: &Path) -> Result<Vec<AddSpec>, String> {
+    let mut out: BTreeMap<String, AddSpec> = BTreeMap::new();
+    let mut notes: Vec<String> = Vec::new();
+
+    let pkg = cwd.join("package.json");
+    if pkg.is_file() {
+        if let Ok(raw) = fs::read_to_string(&pkg) {
+            if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                if let Some(deps) = v.get("dependencies").and_then(Value::as_object) {
+                    for (name, val) in deps {
+                        let req = val.as_str().unwrap_or("");
+                        match build_spec(name, req) {
+                            Ok(s) => {
+                                out.insert(s.name.clone(), s);
+                            }
+                            Err(e) => notes.push(format!("package.json dependency '{name}': {e}")),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let deno = cwd.join("deno.json");
+    if deno.is_file() {
+        if let Ok(raw) = fs::read_to_string(&deno) {
+            let text = crate::config::strip_jsonc(&raw);
+            if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                if let Some(imports) = v.get("imports").and_then(Value::as_object) {
+                    for val in imports.values() {
+                        let Some(spec) = val.as_str() else { continue };
+                        match parse_import_spec(spec) {
+                            Ok(s) => {
+                                out.insert(s.name.clone(), s);
+                            }
+                            Err(e) => notes.push(format!("deno.json imports '{spec}': {e}")),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    for n in notes {
+        eprintln!("[inka] note: skipped {n}");
+    }
+    Ok(out.into_values().collect())
 }
 
 // ---- lock file -------------------------------------------------------------
@@ -1090,26 +1208,78 @@ fn convert_if_needed(nm: &Path, name: &str, version: &str) -> Result<Option<Stri
 // ---- add -------------------------------------------------------------------
 
 pub(crate) fn cmd_add(args: &[String]) {
+    let (force, specs) = parse_add_flags(args, "usage: inka add <pkg[@ver]> [--force]");
+    if specs.is_empty() {
+        fail("inka add needs a package name");
+    }
+    notice_missing_store();
+    for raw in &specs {
+        let spec = parse_add_spec(raw).unwrap_or_else(|e| fail(&e));
+        add_one(force, &spec);
+    }
+}
+
+const INSTALL_HELP: &str =
+    "usage: inka install [pkg[@ver]...] [--force] [--prod]\n\
+     \x20 no packages: vendor every root declared in package.json (dependencies)\n\
+     \x20              and deno.json (imports)\n\
+     \x20 packages:    vendor the given packages (same as `inka add`)";
+
+/// `inka install`: vendor this project's dependencies into `vendored/`.
+pub(crate) fn cmd_install(args: &[String]) {
+    let (force, specs) = parse_add_flags(args, INSTALL_HELP);
+    if specs.is_empty() {
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let declared = declared_root_specs(&cwd).unwrap_or_else(|e| fail(&e));
+        if declared.is_empty() {
+            println!("[inka] no dependencies declared in package.json or deno.json");
+            return;
+        }
+        notice_missing_store();
+        for spec in &declared {
+            add_one(force, spec);
+        }
+    } else {
+        notice_missing_store();
+        for raw in &specs {
+            let spec = parse_add_spec(raw).unwrap_or_else(|e| fail(&e));
+            add_one(force, &spec);
+        }
+    }
+}
+
+/// Parse `--force`/`-f`, `--prod` (accepted no-op) and collect positional specs.
+fn parse_add_flags(args: &[String], help: &str) -> (bool, Vec<String>) {
     let mut force = false;
     let mut specs: Vec<String> = Vec::new();
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
             "--force" | "-f" => force = true,
+            "--prod" => {} // v1 reads prod deps only; accepted for deno parity
             "--help" | "-h" => {
-                eprintln!("usage: inka add <pkg[@ver]> [--force]");
+                eprintln!("{help}");
                 std::process::exit(0);
             }
             other => specs.push(other.to_string()),
         }
     }
-    if specs.is_empty() {
-        fail("inka add needs a package name");
+    (force, specs)
+}
+
+/// Surface a missing/empty default store once per command.
+fn notice_missing_store() {
+    let store = store_dir();
+    if !store_has_packages(&store) {
+        println!(
+            "[inka] no default store installed ({}); dependencies it would normally provide \
+             will be vendored in full. Install one with: inka update",
+            store.display()
+        );
     }
-    if specs.len() > 1 {
-        fail("inka add takes one package at a time (for now)");
-    }
-    let spec = parse_add_spec(&specs[0]).unwrap_or_else(|e| fail(&e));
+}
+
+fn add_one(force: bool, spec: &AddSpec) {
     let store = store_dir();
     let root = vendor_root();
 
@@ -1139,20 +1309,12 @@ pub(crate) fn cmd_add(args: &[String]) {
         }
     }
 
-    // 0.5) Before the dedupe/closure steps, surface a missing/empty default
-    // store: with no store, the dedupe is always false and the whole dependency
-    // closure is vendored, which silently defeats the two-tier model. Do not
-    // abort — full vendoring is the correct fallback — but say so.
-    if !store_has_packages(&store) {
-        println!(
-            "[inka] no default store installed ({}); dependencies it would normally provide \
-             will be vendored in full. Install one with: inka install <version>",
-            store.display()
-        );
-    }
+    // 0.5) missing/empty default store is surfaced once by the caller.
 
-    // 1) dedupe: default store already satisfies -> skip (unless --force)
-    if !force && store_satisfies(&store, &spec.name, spec.req.as_deref()) {
+    // 1) dedupe: default store already satisfies -> skip (unless --force).
+    //    Declared ranges bypass this: their concrete version is only known
+    //    after the scratch install below.
+    if !force && !spec.declared_range && store_satisfies(&store, &spec.name, spec.req.as_deref()) {
         println!(
             "[inka] '{}' is already provided by the default store; nothing vendored (use --force to vendor anyway)",
             spec.name
@@ -1188,6 +1350,18 @@ pub(crate) fn cmd_add(args: &[String]) {
             format!("npm did not install '{}'", spec.name)
         })
         .unwrap_or_else(|e| fail(&e));
+
+    // A declared range resolves to a concrete version; if the store already
+    // provides exactly that, treat it as store-provided (nothing to vendor).
+    if !force && spec.declared_range && store_satisfies(&store, &spec.name, Some(&requested_ver)) {
+        let _ = fs::remove_dir_all(&work);
+        println!(
+            "[inka] '{}' is already provided by the default store; nothing vendored (use --force to vendor anyway)",
+            spec.name
+        );
+        return;
+    }
+
     let mut to_vendor: Vec<(String, String, String)> = Vec::new(); // (name, ver, why)
     to_vendor.push((spec.name.clone(), requested_ver.clone(), "root".to_string()));
     let mut names: Vec<String> = instances.keys().cloned().collect();
@@ -1246,7 +1420,6 @@ pub(crate) fn cmd_add(args: &[String]) {
     }
 
     // 6) place roots under vendored/
-    let root = vendor_root();
     fs::create_dir_all(&root).unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", root.display())));
     for (name, _ver, _why) in &to_vendor {
         copy_package_root(&nm, name, &root).unwrap_or_else(|e| {
@@ -1990,5 +2163,92 @@ mod tests {
         let parsed: Lock = serde_json::from_str(old).unwrap();
         assert_eq!(parsed.store, None);
         assert_eq!(parsed.entries.len(), 1);
+    }
+
+    // ---- install: declared-root discovery ---------------------------------
+
+    #[test]
+    fn build_spec_classifies_exact_range_and_none() {
+        let exact = build_spec("zod", "3.23.8").unwrap();
+        assert_eq!(exact.name, "zod");
+        assert_eq!(exact.req.as_deref(), Some("3.23.8"));
+        assert_eq!(exact.target, "zod@3.23.8");
+        assert!(!exact.declared_range);
+
+        let ranged = build_spec("zod", "^3.23.0").unwrap();
+        assert_eq!(ranged.name, "zod");
+        assert_eq!(ranged.req, None);
+        assert_eq!(ranged.target, "zod@^3.23.0");
+        assert!(ranged.declared_range);
+
+        let none = build_spec("zod", "*").unwrap();
+        assert_eq!(none.req, None);
+        assert_eq!(none.target, "zod");
+        assert!(!none.declared_range);
+    }
+
+    #[test]
+    fn parse_import_spec_handles_npm_jsr_and_bare() {
+        assert_eq!(parse_import_spec("npm:zod@3.23.8").unwrap().name, "zod");
+        let jsr = parse_import_spec("jsr:@std/assert@0.221.0").unwrap();
+        assert_eq!(jsr.name, "@jsr/std__assert");
+        assert_eq!(jsr.req.as_deref(), Some("0.221.0"));
+        assert_eq!(parse_import_spec("nanoid").unwrap().name, "nanoid");
+    }
+
+    #[test]
+    fn parse_import_spec_rejects_non_packages() {
+        for bad in [
+            "./local.ts",
+            "../up.js",
+            "https://example.com/mod.ts",
+            "node:fs",
+            "file:///x",
+        ] {
+            assert!(parse_import_spec(bad).is_err(), "should reject {bad}");
+        }
+    }
+
+    #[test]
+    fn declared_root_specs_reads_package_and_deno_union() {
+        let cwd = scratch("declared");
+        write_file(
+            &cwd,
+            "package.json",
+            r#"{"dependencies":{"zod":"3.23.8","ms":"^2.1.3"}}"#,
+        );
+        write_file(
+            &cwd,
+            "deno.json",
+            r#"{
+  // comments are tolerated
+  "imports": {
+    "zod": "npm:zod@3.22.0",
+    "@std/assert": "jsr:@std/assert@0.221.0",
+    "local": "./local.ts"
+  }
+}"#,
+        );
+        let specs = declared_root_specs(&cwd).unwrap();
+        let by_name: BTreeMap<String, AddSpec> =
+            specs.into_iter().map(|s| (s.name.clone(), s)).collect();
+
+        // deno.json wins over package.json for zod
+        assert_eq!(by_name["zod"].req.as_deref(), Some("3.22.0"));
+        // package.json range is preserved as a declared range
+        assert!(by_name["ms"].declared_range);
+        assert_eq!(by_name["ms"].target, "ms@^2.1.3");
+        // jsr import maps to its npm-mirror identity
+        assert_eq!(by_name["@jsr/std__assert"].req.as_deref(), Some("0.221.0"));
+        // non-package import-map entries are skipped
+        assert!(!by_name.contains_key("local"));
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn declared_root_specs_empty_without_config() {
+        let cwd = scratch("declared-empty");
+        assert!(declared_root_specs(&cwd).unwrap().is_empty());
+        let _ = fs::remove_dir_all(&cwd);
     }
 }

@@ -1,8 +1,9 @@
 // inka: companion tooling for inka artifacts.
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
-//   inka install <version> [--from <dir-or-url>] [--sha256 <hex>]
-//                          [--insecure] [--home <dir>]
+//   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
+//                           [--insecure] [--home <dir>]
+//   inka install [pkg[@ver]...]   vendor this project's dependencies
 //   inka list [--home <dir>]
 
 mod build;
@@ -11,6 +12,7 @@ mod embed;
 mod pkg;
 mod run;
 mod transpile;
+mod update;
 mod vendor;
 
 use std::env;
@@ -19,18 +21,16 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use sha2::{Digest, Sha256};
-
-const FILENAME_PREFIX: &str = "libinka_runtime-";
-const FILENAME_SUFFIX: &str = ".so";
-const RESOLVER_PREFIX: &str = "libinka_resolver-";
-const RESOLVER_SUFFIX: &str = ".so";
+pub(crate) const FILENAME_PREFIX: &str = "libinka_runtime-";
+pub(crate) const FILENAME_SUFFIX: &str = ".so";
+pub(crate) const RESOLVER_PREFIX: &str = "libinka_resolver-";
+pub(crate) const RESOLVER_SUFFIX: &str = ".so";
 /// Resolver version used when fetching from a URL base that has no directory
 /// listing (and $INKA_RESOLVER_VERSION is unset).
-const DEFAULT_RESOLVER_VERSION: &str = "1.0.0";
+pub(crate) const DEFAULT_RESOLVER_VERSION: &str = "1.0.0";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct Version(u64, u64, u64);
+pub(crate) struct Version(pub(crate) u64, pub(crate) u64, pub(crate) u64);
 
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -53,19 +53,89 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka install <version> [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka pkg snapshot|seed|list (default-store snapshot; see `inka pkg --help`)\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
     );
     std::process::exit(2);
 }
 
-pub(crate) fn runtime_dir(home_override: Option<&str>) -> PathBuf {
-    if let Some(h) = home_override {
-        return PathBuf::from(h);
+/// Machine-wide runtime dir, installed by the toolchain `.deb`.
+pub(crate) const SYSTEM_RUNTIME_DIR: &str = "/usr/local/lib/inka-runtime";
+
+/// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,
+/// else the current directory.
+fn data_root(home: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(x) = xdg {
+        if !x.is_empty() {
+            let p = PathBuf::from(x);
+            if p.is_absolute() {
+                return p;
+            }
+        }
     }
+    if let Some(h) = home {
+        if !h.is_empty() {
+            return PathBuf::from(h).join(".local/share");
+        }
+    }
+    PathBuf::from(".")
+}
+
+fn data_root_now() -> PathBuf {
+    data_root(env::var_os("HOME").as_deref(), env::var_os("XDG_DATA_HOME").as_deref())
+}
+
+/// Per-user inka data dir: `$XDG_DATA_HOME/inka` (`~/.local/share/inka`).
+pub(crate) fn inka_data_dir() -> PathBuf {
+    data_root_now().join("inka")
+}
+
+/// Per-user runtime dir: `<data>/inka/runtime`.
+pub(crate) fn user_runtime_dir() -> PathBuf {
+    inka_data_dir().join("runtime")
+}
+
+/// Per-user default package store: `<data>/inka/store`.
+pub(crate) fn default_store_dir() -> PathBuf {
+    inka_data_dir().join("store")
+}
+
+fn is_root_now() -> bool {
+    unsafe { libc::geteuid() == 0 }
+}
+
+/// Where a runtime install/update writes when `--home` is not given:
+/// `INKA_RUNTIME_HOME` -> system dir (root) -> per-user XDG runtime dir.
+pub(crate) fn default_install_dir() -> PathBuf {
     if let Ok(h) = env::var("INKA_RUNTIME_HOME") {
-        return PathBuf::from(h);
+        if !h.is_empty() {
+            return PathBuf::from(h);
+        }
     }
-    PathBuf::from(env::var("HOME").unwrap_or_else(|_| ".".into())).join(".inka-runtime")
+    if is_root_now() {
+        PathBuf::from(SYSTEM_RUNTIME_DIR)
+    } else {
+        user_runtime_dir()
+    }
+}
+
+/// Directories searched for installed runtime/resolver `.so` files, in order:
+/// `INKA_RUNTIME_HOME`, per-user XDG runtime dir, then the system dir.
+pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    if let Ok(h) = env::var("INKA_RUNTIME_HOME") {
+        if !h.is_empty() {
+            out.push(PathBuf::from(h));
+        }
+    }
+    let user = user_runtime_dir();
+    if !out.contains(&user) {
+        out.push(user);
+    }
+    let sys = PathBuf::from(SYSTEM_RUNTIME_DIR);
+    if !out.contains(&sys) {
+        out.push(sys);
+    }
+    out
 }
 
 fn main() {
@@ -75,8 +145,9 @@ fn main() {
     }
     match args[0].as_str() {
         "build" => build::cmd_build(&args[1..]),
-        "install" => cmd_install(&args[1..]),
+        "update" => update::cmd_update(&args[1..]),
         "list" => cmd_list(&args[1..]),
+        "install" => vendor::cmd_install(&args[1..]),
         "add" => vendor::cmd_add(&args[1..]),
         "remove" => vendor::cmd_remove(&args[1..]),
         "vendor" => vendor::cmd_vendor(&args[1..]),
@@ -87,209 +158,7 @@ fn main() {
     }
 }
 
-// ---- install ---------------------------------------------------------------
-
-fn cmd_install(args: &[String]) {
-    let mut version = None;
-    let mut from = None;
-    let mut sha256 = None;
-    let mut insecure = false;
-    let mut home = None;
-
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--from" => from = it.next().cloned(),
-            "--sha256" => sha256 = it.next().cloned(),
-            "--home" => home = it.next().cloned(),
-            "--insecure" => insecure = true,
-            "--help" | "-h" => usage(),
-            other => {
-                if version.is_none() {
-                    version = Some(other.to_string());
-                } else {
-                    usage();
-                }
-            }
-        }
-    }
-
-    let Some(version_str) = version else { usage() };
-    let ver = parse_version(&version_str).unwrap_or_else(|| {
-        eprintln!("error: '{version_str}' is not a valid x.y.z version");
-        std::process::exit(2);
-    });
-    let file_name = format!("{FILENAME_PREFIX}{ver}{FILENAME_SUFFIX}");
-
-    let source = from.or_else(|| env::var("INKA_RT_SOURCE").ok());
-    let Some(source) = source else {
-        eprintln!("error: no runtime source given (use --from <dir-or-url> or INKA_RT_SOURCE)");
-        std::process::exit(2);
-    };
-
-    let target_dir = runtime_dir(home.as_deref());
-    fs::create_dir_all(&target_dir).unwrap_or_else(|e| {
-        eprintln!("error: cannot create {}: {e}", target_dir.display());
-        std::process::exit(1);
-    });
-
-    println!("[inka] installing inka_runtime {ver} from {source}");
-
-    let (bytes, sidecar_sha) = match fetch_with_sidecar(&source, &file_name) {
-        Ok(x) => x,
-        Err(e) => {
-            eprintln!("error: failed to fetch {file_name} from {source}: {e}");
-            std::process::exit(1);
-        }
-    };
-
-    let expected: Option<String> = match (sha256.clone(), sidecar_sha) {
-        (Some(h), _) => Some(h),
-        (None, Some(h)) => Some(h),
-        (None, None) if insecure => None,
-        (None, None) => {
-            eprintln!("error: no checksum available for {file_name}");
-            eprintln!("  provide --sha256 <hex>, publish a {file_name}.sha256 sidecar,");
-            eprintln!("  or pass --insecure to skip verification");
-            std::process::exit(1);
-        }
-    };
-
-    // sha256sum-style sidecars look like "<hex>  <filename>"; accept a bare hex too.
-    let expected = expected.map(|e| {
-        e.split_whitespace()
-            .next()
-            .unwrap_or(&e)
-            .trim()
-            .to_ascii_lowercase()
-    });
-
-    let actual = hex(&Sha256::digest(&bytes));
-    if let Some(exp) = expected {
-        if exp != actual {
-            eprintln!("error: checksum mismatch for {file_name}");
-            eprintln!("  expected {exp}");
-            eprintln!("  actual   {actual}");
-            std::process::exit(1);
-        }
-        println!("[inka] checksum ok ({})", &actual[..12]);
-    } else {
-        println!("[inka] checksum skipped (--insecure)  sha256={actual}");
-    }
-
-    let target = target_dir.join(&file_name);
-    install_atomically(&target, &bytes);
-
-    println!(
-        "[inka] installed {} ({})",
-        target.display(),
-        bytes.len()
-    );
-
-    // Ship the runtime release's vendored store payload (if any) into the store
-    // next to the runtime home, so artifacts can load curated packages at once.
-    let store_target = match env::var_os("INKA_STORE") {
-        Some(s) => PathBuf::from(s),
-        None => runtime_dir(home.as_deref()).join("store"),
-    };
-    match pkg::seed_release_store(&source, &store_target) {
-        Ok(Some(n)) if n > 0 => {
-            println!(
-                "[inka] installed {n} store package(s) into {}",
-                store_target.display()
-            );
-        }
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("error: store payload: {e}");
-            std::process::exit(1);
-        }
-    }
-
-    install_resolver_payload(&source, &target_dir, insecure);
-}
-
-fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
-    // Pick a resolver from the release: newest libinka_resolver-*.so in a local
-    // dir, else a URL fetch of the current resolver version ($INKA_RESOLVER_VERSION
-    // overrides; DEFAULT_RESOLVER_VERSION fallback).
-    let name = if Path::new(base).is_dir() {
-        let mut best: Option<(Version, String)> = None;
-        if let Ok(rd) = fs::read_dir(base) {
-            for ent in rd.flatten() {
-                let n = ent.file_name().to_string_lossy().into_owned();
-                let Some(stripped) = n.strip_prefix(RESOLVER_PREFIX) else { continue };
-                let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) else { continue };
-                if let Some(v) = parse_version(vstr) {
-                    if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
-                        best = Some((v, n));
-                    }
-                }
-            }
-        }
-        best.map(|(_, n)| n)
-    } else {
-        let ver = env::var("INKA_RESOLVER_VERSION")
-            .unwrap_or_else(|_| DEFAULT_RESOLVER_VERSION.to_string());
-        Some(format!("{RESOLVER_PREFIX}{ver}{RESOLVER_SUFFIX}"))
-    };
-    let Some(name) = name else {
-        return; // release ships no resolver
-    };
-
-    let (bytes, sidecar_sha) = match fetch_with_sidecar(base, &name) {
-        Ok(x) => x,
-        Err(_) => return, // not present on this source
-    };
-    let expected = sidecar_sha.and_then(|s| {
-        s.split_whitespace()
-            .next()
-            .map(|x| x.trim().to_ascii_lowercase())
-    });
-    let actual = hex(&Sha256::digest(&bytes));
-    match (&expected, insecure) {
-        (Some(exp), _) if exp != &actual => {
-            eprintln!("error: checksum mismatch for {name}");
-            eprintln!("  expected {exp}");
-            eprintln!("  actual   {actual}");
-            std::process::exit(1);
-        }
-        (Some(_), _) => {}
-        (None, false) => {
-            eprintln!("error: no checksum available for {name}");
-            eprintln!("  publish a {name}.sha256 sidecar, or pass --insecure to trust it");
-            std::process::exit(1);
-        }
-        (None, true) => {}
-    }
-    let target = target_dir.join(&name);
-    install_atomically(&target, &bytes);
-    println!(
-        "[inka] installed resolver {} ({})",
-        target.display(),
-        bytes.len()
-    );
-}
-
-fn install_atomically(target: &Path, bytes: &[u8]) {
-    let tmp = target.with_extension(format!("so.tmp{}", std::process::id()));
-    fs::write(&tmp, bytes).unwrap_or_else(|e| {
-        eprintln!("error: cannot write {}: {e}", tmp.display());
-        std::process::exit(1);
-    });
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
-        eprintln!("error: cannot chmod {}: {e}", tmp.display());
-        let _ = fs::remove_file(&tmp);
-        std::process::exit(1);
-    });
-    fs::rename(&tmp, target).unwrap_or_else(|e| {
-        eprintln!("error: cannot move {} into place: {e}", target.display());
-        let _ = fs::remove_file(&tmp);
-        std::process::exit(1);
-    });
-}
-
-use std::os::unix::fs::PermissionsExt;
+// ---- fetch helpers ---------------------------------------------------------
 
 /// Fetch `<base>/<file>` plus `<base>/<file>.sha256` when available.
 /// `base` may be a local directory path or an http(s) URL.
@@ -298,6 +167,13 @@ pub(crate) fn fetch_with_sidecar(base: &str, file: &str) -> Result<(Vec<u8>, Opt
     let main = fetch_one(base, file, is_url)?;
     let sidecar = fetch_optional(base, &format!("{file}.sha256"), is_url)?;
     Ok((main, sidecar))
+}
+
+/// Fetch `<base>/<file>` as UTF-8 text (for release metadata like versions.json).
+pub(crate) fn fetch_text(base: &str, file: &str) -> Result<String, String> {
+    let is_url = base.starts_with("http://") || base.starts_with("https://");
+    let bytes = fetch_one(base, file, is_url)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn fetch_one(base: &str, file: &str, is_url: bool) -> Result<Vec<u8>, String> {
@@ -339,14 +215,16 @@ fn cmd_list(args: &[String]) {
             _ => usage(),
         }
     }
-    let dir = runtime_dir(home.as_deref());
-    let (found, resolvers) = installed_parts(&dir);
-    if !dir.is_dir() {
-        println!("(no runtimes installed in {})", dir.display());
-        return;
-    }
+    let dirs = match home.as_deref() {
+        Some(h) => vec![PathBuf::from(h)],
+        None => runtime_search_dirs(),
+    };
+    let (found, resolvers) = installed_parts_all(&dirs);
     if found.is_empty() && resolvers.is_empty() {
-        println!("(no runtimes installed in {})", dir.display());
+        match home.as_deref() {
+            Some(h) => println!("(no runtimes installed in {h})"),
+            None => println!("(no runtimes installed)"),
+        }
         return;
     }
     for (v, p) in found {
@@ -379,6 +257,22 @@ pub(crate) fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Vers
                 }
             }
         }
+    }
+    found.sort();
+    resolvers.sort();
+    (found, resolvers)
+}
+
+/// Merge installed parts across several runtime dirs (sorted by version).
+pub(crate) fn installed_parts_all(
+    dirs: &[PathBuf],
+) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
+    let mut found: Vec<(Version, PathBuf)> = Vec::new();
+    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
+    for d in dirs {
+        let (f, r) = installed_parts(d);
+        found.extend(f);
+        resolvers.extend(r);
     }
     found.sort();
     resolvers.sort();
@@ -485,12 +379,15 @@ fn cmd_doctor(args: &[String]) {
     let mut warnings: Vec<String> = Vec::new();
 
     println!("[inka] doctor");
-    let dir = runtime_dir(None);
-    println!("runtime dir: {}", dir.display());
-    let (runtimes, resolvers) = installed_parts(&dir);
+    let dirs = runtime_search_dirs();
+    println!("runtime dirs:");
+    for d in &dirs {
+        println!("  {}", d.display());
+    }
+    let (runtimes, resolvers) = installed_parts_all(&dirs);
     if runtimes.is_empty() {
         println!("  runtimes: (none installed)");
-        warnings.push("no runtimes installed; artifacts cannot run until `inka install <version>`".into());
+        warnings.push("no runtimes installed; artifacts cannot run until `inka update`".into());
     }
     for (v, p) in &runtimes {
         println!("  runtime {v}  {}", p.display());
@@ -506,7 +403,7 @@ fn cmd_doctor(args: &[String]) {
     match &res_path {
         None => {
             println!("  resolver: none installed (vendored resolution disabled)");
-            warnings.push("no inka resolver installed; install one with `inka install` or set INKA_RESOLVER".into());
+            warnings.push("no inka resolver installed; run `inka update` or set INKA_RESOLVER".into());
         }
         Some((v, p)) => {
             let abi = abi.unwrap_or(-1);
@@ -583,4 +480,52 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
         s.push_str(&format!("{b:02x}"));
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn os(s: &str) -> &OsStr {
+        OsStr::new(s)
+    }
+
+    #[test]
+    fn data_root_prefers_absolute_xdg() {
+        assert_eq!(
+            data_root(Some(os("/home/u")), Some(os("/xdg"))),
+            PathBuf::from("/xdg")
+        );
+    }
+
+    #[test]
+    fn data_root_ignores_relative_or_empty_xdg() {
+        assert_eq!(
+            data_root(Some(os("/home/u")), Some(os("relative"))),
+            PathBuf::from("/home/u/.local/share")
+        );
+        assert_eq!(
+            data_root(Some(os("/home/u")), Some(os(""))),
+            PathBuf::from("/home/u/.local/share")
+        );
+    }
+
+    #[test]
+    fn data_root_falls_back_to_home_then_dot() {
+        assert_eq!(
+            data_root(Some(os("/home/u")), None),
+            PathBuf::from("/home/u/.local/share")
+        );
+        assert_eq!(data_root(None, None), PathBuf::from("."));
+        assert_eq!(data_root(Some(os("")), None), PathBuf::from("."));
+    }
+
+    #[test]
+    fn xdg_store_and_runtime_are_siblings_under_inka() {
+        // Derived from data_root; assert the shape without touching the env.
+        let root = data_root(Some(os("/home/u")), None);
+        assert_eq!(root.join("inka/store"), PathBuf::from("/home/u/.local/share/inka/store"));
+        assert_eq!(root.join("inka/runtime"), PathBuf::from("/home/u/.local/share/inka/runtime"));
+    }
 }

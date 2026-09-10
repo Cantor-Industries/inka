@@ -11,7 +11,7 @@
 //
 // Layout:
 //
-//   <store>/                 ~/.inka-runtime/store  (or $INKA_STORE)
+//   <store>/                 ~/.local/share/inka/store  (or $INKA_STORE)
 //     seed-manifest.json     record of installed top-levels + snapshot sha
 //     node_modules/…         the whole resolved tree
 //
@@ -36,7 +36,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::{fetch_with_sidecar, hex, runtime_dir};
+use crate::{fetch_with_sidecar, hex};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
@@ -61,7 +61,7 @@ struct SeedSpec {
 
 /// The store/payload record (what got installed / what a snapshot contains).
 #[derive(serde::Serialize, serde::Deserialize, Default)]
-struct SeedRecord {
+pub(crate) struct SeedRecord {
     #[serde(default)]
     seeded: Vec<Installed>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -139,7 +139,7 @@ pub(crate) fn store_default() -> PathBuf {
     if let Ok(s) = std::env::var("INKA_STORE") {
         return PathBuf::from(s);
     }
-    runtime_dir(None).join("store")
+    crate::default_store_dir()
 }
 
 pub(crate) fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
@@ -768,6 +768,82 @@ pub(crate) fn seed_release_store(source: &str, store: &Path) -> Result<Option<us
     };
     write_record(&store.join(STORE_MANIFEST), &out_record)?;
     Ok(Some(seeded.len()))
+}
+
+// ---- store sync for `inka update` -------------------------------------------
+
+/// Fetch just the store record (`seed-manifest.json`) from a release base,
+/// trying flat GitHub assets first, then a `store/` subdir layout.
+pub(crate) fn fetch_store_record(base: &str) -> Result<SeedRecord, String> {
+    let flat = fetch_with_sidecar(base, STORE_MANIFEST);
+    let (mbytes, _) = match flat {
+        Ok(x) => x,
+        Err(_) => fetch_with_sidecar(base, &format!("store/{STORE_MANIFEST}"))
+            .map_err(|e| format!("no store seed manifest at {base}: {e}"))?,
+    };
+    serde_json::from_slice(&mbytes).map_err(|e| format!("invalid store seed manifest: {e}"))
+}
+
+/// The snapshot identity recorded in a store record (empty when absent).
+pub(crate) fn record_sha(record: &SeedRecord) -> String {
+    record.sha256.clone().unwrap_or_default()
+}
+
+/// The snapshot identity currently recorded in `store` (empty when none).
+pub(crate) fn store_record_sha(store: &Path) -> String {
+    fs::read(store.join(STORE_MANIFEST))
+        .ok()
+        .and_then(|b| serde_json::from_slice::<Value>(&b).ok())
+        .and_then(|v| v.get("sha256").and_then(Value::as_str).map(str::to_string))
+        .unwrap_or_default()
+}
+
+/// Fetch the snapshot tar named by `record` (flat first, then `store/` subdir),
+/// verifying against the record's `sha256` or the `.sha256` sidecar.
+pub(crate) fn fetch_store_tar(base: &str, record: &SeedRecord) -> Result<Vec<u8>, String> {
+    let tar_name = record.tar.clone().unwrap_or_else(|| SNAPSHOT_TAR.to_string());
+    let (tbytes, sidecar) = match fetch_with_sidecar(base, &tar_name) {
+        Ok(x) => x,
+        Err(_) => fetch_with_sidecar(base, &format!("store/{tar_name}"))
+            .map_err(|e| format!("failed to fetch {tar_name}: {e}"))?,
+    };
+    let actual = sha256_bytes(&tbytes);
+    let expected = record.sha256.clone().or_else(|| {
+        sidecar.map(|s| {
+            s.split_whitespace()
+                .next()
+                .unwrap_or(&s)
+                .trim()
+                .to_ascii_lowercase()
+                .to_string()
+        })
+    });
+    if let Some(exp) = &expected {
+        if exp != &actual {
+            return Err(format!(
+                "checksum mismatch for {tar_name}: expected {exp}, actual {actual}"
+            ));
+        }
+    }
+    Ok(tbytes)
+}
+
+/// Apply a fetched snapshot to `store` (replace `node_modules`, write record).
+pub(crate) fn apply_store_record(
+    store: &Path,
+    record: &SeedRecord,
+    tbytes: &[u8],
+) -> Result<usize, String> {
+    swap_node_modules(store, tbytes)?;
+    let seeded = scan_installed(store);
+    let out_record = SeedRecord {
+        seeded: seeded.clone(),
+        patched: record.patched.clone(),
+        tar: record.tar.clone(),
+        sha256: record.sha256.clone(),
+    };
+    write_record(&store.join(STORE_MANIFEST), &out_record)?;
+    Ok(seeded.len())
 }
 
 // ---- list -------------------------------------------------------------------
