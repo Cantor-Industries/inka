@@ -1,6 +1,8 @@
 // inka: companion tooling for inka artifacts.
 //
-//   inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]
+//   inka build [source] [-s|--source <file>] [-o|--output <file>]
+//               [--runtime <spec>] [--tested-against <ver>] [-P <name>]
+//               [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
 //   inka install [pkg[@ver]...]   vendor this project's dependencies
@@ -53,7 +55,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--manifest <file>]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime"
     );
     std::process::exit(2);
 }
