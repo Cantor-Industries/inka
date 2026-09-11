@@ -42,6 +42,14 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// Removes a temp directory on drop, so failures don't leave junk behind.
+struct TempDir(PathBuf);
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 fn resolve_base(from: Option<String>) -> String {
     from
         .or_else(|| env::var("INKA_RELEASE_BASE").ok())
@@ -164,6 +172,15 @@ fn installed_toolchain_version(dir: &Path) -> String {
 /// newer release is available. No-op (Ok) when there is no `VERSION` marker or
 /// the release carries no `toolchain` metadata. Never downgrades.
 fn update_toolchain(base: &str, insecure: bool) -> Result<bool, String> {
+    let versions_text = fetch_text(base, "versions.json")
+        .map_err(|e| format!("cannot read versions.json from {base}: {e}"))?;
+    let v: Value = serde_json::from_str(&versions_text)
+        .map_err(|e| format!("invalid versions.json from {base}: {e}"))?;
+    update_toolchain_from(&v, base, insecure)
+}
+
+/// Toolchain self-update against an already-parsed `versions.json`.
+fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, String> {
     let Some(dir) = toolchain_dir() else {
         return Ok(false);
     };
@@ -171,11 +188,6 @@ fn update_toolchain(base: &str, insecure: bool) -> Result<bool, String> {
         return Ok(false);
     }
     let installed = installed_toolchain_version(&dir);
-
-    let versions_text = fetch_text(base, "versions.json")
-        .map_err(|e| format!("cannot read versions.json from {base}: {e}"))?;
-    let v: Value = serde_json::from_str(&versions_text)
-        .map_err(|e| format!("invalid versions.json from {base}: {e}"))?;
     let Some(tc) = v.get("toolchain") else {
         return Ok(false);
     };
@@ -227,18 +239,18 @@ fn update_toolchain(base: &str, insecure: bool) -> Result<bool, String> {
         _ => {}
     }
 
-    let tmp = env::temp_dir().join(format!("inka-toolchain-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&tmp);
-    fs::create_dir_all(&tmp).map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-    let archive_path = tmp.join(archive);
-    fs::write(&archive_path, &bytes).map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
+    let tmp = TempDir(env::temp_dir().join(format!("inka-toolchain-{}", std::process::id())));
+    let _ = fs::remove_dir_all(&tmp.0);
+    fs::create_dir_all(&tmp.0).map_err(|e| format!("cannot create {}: {e}", tmp.0.display()))?;
+    let archive_path = tmp.0.join(archive);
+    fs::write(&archive_path, &bytes)
+        .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
     let mut cmd = Command::new("tar");
-    cmd.args(["-xzf"]).arg(&archive_path).arg("-C").arg(&tmp);
+    cmd.args(["-xzf"]).arg(&archive_path).arg("-C").arg(&tmp.0);
     crate::pkg::run_ok(&mut cmd, "tar extract")?;
-    replace_toolchain(&tmp, &dir)?;
+    replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
-    let _ = fs::remove_dir_all(&tmp);
     println!("[inka] installed toolchain {latest}");
     Ok(true)
 }
@@ -299,6 +311,12 @@ fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
     }
 }
 
+fn toolchain_warn(e: String) -> bool {
+    eprintln!("[inka] warning: toolchain not updated: {e}");
+    eprintln!("[inka]   the engine update continues; re-run install.sh to update the toolchain");
+    false
+}
+
 /// Best-effort toolchain self-update used by both update paths. Returns whether
 /// the toolchain was actually replaced.
 fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) -> bool {
@@ -307,13 +325,18 @@ fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) -> bo
     }
     match update_toolchain(base, insecure) {
         Ok(changed) => changed,
-        Err(e) => {
-            eprintln!("[inka] warning: toolchain not updated: {e}");
-            eprintln!(
-                "[inka]   the engine update continues; re-run install.sh to update the toolchain"
-            );
-            false
-        }
+        Err(e) => toolchain_warn(e),
+    }
+}
+
+/// As `maybe_update_toolchain`, against an already-parsed `versions.json`.
+fn maybe_update_toolchain_from(v: &Value, base: &str, insecure: bool, mode: ToolchainMode) -> bool {
+    if mode == ToolchainMode::Skip {
+        return false;
+    }
+    match update_toolchain_from(v, base, insecure) {
+        Ok(changed) => changed,
+        Err(e) => toolchain_warn(e),
     }
 }
 
@@ -350,18 +373,19 @@ fn update_latest(
     components: &Components,
     toolchain: ToolchainMode,
 ) {
-    let mut changed = maybe_update_toolchain(base, insecure, toolchain);
-    if toolchain == ToolchainMode::Only {
-        return;
-    }
-
-    let target = target_dir(home);
     let versions_text = match fetch_text(base, "versions.json") {
         Ok(s) => s,
         Err(e) => fail(&format!("cannot read versions.json from {base}: {e}")),
     };
     let v: Value = serde_json::from_str(&versions_text)
         .unwrap_or_else(|e| fail(&format!("invalid versions.json from {base}: {e}")));
+
+    let mut changed = maybe_update_toolchain_from(&v, base, insecure, toolchain);
+    if toolchain == ToolchainMode::Only {
+        return;
+    }
+
+    let target = target_dir(home);
     // Prefer the runtime tuple version; fall back to `deno_runtime` for releases
     // published before the tuple was decoupled from the crate pin.
     let latest_runtime_s = v

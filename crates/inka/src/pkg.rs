@@ -195,7 +195,7 @@ fn scan_installed(store: &Path) -> Vec<Installed> {
 
 fn write_record(path: &Path, record: &SeedRecord) -> Result<(), String> {
     let json = serde_json::to_string_pretty(record).map_err(|e| format!("encode manifest: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!("json.tmp{}", std::process::id()));
     fs::write(&tmp, &json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
     fs::rename(&tmp, path).map_err(|e| format!("cannot finalize {}: {e}", path.display()))
 }
@@ -320,7 +320,10 @@ fn swap_node_modules(store: &Path, tar_bytes: &[u8]) -> Result<(), String> {
     fs::create_dir_all(&staging).map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
 
     let tar_path = staging.join(".store.tar");
-    fs::write(&tar_path, tar_bytes).map_err(|e| format!("cannot write {}: {e}", tar_path.display()))?;
+    if let Err(e) = fs::write(&tar_path, tar_bytes) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("cannot write {}: {e}", tar_path.display()));
+    }
     let mut cmd = Command::new("tar");
     cmd.args(["-xzf"]).arg(&tar_path).arg("-C").arg(&staging);
     let extract = run_ok(&mut cmd, "tar extract");
