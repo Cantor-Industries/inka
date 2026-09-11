@@ -15,6 +15,13 @@ fn main() {
 
 fn run() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|a| a == "--version" || a == "-V")
+    {
+        println!("inka-patcher {}", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
     let mut spec_path: Option<String> = None;
     let mut node_modules: Option<String> = None;
     let mut it = args.iter();

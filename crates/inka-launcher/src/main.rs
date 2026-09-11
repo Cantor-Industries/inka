@@ -488,6 +488,13 @@ fn main() {
     let trailer = match parse_trailer(&bytes) {
         Ok(x) => x,
         Err(e) => {
+            // Only the standalone launcher (no trailer) answers --version/-V.
+            // An artifact has a valid trailer, so its args (including
+            // `--version`) pass through to the program instead.
+            if matches!(args.first().map(String::as_str), Some("--version") | Some("-V")) {
+                println!("inka-launcher {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             eprintln!("[inka] {e}");
             std::process::exit(2);
         }
