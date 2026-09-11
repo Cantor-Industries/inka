@@ -67,13 +67,13 @@ Pack it into a single executable and run it:
 
 ```sh
 inka build app.ts          # -> ./app   (manifest auto-generated, deny-by-default perms)
-./app kook
+./app holla
 ```
 
 While developing, skip the build entirely:
 
 ```sh
-inka run app.ts kook
+inka run app.ts holla
 ```
 
 That's the whole loop: **write → `inka run` to iterate, `inka build` to ship**.
