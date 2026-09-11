@@ -508,27 +508,21 @@ fn update_pinned(
         install_file(base, &name, &target, sha256, insecure, "inka_runtime");
     }
 
-    // Ship the runtime release's vendored store payload (if any) into the store.
+    // Seed the store from the release snapshot (flat assets or a `store/` subdir).
     if components.store {
-        let store_target = match env::var_os("INKA_STORE") {
-            Some(s) => PathBuf::from(s),
-            None => crate::default_store_dir(),
-        };
-        match crate::pkg::seed_release_store(base, &store_target) {
-            Ok(Some(n)) if n > 0 => {
-                println!(
-                    "[inka] installed {n} store package(s) into {}",
-                    store_target.display()
-                );
-            }
-            Ok(_) => {}
-            Err(e) => fail(&format!("store payload: {e}")),
-        }
+        sync_store(base);
     }
 
     if components.resolver {
         install_resolver_payload(base, &target, insecure);
     }
+}
+
+/// The resolver version named by a release's `versions.json` (used for URL bases).
+fn resolver_version_from_release(base: &str) -> Option<String> {
+    let text = fetch_text(base, "versions.json").ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v.get("resolver").and_then(Value::as_str).map(str::to_string)
 }
 
 fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
@@ -551,8 +545,9 @@ fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
         }
         best.map(|(_, n)| n)
     } else {
-        let ver = env::var("INKA_RESOLVER_VERSION")
-            .unwrap_or_else(|_| DEFAULT_RESOLVER_VERSION.to_string());
+        let ver = resolver_version_from_release(base)
+            .or_else(|| env::var("INKA_RESOLVER_VERSION").ok())
+            .unwrap_or_else(|| DEFAULT_RESOLVER_VERSION.to_string());
         Some(format!("{RESOLVER_PREFIX}{ver}{RESOLVER_SUFFIX}"))
     };
     let Some(name) = name else {
