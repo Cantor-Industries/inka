@@ -29,7 +29,9 @@ use node_resolver::{InNpmPackageChecker, NpmPackageFolderResolver, UrlOrPathRef}
 use deno_error::JsErrorBox;
 use sys_traits::impls::RealSys;
 
-const DENO_RUNTIME_VERSION: &str = "0.266.0";
+/// Runtime tuple version, set by `build.rs` from `runtime-version`: the
+/// `deno_runtime` base (`0.xxx.0`) plus an inka runtime revision (`.1`, `.2`, …).
+const RUNTIME_VERSION: &str = env!("INKA_RUNTIME_VERSION");
 
 static STARTUP_SNAPSHOT: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/CLI_SNAPSHOT.bin"));
@@ -790,7 +792,7 @@ fn run_dir_inner(
 fn version_cstr() -> &'static CStr {
     static V: OnceLock<CString> = OnceLock::new();
     V.get_or_init(|| {
-        CString::new(format!("inka_runtime-{DENO_RUNTIME_VERSION}"))
+        CString::new(format!("inka_runtime-{RUNTIME_VERSION}"))
             .expect("nul in version string")
     })
 }

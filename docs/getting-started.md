@@ -5,30 +5,34 @@ about your setup beyond a supported machine.
 
 ## Requirements
 
-- **A 64-bit Linux** (Debian/Ubuntu is easiest), **or** Windows with **WSL2**
-  (Ubuntu), **or** a machine you're willing to build from source on (macOS and
-  other OSes aren't shipped as binaries yet).
+- **A 64-bit Linux** (`x86_64`), **or** Windows with **WSL2** (Ubuntu), **or** a
+  machine you're willing to build from source on (macOS and other OSes aren't
+  shipped as binaries yet).
+- `curl` (used by the installer and `inka update` over HTTP).
 - A Rust toolchain **only if** you build from source (see below).
 
-## 1. Install the toolchain
+## 1. Install inka
 
-Pick the row that matches your machine.
+Linux and WSL2 install rootlessly with one command:
 
-| You're on… | Install |
-|---|---|
-| **Linux (Debian/Ubuntu)** | `sudo apt install ./inka_0.1.0_amd64.deb` |
-| **Windows** | Install [WSL2](https://learn.microsoft.com/windows/wsl/install) with Ubuntu, open the Ubuntu terminal, then run the same `.deb` command inside it |
-| **macOS / other OS** | Build from source (see [Building from source](#5-building-from-source)) |
+```sh
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
+```
 
-The `.deb` puts `inka` on your `PATH` (it installs to `/usr/lib/inka` and
-symlinks `/usr/bin/inka`). It is **toolchain-only** — the shared engine is
-installed next, per user.
+It installs the toolchain under `~/.local/lib/inka` (shimmed at
+`~/.local/bin/inka`), adds `~/.local/bin` to your `PATH`, and provisions the
+shared engine (runtime + resolver + package store). On macOS/other OSes, build
+from source (see [Building from source](#5-building-from-source)).
 
-## 2. Install a runtime
+> `install.sh --help` lists options (`--version`, `--prefix`, `--no-engine`,
+> `--uninstall`, …). `--from <dir-or-url>` installs from a mirror or local
+> staging dir.
 
-The runtime is the shared engine your executables load at run time. The `.deb`
-may already bundle it (plus the resolver and a seeded package store); to install
-or update to the newest, run:
+## 2. Install / update the engine
+
+The installer already provisioned the shared engine (runtime + resolver +
+package store). To update everything to the newest release:
 
 ```sh
 inka update
@@ -37,7 +41,8 @@ inka update
 > Releases publish runtime tuples (with checksums) at a release base URL.
 > `inka update` resolves the newest automatically; `inka update <version>
 > --from <base>` installs a specific tuple, and newer versions are fine — inka
-> rolls forward automatically.
+> rolls forward automatically. A runtime tuple is only fetched when it is
+> missing or newer; older tuples are left in place.
 
 ## 3. Check that everything is ready
 
@@ -91,7 +96,8 @@ takes ~10–15 minutes and wants a roomy disk:
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
-cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.local/share/inka/runtime/libinka_runtime-0.266.0.so
+cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
+   ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
 ```
 
 Keep `inka-launcher` next to the `inka` binary, or set `INKA_LAUNCHER`. See

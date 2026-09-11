@@ -2,8 +2,9 @@
 
 The real engine: a `cdylib` built on Deno (`deno_runtime`/`deno_core`) that the
 launcher (and `inka run`) dlopen. One installed runtime file = one version
-tuple: `libinka_runtime-<v>.so`, where `<v>` is the pinned `deno_runtime`
-version (e.g. `0.266.0` ↔ Deno 2.9.x). Artifacts never embed it — they load the
+tuple: `libinka_runtime-<v>.so`, where `<v>` is the `deno_runtime` base
+(`0.xxx.0`, e.g. `0.266.0` ↔ Deno 2.9.x) plus an inka runtime revision (`.1`,
+`.2`, …), tracked in `runtime-version`. Artifacts never embed it — they load the
 best matching installed tuple.
 
 ## C ABI
@@ -33,8 +34,9 @@ roomy disk:
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
-# install as a tuple:
-cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.local/share/inka/runtime/libinka_runtime-0.266.0.so
+# install as a tuple (version comes from runtime-version):
+cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
+   ~/.local/share/inka/runtime/libinka_runtime-$(cat runtime-version).so
 ```
 
 See the repository README "Building the real runtime".

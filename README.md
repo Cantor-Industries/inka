@@ -10,31 +10,31 @@ The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment
 
 ## Install
 
-Pick the row for your machine, then install a runtime and check that everything is ready.
-
-| You're on… | Do this |
-|---|---|
-| **Linux (Debian/Ubuntu)** | `sudo apt install ./inka_0.1.0_amd64.deb` — the easiest path |
-| **Windows** | Install **WSL2** with Ubuntu, then run the same `.deb` command inside it (inka targets Linux and runs in WSL transparently) |
-| **macOS / other OS** | **Build from source** — release binaries for those platforms aren't shipped yet (see below) |
-
-After the toolchain, install or update the shared engine (runtime + resolver +
-package store). The `.deb` may already bundle these; `inka update` fetches the
-newest from the release channel:
+Linux and WSL2 install with a single rootless command:
 
 ```sh
-inka update
+curl --proto '=https' --tlsv1.2 -sSf \
+  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
 ```
 
-> Newer runtime versions are fine — inka rolls forward to the newest installed tuple that satisfies each executable's manifest.
+It installs the toolchain per-user (`~/.local/lib/inka`, shimmed at
+`~/.local/bin/inka`) and provisions the shared engine (runtime + resolver +
+package store) via `inka update`. On Windows, install **WSL2** with Ubuntu and
+run the same command inside it. macOS isn't published yet — **build from
+source** (below).
 
-Now confirm everything is ready:
+Then confirm everything is ready:
 
 ```sh
 inka doctor
 ```
 
-`doctor` shows your installed runtimes, resolver, and package store, and tells you if anything needs fixing. If it's clean, you're ready to go.
+`doctor` shows your installed runtimes, resolver, and package store, and tells
+you if anything needs fixing. If it's clean, you're ready to go.
+
+> Newer runtime versions are fine — inka rolls forward to the newest installed
+> tuple that satisfies each executable's manifest. Keep current with `inka
+> update` (toolchain + runtime + resolver + store).
 
 ### Building from source (macOS and other platforms)
 
@@ -48,7 +48,8 @@ The **runtime** is the heavy part (a Deno/V8 build, ~10–15 min on a roomy disk
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
-cp $CARGO_TARGET_DIR/release/libinka_runtime.so ~/.local/share/inka/runtime/libinka_runtime-0.266.0.so
+cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
+   ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
 ```
 
 See [Building from source](docs/getting-started.md#5-building-from-source) for details.

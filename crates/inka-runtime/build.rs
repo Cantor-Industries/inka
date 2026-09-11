@@ -19,10 +19,27 @@ const TS_VERSION: &str = "6.0.3";
 
 fn main() {
     println!("cargo:rerun-if-env-changed=DENO_SNAPSHOT_MINIFY_SOURCES");
+    emit_runtime_version();
     let out_dir = PathBuf::from(env::var_os("OUT_DIR").unwrap());
     let snapshot_path = out_dir.join("CLI_SNAPSHOT.bin");
     let residual_path = out_dir.join("EXTENSION_RESIDUAL_SOURCES.rs");
     create_cli_snapshot(&snapshot_path, &residual_path, &out_dir);
+}
+
+/// Expose the runtime tuple version (`runtime-version`) to the crate as
+/// `INKA_RUNTIME_VERSION`. This is the `deno_runtime` base (`0.xxx.0`) plus an
+/// inka runtime revision (`.1`, `.2`, …), kept separate from the exact crate pin
+/// so behavior-only runtime changes can advance the tuple and be delivered.
+fn emit_runtime_version() {
+    let path = Path::new("runtime-version");
+    println!("cargo:rerun-if-changed={}", path.display());
+    let raw = std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let version = raw.trim();
+    if version.is_empty() {
+        panic!("{} is empty", path.display());
+    }
+    println!("cargo:rustc-env=INKA_RUNTIME_VERSION={version}");
 }
 
 fn create_cli_snapshot(snapshot_path: &Path, residual_path: &Path, out_dir: &Path) {

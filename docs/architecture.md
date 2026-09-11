@@ -13,7 +13,10 @@ machine and loaded at run time.
 | Runtime | `libinka_runtime-<v>.so` — the Deno engine (`crates/inka-runtime`) | system `/usr/local/lib/inka-runtime` or per-user `~/.local/share/inka/runtime` |
 | Resolver | `libinka_resolver-<v>.so` — package resolution | alongside the runtime |
 
-The runtime tuple's version is the pinned `deno_runtime` crate version.
+The runtime tuple's version is the pinned `deno_runtime` base (`0.xxx.0`) plus an
+inka runtime revision (`.1`, `.2`, …), tracked in
+`crates/inka-runtime/runtime-version`. Engine-only fixes advance the revision so
+they are delivered as a new tuple without changing the `deno_runtime` pin.
 
 ## The artifact layout
 

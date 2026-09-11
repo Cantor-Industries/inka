@@ -17,8 +17,8 @@ vendored-first, then the store.
 The store is a normal npm layout (`node_modules/` + `seed-manifest.json`). It is
 provisioned automatically:
 
-- the toolchain `.deb` bundles a snapshot when it changed and seeds it on
-  install (see [Install & upgrade](install-and-upgrade.md));
+- `install.sh` seeds it on first install (it runs `inka update`; see
+  [Install & upgrade](install-and-upgrade.md));
 - `inka update` fetches `seed-manifest.json` + `store.tar.gz` from the release
   channel and replaces `node_modules` when the recorded `sha256` differs.
 

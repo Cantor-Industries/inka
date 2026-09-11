@@ -60,7 +60,7 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// Machine-wide runtime dir, installed by the toolchain `.deb`.
+/// Machine-wide runtime dir (legacy system location; per-user installs use XDG).
 pub(crate) const SYSTEM_RUNTIME_DIR: &str = "/usr/local/lib/inka-runtime";
 
 /// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,

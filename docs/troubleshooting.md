@@ -16,7 +16,8 @@ Built artifacts (launcher):
 | other | the program's own exit code (propagated) |
 
 `inka run` uses `2` for bad flags/usage, `1` for load failures, and `4` for a
-runtime missing `inka_runtime_create` / `inka_runtime_run_module_dir`.
+runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
+`inka_runtime_run_module_dir`.
 
 ## Common problems
 
@@ -36,8 +37,8 @@ also point `INKA_RESOLVER` at a specific `libinka_resolver-<v>.so`.
 re-run `inka update` or re-vendor the affected packages.
 
 **`inka add` fails: patcher missing.** CJS→ESM conversion needs `inka-patcher`
-next to the `inka` binary (or `$INKA_PATCHER`). Install the toolchain `.deb`, or
-build `crates/inka-patcher` and colocate it.
+next to the `inka` binary (or `$INKA_PATCHER`). Re-run `install.sh` (it ships the
+patcher in the toolchain), or build `crates/inka-patcher` and colocate it.
 
 **Artifact runs on one machine but not another.** The dependency came from the
 default store, which differs per machine. Vendor the closure (`inka install`,

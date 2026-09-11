@@ -20,8 +20,9 @@ See the [repository README](../../README.md) for the full architecture and
   runtime (deno-run-style permission flags, `-A`/`-P`/granular `--allow-*`).
 - `inka install [pkg[@ver]...]` — vendor this project's dependencies
   (`package.json`/`deno.json`) or the given packages into `vendored/`.
-- `inka update [<ver>] [--from <base>]` — reconcile the shared runtime, resolver,
-  and package store with the newest release (or install a specific tuple),
+- `inka update [<ver>] [--from <base>]` — self-update the toolchain (for
+  installer-managed installs) and reconcile the shared runtime, resolver, and
+  package store with the newest release (or install a specific tuple),
   sha256-verified.
 - `inka list` / `inka doctor` — show installed tuples / a diagnostic report.
 - `inka add` / `inka remove` — per-project vendoring into `vendored/`,
