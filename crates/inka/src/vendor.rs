@@ -662,46 +662,6 @@ fn entry_is_commonjs(pkg_root: &Path) -> bool {
     }
 }
 
-/// Where curated patch specs are discovered, in order:
-/// $INKA_PATCHES -> ./patches -> <dir of inka binary>/patches.
-/// Returns the first path that qualifies (`INKA_PATCHES` wins even if it does
-/// not exist yet), falling back to the cwd `./patches` path.
-fn default_patches_base() -> PathBuf {
-    match curated_specs_source() {
-        Some(p) => p,
-        None => std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join("patches"),
-    }
-}
-
-/// `Some(dir)` when curated patch specs are discoverable: `INKA_PATCHES` is
-/// set, or `./patches` (cwd) is a dir, or `<dir of inka binary>/patches` is a
-/// dir. `None` when no spec directory is present anywhere inka would look.
-fn curated_specs_discoverable() -> bool {
-    curated_specs_source().is_some()
-}
-
-fn curated_specs_source() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("INKA_PATCHES") {
-        return Some(PathBuf::from(p));
-    }
-    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let local = cwd.join("patches");
-    if local.is_dir() {
-        return Some(local);
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("patches");
-            if p.is_dir() {
-                return Some(p);
-            }
-        }
-    }
-    None
-}
-
 /// Pick the file target out of an `exports` "." condition value, preferring the
 /// conditions an ESM-first tool resolves: import -> node -> module -> default ->
 /// require (recursing into nested condition objects). String and array forms are
@@ -988,31 +948,6 @@ fn patcher_missing_message(needs: &[(String, String)], specs_missing: bool) -> S
     msg
 }
 
-/// Run the patcher on a spec file against the scratch node_modules, returning
-/// the patch kind the spec declares.
-fn invoke_patcher(spec_path: &Path, nm: &Path) -> Result<String, String> {
-    let bin = pkg::patcher_binary().map_err(|e| {
-        format!(
-            "CJS conversion needs the inka-patcher binary: {e}\n  \
-             (build crates/inka-patcher --release with the big-disk cargo home/target, \
-             keep it next to this inka binary, or set INKA_PATCHER)"
-        )
-    })?;
-    let mut cmd = Command::new(&bin);
-    cmd.arg("apply")
-        .arg("--spec")
-        .arg(spec_path)
-        .arg("--node-modules")
-        .arg(nm);
-    pkg::run_ok(&mut cmd, &format!("inka-patcher apply {}", spec_path.display()))?;
-    let kind = fs::read_to_string(spec_path)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
-        .and_then(|v| v.get("type").and_then(Value::as_str).map(str::to_string))
-        .unwrap_or_else(|| "file-patch".to_string());
-    Ok(kind)
-}
-
 /// Write a synthesized bundle-esm spec for auto-conversion into the scratch work
 /// dir (never the user's repo). Returns the spec file path.
 fn write_synthesized_spec(
@@ -1046,7 +981,7 @@ enum CjsPlan {
     /// A curated patch spec exists for this exact name@version — apply it
     /// regardless of classification (dual/ESM-facade packages like ws are
     /// converted on add, not vendored raw).
-    Curated(PathBuf),
+    Curated(crate::patches::SpecMeta),
     /// Automatic bundle-esm fallback for a CJS leaf, carrying its entry file.
     Auto(String),
 }
@@ -1062,9 +997,8 @@ fn plan_conversion(
     version: &str,
 ) -> Result<CjsPlan, String> {
     let root = nm.join(name);
-    let curated = base.join(name).join(version).join("patch.json");
-    if curated.is_file() {
-        return Ok(CjsPlan::Curated(curated));
+    if let Some(spec) = crate::patches::spec_for(base, name, version)? {
+        return Ok(CjsPlan::Curated(spec));
     }
     if !entry_is_commonjs(&root) {
         return Ok(CjsPlan::Skip);
@@ -1147,15 +1081,18 @@ fn scan_dynamic_requires(text: &str) -> usize {
 /// is applied when present (classification-independent); otherwise WS2-1 auto
 /// bundle-esm converts genuine CJS leaves. Returns Some(converted_kind).
 fn convert_if_needed(nm: &Path, name: &str, version: &str) -> Result<Option<String>, String> {
-    let base = default_patches_base();
+    let base = crate::patches::project_base();
     match plan_conversion(&base, nm, name, version)? {
         CjsPlan::Skip => Ok(None),
-        CjsPlan::Curated(spec) => invoke_patcher(&spec, nm).map(Some),
+        CjsPlan::Curated(spec) => {
+            crate::patches::invoke(&spec.path, nm)?;
+            Ok(Some(spec.kind))
+        }
         CjsPlan::Auto(entry) => {
             let root = nm.join(name);
             let work = nm.parent().unwrap_or(nm);
             let spec_path = write_synthesized_spec(work, name, version, &entry)?;
-            invoke_patcher(&spec_path, nm).map_err(|e| {
+            crate::patches::invoke(&spec_path, nm).map_err(|e| {
                 cjs_scaffold_error(name, version, &format!("automatic conversion failed: {e}"))
             })?;
             let out = root.join("esm.js");
@@ -1380,12 +1317,12 @@ fn add_one(force: bool, spec: &AddSpec) {
     //      the patcher is missing: name them all up front with install guidance
     //      (never a per-package mystery, and never a partial install).
     {
-        let base = default_patches_base();
+        let base = crate::patches::project_base();
         let needs: Vec<(String, String)> = to_vendor
             .iter()
             .filter_map(|(name, ver, _why)| {
                 let root = nm.join(name);
-                let curated = base.join(name).join(ver).join("patch.json");
+                let curated = crate::patches::spec_path(&base, name, ver);
                 if curated.is_file() || entry_is_commonjs(&root) {
                     Some((name.clone(), ver.clone()))
                 } else {
@@ -1393,9 +1330,12 @@ fn add_one(force: bool, spec: &AddSpec) {
                 }
             })
             .collect();
-        if !needs.is_empty() && pkg::patcher_binary().is_err() {
+        if !needs.is_empty() && crate::patches::patcher_binary().is_err() {
             let _ = fs::remove_dir_all(&work);
-            fail(&patcher_missing_message(&needs, !curated_specs_discoverable()));
+            fail(&patcher_missing_message(
+                &needs,
+                !crate::patches::project_base_discoverable(),
+            ));
         }
     }
 
@@ -1983,9 +1923,16 @@ mod tests {
             r#"{"name":"dual","version":"1.0.0","exports":{".":{"import":"./index.mjs"}}}"#,
         );
         write_file(&root, "index.mjs", "export const x = 1;\n");
-        write_file(&base, "dual/1.0.0/patch.json", "{}");
+        write_file(
+            &base,
+            "dual/1.0.0/patch.json",
+            r#"{"package":"dual","version":"1.0.0","type":"bundle-esm"}"#,
+        );
         match plan_conversion(&base, &nm, name, "1.0.0").unwrap() {
-            CjsPlan::Curated(p) => assert_eq!(p, base.join("dual").join("1.0.0").join("patch.json")),
+            CjsPlan::Curated(p) => {
+                assert_eq!(p.path, base.join("dual").join("1.0.0").join("patch.json"));
+                assert_eq!(p.kind, "bundle-esm");
+            }
             other => panic!("expected Curated for dual package with a curated spec, got {other:?}"),
         }
         // same ESM shape WITHOUT a curated spec -> Skip (vendored raw)

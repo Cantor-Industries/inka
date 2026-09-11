@@ -33,6 +33,7 @@
 // Discovery order: --seed-manifest -> $INKA_SEED_MANIFEST -> ./seed-manifest.json
 // -> <dir of inka binary>/seed-manifest.json.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -201,108 +202,48 @@ fn write_record(path: &Path, record: &SeedRecord) -> Result<(), String> {
 }
 
 // ---- seed-time package patching (Option C) ---------------------------------
+//
+// Multiple specs for the same package (one per version) may coexist; each
+// installed occurrence is patched with the spec whose exact version matches it
+// (see crate::patches). Specs that match no installed package are skipped with
+// a note.
 
-fn patch_base(patches_flag: Option<&str>, seed_manifest: &Path) -> PathBuf {
-    if let Some(p) = patches_flag {
-        return PathBuf::from(p);
-    }
-    seed_manifest
-        .parent()
-        .map(|d| d.join("patches"))
-        .unwrap_or_else(|| PathBuf::from("patches"))
-}
-
-/// All `patches/<pkg>/<version>/patch.json` specs under a base dir.
-fn discover_patch_specs(base: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(versions) = fs::read_dir(base) else {
-        return out;
-    };
-    for pkg in versions.flatten() {
-        let pkg_dir = pkg.path();
-        if !pkg_dir.is_dir() {
-            continue;
-        }
-        let Ok(ver_dirs) = fs::read_dir(&pkg_dir) else { continue };
-        for v in ver_dirs.flatten() {
-            let spec = v.path().join("patch.json");
-            if spec.is_file() {
-                out.push(spec);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
-pub(crate) fn patcher_binary() -> Result<PathBuf, String> {
-    if let Ok(p) = std::env::var("INKA_PATCHER") {
-        if Path::new(&p).is_file() {
-            return Ok(PathBuf::from(p));
-        }
-        return Err(format!("INKA_PATCHER points to a missing file: {p}"));
-    }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let p = dir.join("inka-patcher");
-            if p.is_file() {
-                return Ok(p);
-            }
-        }
-    }
-    Err(
-        "patch specs exist but no inka-patcher binary found; build it with the big-disk \
-         cargo home/target (cargo build --release -p inka-patcher) and keep it next to \
-         this inka binary (or set INKA_PATCHER)"
-            .into(),
-    )
-}
-
-/// Apply repo-managed patch specs to the scratch node_modules (in place, pre-tar).
-/// Returns the list of applied patches for the record. No specs -> no-op.
+/// Apply repo-managed patch specs to the scratch node_modules (in place,
+/// pre-tar), matching each installed occurrence's exact version. Returns the
+/// list of applied patches (deduped by package@version) for the record.
 fn apply_patches(
     node_modules: &Path,
     seed_manifest: &Path,
     patches_flag: Option<&str>,
 ) -> Result<Vec<PatchRecord>, String> {
-    let base = patch_base(patches_flag, seed_manifest);
-    let specs = discover_patch_specs(&base);
-    if specs.is_empty() {
+    let base = crate::patches::release_base(patches_flag, seed_manifest);
+    let (applies, skipped) = crate::patches::plan_snapshot(&base, node_modules)?;
+    if applies.is_empty() && skipped.is_empty() {
         return Ok(Vec::new());
     }
-    let bin = patcher_binary()?;
+    // Fail fast (before any mutation) when patches must be applied but the
+    // patcher binary is missing.
+    if !applies.is_empty() {
+        crate::patches::patcher_binary()?;
+    }
+
     let mut record = Vec::new();
-    for spec in specs {
-        let name = spec
-            .parent()
-            .and_then(|v| v.parent())
-            .and_then(|p| p.file_name())
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        let mut cmd = Command::new(&bin);
-        cmd.arg("apply")
-            .arg("--spec")
-            .arg(&spec)
-            .arg("--node-modules")
-            .arg(node_modules);
-        run_ok(&mut cmd, &format!("inka-patcher apply {}", spec.display()))?;
-        let raw = fs::read(&spec).map_err(|e| format!("re-read {}: {e}", spec.display()))?;
-        let v: serde_json::Value =
-            serde_json::from_slice(&raw).map_err(|e| format!("parse {}: {e}", spec.display()))?;
-        record.push(PatchRecord {
-            name,
-            version: v
-                .get("version")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            kind: v
-                .get("type")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-        });
+    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
+    for (spec, nm) in &applies {
+        crate::patches::invoke(&spec.path, nm)?;
+        if seen.insert((spec.package.clone(), spec.version.clone())) {
+            record.push(PatchRecord {
+                name: spec.package.clone(),
+                version: spec.version.clone(),
+                kind: spec.kind.clone(),
+            });
+        }
+    }
+    for spec in &skipped {
+        println!(
+            "[inka] snapshot-store: note: {}@{} patch not applied (not installed)",
+            spec.package, spec.version
+        );
     }
     Ok(record)
 }

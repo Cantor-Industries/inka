@@ -11,6 +11,7 @@
 mod build;
 mod config;
 mod embed;
+mod patches;
 mod pkg;
 mod run;
 mod transpile;

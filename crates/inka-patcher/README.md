@@ -30,6 +30,13 @@ Curated specs live under `patches/<pkg>/<version>/patch.json` (repo root):
 - `bundle-esm` — rolldown-bundle `entry` to `output` with `external`/`neutralizeEnv`.
 - `file-patch` — truncate `file` at `deleteFromMarker`.
 
+Multiple versions of the same package may coexist (one `patches/<pkg>/<version>/`
+dir each). The caller selects the spec whose `version` matches the installed
+package exactly; `inka internal snapshot-store` patches **every** occurrence in
+the resolved `node_modules` tree (hoisted and nested) and skips — with a note —
+specs that match no installed package. The patcher itself still refuses a spec
+whose `version` does not match the package it is pointed at.
+
 ## Invocation
 
 `inka-patcher apply --spec <patch.json> --node-modules <dir>` applies the patch

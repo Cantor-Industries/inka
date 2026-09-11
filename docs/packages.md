@@ -48,7 +48,10 @@ inka remove nanoid           # un-vendor (+ prune orphaned vendored deps)
 Packages whose import-reachable entry is CommonJS are converted to engine-viable
 ESM when vendored/snapshotted. Curated specs live under
 `patches/<pkg>/<version>/patch.json` and are applied by the sibling
-`inka-patcher` binary; hard cases error with the exact spec to create.
+`inka-patcher` binary; hard cases error with the exact spec to create. Specs for
+several versions of the same package may coexist: the exact-version spec matching
+each installed copy is applied, and the store snapshot patches every hoisted and
+nested occurrence (specs that match nothing are skipped with a note).
 
 ## Inspecting
 
