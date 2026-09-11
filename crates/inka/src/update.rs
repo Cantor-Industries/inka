@@ -163,12 +163,12 @@ fn installed_toolchain_version(dir: &Path) -> String {
 /// Fetch `versions.json` and self-update the installer-managed toolchain when a
 /// newer release is available. No-op (Ok) when there is no `VERSION` marker or
 /// the release carries no `toolchain` metadata. Never downgrades.
-fn update_toolchain(base: &str, insecure: bool) -> Result<(), String> {
+fn update_toolchain(base: &str, insecure: bool) -> Result<bool, String> {
     let Some(dir) = toolchain_dir() else {
-        return Ok(());
+        return Ok(false);
     };
     if !dir.join("VERSION").is_file() {
-        return Ok(());
+        return Ok(false);
     }
     let installed = installed_toolchain_version(&dir);
 
@@ -177,22 +177,22 @@ fn update_toolchain(base: &str, insecure: bool) -> Result<(), String> {
     let v: Value = serde_json::from_str(&versions_text)
         .map_err(|e| format!("invalid versions.json from {base}: {e}"))?;
     let Some(tc) = v.get("toolchain") else {
-        return Ok(());
+        return Ok(false);
     };
     let latest = tc.get("version").and_then(Value::as_str);
     let archive = tc.get("archive").and_then(Value::as_str);
     let (Some(latest), Some(archive)) = (latest, archive) else {
-        return Ok(());
+        return Ok(false);
     };
 
     if let (Some(i), Some(l)) = (parse_version(&installed), parse_version(latest)) {
         if i >= l {
             println!("[inka] toolchain {installed} is current (latest {latest})");
-            return Ok(());
+            return Ok(false);
         }
     } else if installed == latest {
         println!("[inka] toolchain {installed} is current (latest {latest})");
-        return Ok(());
+        return Ok(false);
     }
 
     println!("[inka] updating toolchain {installed} -> {latest}");
@@ -240,7 +240,7 @@ fn update_toolchain(base: &str, insecure: bool) -> Result<(), String> {
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
     let _ = fs::remove_dir_all(&tmp);
     println!("[inka] installed toolchain {latest}");
-    Ok(())
+    Ok(true)
 }
 
 /// Replace the toolchain binaries and `patches/` in `dir` from an extracted
@@ -299,14 +299,21 @@ fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
     }
 }
 
-/// Best-effort toolchain self-update used by both update paths.
-fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) {
+/// Best-effort toolchain self-update used by both update paths. Returns whether
+/// the toolchain was actually replaced.
+fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) -> bool {
     if mode == ToolchainMode::Skip {
-        return;
+        return false;
     }
-    if let Err(e) = update_toolchain(base, insecure) {
-        eprintln!("[inka] warning: toolchain not updated: {e}");
-        eprintln!("[inka]   the engine update continues; re-run install.sh to update the toolchain");
+    match update_toolchain(base, insecure) {
+        Ok(changed) => changed,
+        Err(e) => {
+            eprintln!("[inka] warning: toolchain not updated: {e}");
+            eprintln!(
+                "[inka]   the engine update continues; re-run install.sh to update the toolchain"
+            );
+            false
+        }
     }
 }
 
@@ -343,7 +350,7 @@ fn update_latest(
     components: &Components,
     toolchain: ToolchainMode,
 ) {
-    maybe_update_toolchain(base, insecure, toolchain);
+    let mut changed = maybe_update_toolchain(base, insecure, toolchain);
     if toolchain == ToolchainMode::Only {
         return;
     }
@@ -398,6 +405,7 @@ fn update_latest(
                 insecure,
                 "inka_runtime",
             );
+            changed = true;
         } else if let Some(i) = installed_runtime {
             println!("[inka] runtime {i} is current (latest {latest_runtime})");
         }
@@ -408,6 +416,7 @@ fn update_latest(
             if let Some(res) = latest_resolver {
                 let name = format!("{RESOLVER_PREFIX}{res}{RESOLVER_SUFFIX}");
                 install_file(base, &name, &target, None, insecure, "resolver");
+                changed = true;
             }
         } else if let Some(i) = installed_resolver {
             println!("[inka] resolver {i} is current");
@@ -415,10 +424,10 @@ fn update_latest(
     }
 
     if components.store {
-        sync_store(base);
+        changed |= sync_store(base);
     }
 
-    if !actions.runtime && !actions.resolver {
+    if !changed {
         println!("[inka] up to date");
     }
 }
@@ -477,34 +486,44 @@ fn install_file(
 
 /// Best-effort store sync: fetch the release's store record; if its snapshot
 /// identity differs from the local store, replace `node_modules` and record.
-fn sync_store(base: &str) {
+/// Returns whether the store changed.
+fn sync_store(base: &str) -> bool {
     let store = match env::var_os("INKA_STORE") {
         Some(s) => PathBuf::from(s),
         None => crate::default_store_dir(),
     };
     let record = match crate::pkg::fetch_store_record(base) {
         Ok(r) => r,
-        Err(_) => return, // base ships no store snapshot
+        Err(_) => {
+            println!("[inka] no package store snapshot at {base}; skipping store");
+            return false;
+        }
     };
     let remote = crate::pkg::record_sha(&record);
     let local = crate::pkg::store_record_sha(&store);
     if !remote.is_empty() && remote == local {
         println!("[inka] store is current");
-        return;
+        return false;
     }
     let tbytes = match crate::pkg::fetch_store_tar(base, &record) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("[inka] warning: store snapshot not applied: {e}");
-            return;
+            return false;
         }
     };
     match crate::pkg::apply_store_record(&store, &record, &tbytes) {
-        Ok(n) => println!(
-            "[inka] store updated ({n} package(s)) into {}",
-            store.display()
-        ),
-        Err(e) => eprintln!("[inka] warning: store snapshot not applied: {e}"),
+        Ok(n) => {
+            println!(
+                "[inka] store updated ({n} package(s)) into {}",
+                store.display()
+            );
+            true
+        }
+        Err(e) => {
+            eprintln!("[inka] warning: store snapshot not applied: {e}");
+            false
+        }
     }
 }
 
