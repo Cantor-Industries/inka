@@ -24,7 +24,7 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 | Piece | Where it lives | How it updates |
 |---|---|---|
 | Toolchain (`inka`, `inka-launcher`, `inka-patcher`, `patches/`) | `<prefix>/lib/inka`, shimmed at `<prefix>/bin/inka` | `install.sh`, then `inka update` |
-| `libinka_runtime-<v>.so`, `libinka_resolver-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`), fallback `/usr/local/lib/inka-runtime` | `inka update` |
+| `libinka_runtime-<v>.so`, `libinka_resolver-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) | `inka update` |
 | default store (`node_modules` + record) | `~/.local/share/inka/store` (`INKA_STORE`) | `inka update` (sha-gated) |
 
 ## Release assets

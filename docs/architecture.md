@@ -10,7 +10,7 @@ machine and loaded at run time.
 |---|---|---|
 | Launcher | small Rust program (`crates/inka-launcher`) | copied into every artifact |
 | Manifest | a few text lines | appended inside the artifact |
-| Runtime | `libinka_runtime-<v>.so` — the Deno engine (`crates/inka-runtime`) | system `/usr/local/lib/inka-runtime` or per-user `~/.local/share/inka/runtime` |
+| Runtime | `libinka_runtime-<v>.so` — the Deno engine (`crates/inka-runtime`) | per-user `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) |
 | Resolver | `libinka_resolver-<v>.so` — package resolution | alongside the runtime |
 
 The runtime tuple's version is the pinned `deno_runtime` base (`0.xxx.0`) plus an
@@ -57,11 +57,10 @@ deny-by-default unless an allow source was baked at build time (see
 
 ## Runtime selection
 
-The launcher searches `$INKA_RUNTIME_HOME`, `~/.local/share/inka/runtime`, and
-`/usr/local/lib/inka-runtime`, then picks the **newest** tuple that satisfies the
-manifest's `runtime=` floor and `tested-against=` cap. `$INKA_RUNTIME` forces a
-specific file. No match → exit 3. Updating the machine's runtime updates every
-artifact at once.
+The launcher searches `$INKA_RUNTIME_HOME` and `~/.local/share/inka/runtime`,
+then picks the **newest** tuple that satisfies the manifest's `runtime=` floor
+and `tested-against=` cap. `$INKA_RUNTIME` forces a specific file. No match →
+exit 3. Updating the machine's runtime updates every artifact at once.
 
 ## C ABI
 

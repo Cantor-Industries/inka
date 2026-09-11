@@ -60,9 +60,6 @@ fn usage() -> ! {
     std::process::exit(2);
 }
 
-/// Machine-wide runtime dir (legacy system location; per-user installs use XDG).
-pub(crate) const SYSTEM_RUNTIME_DIR: &str = "/usr/local/lib/inka-runtime";
-
 /// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,
 /// else the current directory.
 fn data_root(home: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>) -> PathBuf {
@@ -101,27 +98,19 @@ pub(crate) fn default_store_dir() -> PathBuf {
     inka_data_dir().join("store")
 }
 
-fn is_root_now() -> bool {
-    unsafe { libc::geteuid() == 0 }
-}
-
 /// Where a runtime install/update writes when `--home` is not given:
-/// `INKA_RUNTIME_HOME` -> system dir (root) -> per-user XDG runtime dir.
+/// `INKA_RUNTIME_HOME` else the per-user XDG runtime dir.
 pub(crate) fn default_install_dir() -> PathBuf {
     if let Ok(h) = env::var("INKA_RUNTIME_HOME") {
         if !h.is_empty() {
             return PathBuf::from(h);
         }
     }
-    if is_root_now() {
-        PathBuf::from(SYSTEM_RUNTIME_DIR)
-    } else {
-        user_runtime_dir()
-    }
+    user_runtime_dir()
 }
 
 /// Directories searched for installed runtime/resolver `.so` files, in order:
-/// `INKA_RUNTIME_HOME`, per-user XDG runtime dir, then the system dir.
+/// `INKA_RUNTIME_HOME`, then the per-user XDG runtime dir.
 pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     if let Ok(h) = env::var("INKA_RUNTIME_HOME") {
@@ -132,10 +121,6 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
     let user = user_runtime_dir();
     if !out.contains(&user) {
         out.push(user);
-    }
-    let sys = PathBuf::from(SYSTEM_RUNTIME_DIR);
-    if !out.contains(&sys) {
-        out.push(sys);
     }
     out
 }

@@ -217,7 +217,6 @@ fn runtime_dirs() -> Vec<PathBuf> {
     if let Some(d) = xdg_data_root() {
         out.push(d.join("inka/runtime"));
     }
-    out.push(PathBuf::from("/usr/local/lib/inka-runtime"));
     out
 }
 

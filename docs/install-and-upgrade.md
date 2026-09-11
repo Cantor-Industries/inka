@@ -112,8 +112,7 @@ The base defaults to the GitHub latest-release URL and is overridable with
 | Runtime/resolver | `~/.local/share/inka/runtime` | `INKA_RUNTIME_HOME` |
 | Default package store | `~/.local/share/inka/store` | `INKA_STORE` |
 
-`~/.local/share` is `$XDG_DATA_HOME` when set. Runtime selection also falls back
-to `/usr/local/lib/inka-runtime`.
+`~/.local/share` is `$XDG_DATA_HOME` when set.
 
 ## Building from source
 

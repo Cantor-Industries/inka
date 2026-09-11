@@ -22,9 +22,8 @@ runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
 ## Common problems
 
 **"no runtime installed" / exit 3.** Run `inka update`. The launcher searches
-`$INKA_RUNTIME_HOME`, `~/.local/share/inka/runtime`, and
-`/usr/local/lib/inka-runtime`. If the artifact pins `tested-against`, a newer
-runtime is not selected — install one within range.
+`$INKA_RUNTIME_HOME` and `~/.local/share/inka/runtime`. If the artifact pins
+`tested-against`, a newer runtime is not selected — install one within range.
 
 **`NotCapable` / permission errors.** inka artifacts are deny-by-default. Grant
 access with `-A`, `-P`, or granular `--allow-*` (see [Permissions](permissions.md)).
