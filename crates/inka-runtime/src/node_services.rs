@@ -10,6 +10,7 @@
 //   - `NodeExtInitServices` field set,
 //   - `NodeResolver::new` + `NodeResolverOptions`,
 //   - `PackageJsonResolver::new` / `NodeResolutionSys::new`,
+//   - `CjsCodeAnalyzer` / `CjsModuleExportAnalyzer` / `NodeCodeTranslator`,
 //   - the `deno_node` re-export path (`deno_runtime::deno_node`).
 //
 // Policy (which files, vendored -> store -> builtins precedence, ESM vs CJS
@@ -28,6 +29,11 @@ use deno_runtime::deno_node::{
     NodeExtInitServices, NodeRequireLoader, NodeRequireLoaderRc, NodeResolver, NodeResolverRc,
 };
 use deno_runtime::deno_permissions::PermissionsContainer;
+use node_resolver::analyze::{
+    CjsAnalysis, CjsAnalysisExports, CjsCodeAnalyzer, CjsModuleExportAnalyzer,
+    CjsModuleExportAnalyzerRc, EsmAnalysisMode, NodeCodeTranslator, NodeCodeTranslatorMode,
+    NodeCodeTranslatorRc, ResolvedCjsAnalysis,
+};
 use node_resolver::cache::NodeResolutionSys;
 use node_resolver::errors::{
     PackageFolderResolveError, PackageFolderResolveErrorKind, PackageJsonLoadError,
@@ -57,6 +63,15 @@ impl StoreRoots {
             .flatten()
             .any(|root| path.starts_with(root))
     }
+
+    /// Under the store or the vendored package roots (node_modules-like, where
+    /// a `.js` without an explicit `"type"` defaults to CommonJS).
+    fn in_package_root(&self, path: &Path) -> bool {
+        [&self.store, &self.vendor]
+            .into_iter()
+            .flatten()
+            .any(|root| path.starts_with(root))
+    }
 }
 
 /// The npm package name from a bare specifier (`@scope/name` or `name`).
@@ -71,6 +86,26 @@ fn package_name(spec: &str) -> String {
         }
     } else {
         spec.split('/').next().unwrap_or(spec).to_string()
+    }
+}
+
+fn extension(path: &Path) -> Option<String> {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase())
+}
+
+/// `require()` semantics: a `.js` without `"type": "module"` is CJS.
+fn require_is_maybe_cjs(pkg_json: &PackageJsonResolver<RealSys>, path: &Path) -> bool {
+    match extension(path).as_deref() {
+        Some("cjs" | "cts") => true,
+        Some("mjs" | "mts" | "json") => false,
+        _ => pkg_json
+            .get_closest_package_json(path)
+            .ok()
+            .flatten()
+            .map(|pkg| pkg.typ != "module")
+            .unwrap_or(true),
     }
 }
 
@@ -157,28 +192,6 @@ struct StoreRequireLoader {
     pkg_json: PackageJsonResolverRc<RealSys>,
 }
 
-impl StoreRequireLoader {
-    /// `.cjs`/`.cts` are CJS; `.mjs`/`.mts`/`.json` are not; other extensions
-    /// follow the nearest `package.json` `"type"` (absent/non-module => CJS).
-    fn is_cjs(&self, specifier: &Url) -> bool {
-        let Ok(path) = specifier.to_file_path() else {
-            return false;
-        };
-        let ext = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.to_ascii_lowercase());
-        match ext.as_deref() {
-            Some("cjs" | "cts") => true,
-            Some("mjs" | "mts" | "json") => false,
-            _ => match self.pkg_json.get_closest_package_json(&path) {
-                Ok(Some(pkg)) => pkg.typ != "module",
-                _ => true,
-            },
-        }
-    }
-}
-
 impl NodeRequireLoader for StoreRequireLoader {
     fn ensure_read_permission<'a>(
         &self,
@@ -202,49 +215,211 @@ impl NodeRequireLoader for StoreRequireLoader {
     }
 
     fn is_maybe_cjs(&self, specifier: &Url) -> Result<bool, PackageJsonLoadError> {
-        Ok(self.is_cjs(specifier))
+        Ok(specifier
+            .to_file_path()
+            .map(|p| require_is_maybe_cjs(&self.pkg_json, &p))
+            .unwrap_or(false))
     }
 
     fn is_maybe_cjs_from_require(&self, specifier: &Url) -> Result<bool, PackageJsonLoadError> {
-        Ok(self.is_cjs(specifier))
+        self.is_maybe_cjs(specifier)
     }
 }
 
-/// Build the node services deno_node needs, backed by the inka store/vendored
-/// roots. This is the only constructor the engine calls.
-pub(crate) fn build_node_services(
+/// Static CJS export analysis for the ESM facade, using `deno_ast`'s
+/// `cjs-module-lexer`-equivalent (`ParsedSource::analyze_cjs`). Parses the
+/// source so an ESM file in a package root is passed through untouched.
+struct InkaCjsCodeAnalyzer {
     roots: StoreRoots,
-) -> NodeExtInitServices<StoreNpmChecker, StoreFolderResolver, RealSys> {
-    let sys = RealSys;
-    let pkg_json: PackageJsonResolverRc<RealSys> =
-        new_rc(PackageJsonResolver::new(sys.clone(), None));
-    let node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys> = new_rc(
-        NodeResolver::new(
-            StoreNpmChecker {
+}
+
+#[async_trait::async_trait(?Send)]
+impl CjsCodeAnalyzer for InkaCjsCodeAnalyzer {
+    async fn analyze_cjs<'a>(
+        &self,
+        specifier: &Url,
+        maybe_source: Option<Cow<'a, str>>,
+        _esm_analysis_mode: EsmAnalysisMode,
+    ) -> Result<CjsAnalysis<'a>, JsErrorBox> {
+        let path = specifier
+            .to_file_path()
+            .map_err(|_| JsErrorBox::generic(format!("not a file URL: {specifier}")))?;
+        if !self.roots.contains(&path) {
+            return Err(JsErrorBox::generic(format!(
+                "refusing to analyze a CJS module outside the store/vendored tree: {specifier}"
+            )));
+        }
+        let source = match maybe_source {
+            Some(source) => source.into_owned(),
+            None => std::fs::read_to_string(&path).map_err(JsErrorBox::from_err)?,
+        };
+        let media_type = deno_ast::MediaType::from_path(&path);
+        let parsed = deno_ast::parse_program(deno_ast::ParseParams {
+            specifier: specifier.clone(),
+            text: source.clone().into(),
+            media_type,
+            capture_tokens: false,
+            scope_analysis: false,
+            maybe_syntax: None,
+        })
+        .map_err(|e| {
+            JsErrorBox::generic(format!("failed to parse CJS module {specifier}: {e}"))
+        })?;
+        if !parsed.compute_is_script() {
+            // It's an ES module; hand it back unchanged.
+            return Ok(CjsAnalysis::Esm(Cow::Owned(source), None));
+        }
+        let analysis = parsed.analyze_cjs();
+        Ok(CjsAnalysis::Cjs(CjsAnalysisExports {
+            exports: analysis.exports,
+            reexports: analysis.reexports,
+            member_reexports: Vec::new(),
+        }))
+    }
+
+    async fn analyze_cjs_member_props<'a>(
+        &self,
+        _specifier: &Url,
+        _maybe_source: Option<Cow<'a, str>>,
+        _member: &str,
+    ) -> Result<Option<Vec<String>>, JsErrorBox> {
+        Ok(None)
+    }
+}
+
+type InkaAnalyzer = CjsModuleExportAnalyzerRc<
+    InkaCjsCodeAnalyzer,
+    StoreNpmChecker,
+    DenoIsBuiltInNodeModuleChecker,
+    StoreFolderResolver,
+    RealSys,
+>;
+
+type InkaTranslator = NodeCodeTranslatorRc<
+    InkaCjsCodeAnalyzer,
+    StoreNpmChecker,
+    DenoIsBuiltInNodeModuleChecker,
+    StoreFolderResolver,
+    RealSys,
+>;
+
+/// Node/CJS services the engine needs. `NodeServices::new` also returns the
+/// `NodeExtInitServices` value to hand to `WorkerServiceOptions`.
+pub(crate) type InkaNodeServices =
+    NodeExtInitServices<StoreNpmChecker, StoreFolderResolver, RealSys>;
+
+#[derive(Clone)]
+pub(crate) struct NodeServices {
+    roots: StoreRoots,
+    pkg_json: PackageJsonResolverRc<RealSys>,
+    analyzer: InkaAnalyzer,
+    translator: InkaTranslator,
+}
+
+impl NodeServices {
+    pub(crate) fn new(roots: StoreRoots) -> (Self, InkaNodeServices) {
+        let sys = RealSys;
+        let pkg_json: PackageJsonResolverRc<RealSys> =
+            new_rc(PackageJsonResolver::new(sys.clone(), None));
+        let checker = StoreNpmChecker {
+            roots: roots.clone(),
+        };
+        let folder = StoreFolderResolver {
+            roots: roots.clone(),
+        };
+        let node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys> = new_rc(
+            NodeResolver::new(
+                checker.clone(),
+                DenoIsBuiltInNodeModuleChecker,
+                folder.clone(),
+                pkg_json.clone(),
+                NodeResolutionSys::new(sys.clone(), None),
+                NodeResolverOptions {
+                    conditions: NodeConditionOptions::default(),
+                    is_browser_platform: false,
+                    bundle_mode: false,
+                    typescript_version: None,
+                },
+            ),
+        );
+        let analyzer: InkaAnalyzer = new_rc(CjsModuleExportAnalyzer::new(
+            InkaCjsCodeAnalyzer {
                 roots: roots.clone(),
             },
-            DenoIsBuiltInNodeModuleChecker,
-            StoreFolderResolver {
-                roots: roots.clone(),
-            },
+            checker,
+            node_resolver.clone(),
+            folder,
             pkg_json.clone(),
-            NodeResolutionSys::new(sys.clone(), None),
-            NodeResolverOptions {
-                conditions: NodeConditionOptions::default(),
-                is_browser_platform: false,
-                bundle_mode: false,
-                typescript_version: None,
+            sys.clone(),
+        ));
+        let translator: InkaTranslator = new_rc(NodeCodeTranslator::new(
+            analyzer.clone(),
+            NodeCodeTranslatorMode::ModuleLoader,
+        ));
+        let node_require_loader: NodeRequireLoaderRc = Rc::new(StoreRequireLoader {
+            roots: roots.clone(),
+            pkg_json: pkg_json.clone(),
+        });
+        let services = NodeExtInitServices {
+            node_require_loader,
+            node_resolver,
+            pkg_json_resolver: pkg_json.clone(),
+            sys,
+        };
+        (
+            Self {
+                roots,
+                pkg_json,
+                analyzer,
+                translator,
             },
-        ),
-    );
-    let node_require_loader: NodeRequireLoaderRc = Rc::new(StoreRequireLoader {
-        roots,
-        pkg_json: pkg_json.clone(),
-    });
-    NodeExtInitServices {
-        node_require_loader,
-        node_resolver,
-        pkg_json_resolver: pkg_json,
-        sys,
+            services,
+        )
+    }
+
+    /// Whether a module served to the ESM loader *might* be CommonJS. App code
+    /// defaults to ESM; package roots default to CJS. The analyzer makes the
+    /// final call by parsing (so an ESM file in a package root passes through).
+    pub(crate) fn maybe_cjs(&self, path: &Path) -> bool {
+        match extension(path).as_deref() {
+            Some("cjs" | "cts") => true,
+            Some("mjs" | "mts" | "json") => false,
+            _ => match self
+                .pkg_json
+                .get_closest_package_json(path)
+                .ok()
+                .flatten()
+                .map(|pkg| pkg.typ.clone())
+            {
+                Some(t) if t == "module" => false,
+                Some(t) if t == "commonjs" => true,
+                _ => self.roots.in_package_root(path),
+            },
+        }
+    }
+
+    /// If `source` is CommonJS, return the equivalent ESM facade; `None` when
+    /// it is already an ES module (serve the original).
+    pub(crate) async fn cjs_facade(
+        &self,
+        specifier: &Url,
+        source: String,
+    ) -> Result<Option<String>, String> {
+        let resolved = self
+            .analyzer
+            .analyze_all_exports(specifier, Some(Cow::Borrowed(&source)), None)
+            .await
+            .map_err(|e| e.to_string())?;
+        match resolved {
+            ResolvedCjsAnalysis::Esm(_) => Ok(None),
+            ResolvedCjsAnalysis::Cjs(_) => {
+                let out = self
+                    .translator
+                    .translate_cjs_to_esm(specifier, Some(Cow::Owned(source)))
+                    .await
+                    .map_err(|e| e.to_string())?;
+                Ok(Some(out.into_owned()))
+            }
+        }
     }
 }

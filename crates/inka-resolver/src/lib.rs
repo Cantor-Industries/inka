@@ -417,59 +417,14 @@ fn store_bare_top(store: &Path, spec: &str) -> Result<PathBuf, String> {
     ))
 }
 
-/// ESM-ness of a resolved store file. A `.js` file selected through the `import`
-/// or `node` condition of an `exports` map is ESM regardless of the package's
-/// `"type"` (the dual-package dist/esm pattern), so we must know the selection
-/// context, not just the extension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EsmContext {
-    /// Selected via the `import`/`node` condition: ESM by context.
-    ByCondition,
-    /// Selected via a plain-string/`default` target or legacy `main`: classify
-    /// by file extension + package `"type"`.
-    Classify,
-}
-
-/// CommonJS message: the engine is ESM-only and cannot run `require`/CJS files.
-fn cjs_error(pkg_name: &str, file: &Path) -> String {
-    format!(
-        "'{}' (package '{pkg_name}') is CommonJS, which this engine cannot run; \
-         vendor the patched ESM store (`inka internal snapshot-store` applies its `patches/`) \
-         or use an ESM alternative",
-        file.display()
-    )
-}
-
-/// Reject files the engine cannot serve: CommonJS (and anything not ESM-typed).
-/// `.cjs` is rejected even when reached via an `import` condition; `.mjs`/`.json`
-/// are always fine; a `.js`/other file is fine only when ESM-by-condition or the
-/// package declares `"type":"module"`.
-fn ensure_esm(pkg: &Value, file: &Path, ctx: EsmContext) -> Result<(), String> {
-    let name = pkg
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("<unknown>");
-    match file.extension().and_then(|e| e.to_str()).unwrap_or("") {
-        "cjs" => Err(cjs_error(name, file)),
-        "mjs" | "json" => Ok(()),
-        _ => {
-            if ctx == EsmContext::ByCondition {
-                return Ok(());
-            }
-            let is_module = pkg.get("type").and_then(Value::as_str) == Some("module");
-            if is_module {
-                Ok(())
-            } else {
-                Err(cjs_error(name, file))
-            }
-        }
-    }
-}
-
-fn exports_target(exports: &Value, subpath: &str) -> Result<(String, EsmContext), String> {
-    fn pick_conditions(v: &Value) -> Result<(String, EsmContext), String> {
+/// Pick the export target for `subpath` from a package's `exports` value.
+/// Prefer ESM-capable conditions in a fixed priority (import > node > default)
+/// regardless of key ordering. CommonJS targets are returned as-is: the engine
+/// serves a CJS->ESM facade for them, so the resolver no longer classifies.
+fn exports_target(exports: &Value, subpath: &str) -> Result<String, String> {
+    fn pick_conditions(v: &Value) -> Result<String, String> {
         match v {
-            Value::String(s) => Ok((s.clone(), EsmContext::Classify)),
+            Value::String(s) => Ok(s.clone()),
             Value::Array(items) => {
                 for item in items {
                     if let Ok(x) = pick_conditions(item) {
@@ -479,26 +434,12 @@ fn exports_target(exports: &Value, subpath: &str) -> Result<(String, EsmContext)
                 Err("no usable export target".to_string())
             }
             Value::Object(map) => {
-                // Prefer the first usable ESM condition in a fixed priority
-                // (import > node > default) regardless of key ordering — some
-                // serializers sort keys, and we never want `default` (often the
-                // CJS build) to beat an explicit `import` target.
                 for cond in EXPORT_CONDITIONS {
                     if let Some(val) = map.get(cond) {
-                        let (target, _) = pick_conditions(val)?;
-                        let ctx = if cond == "import" || cond == "node" {
-                            EsmContext::ByCondition
-                        } else {
-                            EsmContext::Classify
-                        };
-                        return Ok((target, ctx));
+                        return pick_conditions(val);
                     }
                 }
-                Err(
-                    "package has no import/default export target \
-                     (CommonJS-only packages are not supported)"
-                        .to_string(),
-                )
+                Err("package has no import/default export target".to_string())
             }
             _ => Err("malformed exports target".to_string()),
         }
@@ -524,8 +465,7 @@ fn exports_target(exports: &Value, subpath: &str) -> Result<(String, EsmContext)
                 if let Some(star) = k.strip_suffix('*') {
                     let prefix = star.strip_prefix("./").unwrap_or(star);
                     if let Some(rem) = sub.strip_prefix(prefix) {
-                        let (t, ctx) = pick_conditions(v)?;
-                        hit = Some((t.replace('*', rem), ctx));
+                        hit = Some(pick_conditions(v)?.replace('*', rem));
                         break;
                     }
                 }
@@ -585,11 +525,8 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
         .map_err(|e| format!("invalid package.json in {}: {e}", pkg_json_path.display()))?;
     let sub = subpath.unwrap_or("").trim_start_matches("./");
 
-    let (target, ctx) = match pkg.get("exports") {
-        Some(Value::Null) | None => (
-            legacy_package_target(pkg_root, &pkg, sub)?,
-            EsmContext::Classify,
-        ),
+    let target = match pkg.get("exports") {
+        Some(Value::Null) | None => legacy_package_target(pkg_root, &pkg, sub)?,
         Some(exports) => exports_target(exports, sub)?,
     };
     let target = target.trim_start_matches("./");
@@ -607,7 +544,6 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
             file.display()
         ));
     }
-    ensure_esm(&pkg, &file, ctx)?;
     Ok(file)
 }
 
@@ -859,8 +795,10 @@ mod tests {
         d
     }
 
+    // The resolver returns CJS entries as files; the engine serves an ESM
+    // facade for them (see crates/inka-runtime/src/node_services.rs).
     #[test]
-    fn rejects_legacy_cjs_main() {
+    fn serves_legacy_cjs_main() {
         let tmp = fresh_store();
         seed_pkg(
             &tmp,
@@ -870,14 +808,14 @@ mod tests {
         );
         let d = resolve(Some(&tmp), "file:///a/main.ts", "legacycjs");
         assert!(
-            matches!(&d, Decision::Error(m) if m.contains("CommonJS")),
+            matches!(&d, Decision::File(p) if p.ends_with("legacycjs/index.js")),
             "got {d:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
-    fn rejects_default_only_cjs_build_even_with_type_missing() {
+    fn serves_default_only_cjs_build() {
         let tmp = fresh_store();
         // exports object is NOT a subpath map: only a `default` (CJS) target.
         seed_pkg(
@@ -891,7 +829,7 @@ mod tests {
         );
         let d = resolve(Some(&tmp), "file:///a/main.ts", "cjsonly");
         assert!(
-            matches!(&d, Decision::Error(m) if m.contains("CommonJS")),
+            matches!(&d, Decision::File(p) if p.ends_with("cjsonly/index.cjs")),
             "got {d:?}"
         );
         let _ = std::fs::remove_dir_all(&tmp);
