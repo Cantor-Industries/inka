@@ -14,6 +14,10 @@
 # usage: smoke.sh <staging-dir>
 set -euo pipefail
 
+# Absolute path to this script's directory: smoke.sh `cd`s around below, so a
+# relative `dirname "${BASH_SOURCE[0]}"` would not resolve afterwards.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 STAGE="$(cd "$1" && pwd)"
 [ -x "$STAGE/inka" ] || { echo "error: no inka binary in $STAGE" >&2; exit 1; }
 [ -f "$STAGE/install.sh" ] || { echo "error: no install.sh in $STAGE" >&2; exit 1; }
@@ -118,6 +122,6 @@ case "$out" in
 esac
 
 echo "== runtime CJS/ESM contract matrix =="
-bash "$(dirname "${BASH_SOURCE[0]}")/runtime-matrix.sh" "$INKA" "$INKA_STORE"
+bash "$SCRIPT_DIR/runtime-matrix.sh" "$INKA" "$INKA_STORE"
 
 echo "smoke: OK"
