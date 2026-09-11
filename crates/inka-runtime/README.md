@@ -27,6 +27,28 @@ disabled. Reads a few env vars set by the launcher/CLI: `INKA_STORE`,
 `INKA_VENDOR`, `INKA_RESOLVER`, and `INKA_PRECOMPILED` (serve an archive's
 already-transpiled TS as JS).
 
+## CommonJS / node services
+
+`node_services.rs` is the **single seam** over Deno's `deno_node`/`node_resolver`
+machinery. It backs Deno's native CJS loader with the inka store:
+
+- `require()` runs natively (CJS→CJS, Node builtins, nested deps, cycles),
+- ESM `import` of a CJS package is served as an ESM facade (default plus
+  statically-detected named exports) via `node_resolver::analyze`,
+- `require()` of an ESM package returns the namespace.
+
+Classification: app code defaults to ESM; `.js` in the store/vendored roots
+defaults to CJS; `.cjs`/`.cts` are CJS; `.mjs`/`.mts`/`.json` are not. The
+analyzer parses the source, so an ESM file inside a package root (e.g. a patched
+`esm.js`) passes through unchanged.
+
+## Tuple updates
+
+The Deno crates are not a stable API, so the runtime pins them exactly
+(`deno_runtime = "=0.266.0"` and friends) and touches them only through the
+`node_services.rs` seam and `build.rs`. To bump a tuple, see
+[`docs/runtime-tuple-update.md`](../../docs/runtime-tuple-update.md).
+
 ## Build (heavy)
 
 This pulls the full Deno/V8 tree and a one-time snapshot build; point cargo at a
