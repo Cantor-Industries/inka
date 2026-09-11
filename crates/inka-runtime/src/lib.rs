@@ -7,7 +7,6 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use deno_runtime::deno_core::url::Url;
 use deno_runtime::deno_core::{
     ModuleCodeString, ModuleLoadOptions, ModuleLoadResponse, ModuleLoader, ModuleName,
     ModuleResolveResponse, ModuleSource, ModuleSourceCode, ModuleSpecifier, ModuleType,
@@ -24,8 +23,6 @@ use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use deno_runtime::transpile::maybe_transpile_source;
 use deno_runtime::{FeatureChecker, WorkerLogLevel};
 
-use node_resolver::errors;
-use node_resolver::{InNpmPackageChecker, NpmPackageFolderResolver, UrlOrPathRef};
 use deno_error::JsErrorBox;
 use sys_traits::impls::RealSys;
 
@@ -39,6 +36,8 @@ static STARTUP_SNAPSHOT: &[u8] =
 mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
 }
+
+mod node_services;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -415,47 +414,22 @@ fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox
     })
 }
 
-// ---- npm/node trait slots --------------------------------------------------
-// This build ships the full Deno.* / Web surface but no `node:`/`npm:` module
-// resolution. The generic slots below are required by MainWorker's API and are
-// never invoked when node_services is None.
+// ---- npm/node services -----------------------------------------------------
+// The store-backed node services live in `node_services` (the single seam over
+// Deno's `deno_node`/`node_resolver` API). `WorkerServiceOptions` still needs
+// the checker/resolver generic parameters even though the concrete values are
+// built inside that module.
 
-#[derive(Clone, Debug)]
-struct NoNpm;
-
-impl InNpmPackageChecker for NoNpm {
-    fn in_npm_package(&self, _specifier: &Url) -> bool {
-        false
-    }
-}
-
-#[derive(Clone, Debug)]
-struct NoNpmFolder;
-
-impl NpmPackageFolderResolver for NoNpmFolder {
-    fn resolve_package_folder_from_package(
-        &self,
-        _specifier: &str,
-        _referrer: &UrlOrPathRef,
-    ) -> Result<PathBuf, errors::PackageFolderResolveError> {
-        unreachable!("npm package resolution is not supported in this inka runtime build")
-    }
-
-    fn resolve_types_package_folder(
-        &self,
-        _types_package_name: &str,
-        _maybe_package_version: Option<&deno_semver::Version>,
-        _maybe_referrer: Option<&UrlOrPathRef>,
-    ) -> Option<PathBuf> {
-        None
-    }
-}
-
-type DrtServices = WorkerServiceOptions<NoNpm, NoNpmFolder, RealSys>;
+type DrtServices = WorkerServiceOptions<
+    node_services::StoreNpmChecker,
+    node_services::StoreFolderResolver,
+    RealSys,
+>;
 
 fn build_services(
     permissions: PermissionsContainer,
     loader: Rc<dyn ModuleLoader>,
+    roots: node_services::StoreRoots,
 ) -> DrtServices {
     WorkerServiceOptions {
         blob_store: BlobStore::default_arc(),
@@ -464,7 +438,7 @@ fn build_services(
         feature_checker: Arc::new(FeatureChecker::default()),
         fs: Arc::new(RealFs) as Arc<dyn FileSystem>,
         module_loader: loader,
-        node_services: None,
+        node_services: Some(node_services::build_node_services(roots)),
         npm_process_state_provider: None,
         permissions,
         root_cert_store_provider: None,
@@ -637,8 +611,9 @@ async fn run_module_async(
     args: &[String],
     permissions: PermissionsContainer,
     loader: Rc<dyn ModuleLoader>,
+    roots: node_services::StoreRoots,
 ) -> Result<i32, String> {
-    let services = build_services(permissions, loader);
+    let services = build_services(permissions, loader, roots);
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
     // Leave bootstrap.location unset (like `deno run`): setting it makes the worker
@@ -732,13 +707,20 @@ fn run_tree(
     rt.block_on(async {
         let url = ModuleSpecifier::from_file_path(&file)
             .map_err(|_| format!("failed to derive file url for {entry}"))?;
+        let store_root = store_root_env();
+        let vendor_root = vendor_root_env();
+        let roots = node_services::StoreRoots {
+            store: store_root.clone(),
+            vendor: vendor_root.clone(),
+            artifact: Some(root.clone()),
+        };
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
-            store_root: store_root_env(),
-            vendor_root: vendor_root_env(),
+            store_root,
+            vendor_root,
             precompiled: precompiled_flag(),
         });
-        run_module_async(&url, args, permissions, loader).await
+        run_module_async(&url, args, permissions, loader, roots).await
     })
 }
 
@@ -977,6 +959,7 @@ pub unsafe extern "C" fn inka_runtime_run_module_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deno_runtime::deno_core::url::Url;
     use deno_runtime::deno_permissions::CheckSpecifierKind;
 
     fn import_allowed(dsl: &str) -> bool {
