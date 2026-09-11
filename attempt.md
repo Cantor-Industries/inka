@@ -1,17 +1,45 @@
 # Phase 2 attempt — vendored built-in packages, offline npm/jsr, code caches
 
-Status: **restart from scratch.** The repo on `master` is reset to before Phase 2
-(commit `8c467cc`, end of Phase 1 / multi-file artifacts). All Phase-2 work is
-preserved for reference on the branch **`phase2-experiments`**.
+Status: **historical.** The repo on `master` has moved far beyond the reset
+point (`8c467cc`) this file was written against; the architecture described in
+§1–§9 was abandoned and the work has since landed in a different form (see the
+deltas below and §10–§16). This file is kept as a retrospective so the same
+ground isn't re-covered.
 
-This file is the complete retrospective + restart brief. Read it before writing
-any Phase-2 code. It exists because Phase 2 was attempted three different ways
-and each stalled on the same underlying truth; the point of this file is to stop
-re-learning it the hard way.
+> **Document status (as of v0.2.2).** Historical retrospective of the Phase-2
+> attempts; kept for context. Inline markers:
+> - **DONE** — implemented on master (possibly refined since)
+> - **SUPERSEDED** — replaced by a later approach
+> - **HISTORICAL** — kept for context, no longer actionable
+> - **STALE** — details (paths/versions) are outdated
+> - **OPEN** — still relevant / not implemented
+> See §17 for current open items.
+
+### Architecture deltas since this file
+
+- Engine: hand-rolled `crates/inka-runtime` (not libdeno); resolution split out
+  to `crates/inka-resolver` with **ABI 2** (this file says ABI 1).
+- Store: shared hoisted `node_modules` pool + `store.tar.gz` snapshot at
+  `~/.local/share/inka/store` (XDG; this file says `~/.inka-runtime/store`);
+  `inka pkg` retired in favor of `inka internal snapshot-store`.
+- Distribution: the `.deb` was retired; `install.sh` + GitHub release assets,
+  with `inka update` self-updating the toolchain.
+- Runtime tuple versioning: `deno_runtime` base + inka revision
+  (`crates/inka-runtime/runtime-version`, currently `0.266.1`).
+- Manifests: the `--manifest`/`<stem>.manifest` file input was removed; manifests
+  are derived from `package.json`/`deno.json`.
+- Permissions: deny-by-default hardened (mandatory `_perm`, comma-only DSL,
+  config-derived, build-time warnings); the `/usr/local/lib` search path was
+  dropped.
+- CLI: `--version`/`-V` on `inka`/`inka-launcher`/`inka-patcher`; CI runs
+  `bash -n` + shellcheck; `inka` resets SIGPIPE.
 
 ---
 
 ## 1. TL;DR
+
+> **Status: HISTORICAL** — the failed libdeno attempts; the lockfile-pinned idea
+> here was superseded by the self-contained store (§10).
 
 - Goal: packages that "come with the runtime" (vendored, zero-install) **and**
   standard npm/jsr for everything else, **offline-first** at runtime, with
@@ -32,6 +60,9 @@ re-learning it the hard way.
 
 ## 2. Original goals & decisions locked with the user (Phase-2 brief)
 
+> **Status: HISTORICAL** — original Phase-2 goals; realized in a different form
+> (shared store + per-project vendoring).
+
 - **Vendored built-ins** = a curated set that ships with the runtime install
   (`~/.inka-runtime/pkg/<deno-version>/`), imported by normal `npm:`/`jsr:`
   names, zero-install, **not embedded inside the .so**.
@@ -48,6 +79,8 @@ re-learning it the hard way.
 
 ## 3. State at the start of Phase 2 (what Phase 1 left us)
 
+> **Status: HISTORICAL** — snapshot of the tree before Phase 2.
+
 - Thin artifact = Rust launcher (~355 KB) embedding source/manifest (trailer
   v1 `INKFOOT2`, v2 `INKFOOT3` multi-file archive) + a shared runtime `.so`.
 - Runtime was a hand-rolled cdylib over `deno_runtime 0.266.0` (`crates/
@@ -57,6 +90,8 @@ re-learning it the hard way.
   multi-file, `INKA_DEBUG`.
 
 ## 4. Chronology of the attempt (condensed)
+
+> **Status: HISTORICAL** — chronology of the abandoned libdeno pivot.
 
 1. Planned a custom `inka-store` crate: adopt `deno_graph`/`deno_npm*` to build
    the loader. Version-alignment research against the deno repo tag for
@@ -87,6 +122,9 @@ re-learning it the hard way.
    deliberately leaves unimplemented (see its `limits.rs` comment). Parked.
 
 ## 5. Concrete findings you must not re-discover the hard way
+
+> **Status: HISTORICAL** — findings tied to the libdeno path; the
+> version-alignment and rebuild-cost notes still apply, the rest do not.
 
 - **libdeno == deno CLI semantics.** It resolves against a workspace cwd,
   contacts registries for version selection, and its npm resolver is
@@ -124,6 +162,8 @@ re-learning it the hard way.
 
 ## 6. Why it stalled (honest)
 
+> **Status: HISTORICAL** — post-mortem of the abandoned approach.
+
 1. The chosen mechanism (deno-CLI semantics via libdeno) contradicts the target
    model's invariants (offline-first, no installs, version-locked store,
    cross-process parse-free). I patched symptoms (permissions, `allow_remote`,
@@ -135,6 +175,9 @@ re-learning it the hard way.
    tweak; and 2b requires V8-module-code-cache internals libdeno sidestepped.
 
 ## 7. Environment / commands cheat-sheet
+
+> **Status: STALE** — the `~/.inka-runtime` paths and `0.265.0` tuple are
+> obsolete; the big-disk cargo env and dead-proxy trick remain useful.
 
 - Repo: `/home/kook/inka`. Branch `master` (reset to `8c467cc`); Phase-2 work on
   `phase2-experiments`; future attempts on **`phase2-rework`** (this file lives
@@ -164,6 +207,8 @@ re-learning it the hard way.
   cost at this scale — relevant if 2b is ever reconsidered.
 
 ## 8. Restart brief (what to do differently)
+
+> **Status: SUPERSEDED** — by §10 (the self-contained store).
 
 **Probe first; commit code only after the probe answers the invariant.**
 
@@ -197,6 +242,10 @@ Policy to confirm with the user in the fresh chat:
 
 ## 9. Appendix
 
+> **Status: HISTORICAL** — the deno pin list is still a useful reference; the
+> permission mapping and vendored-libdeno patches are obsolete, and Option A is
+> superseded.
+
 ### Deno crate pins at deno v2.9.6 (Cargo.lock of denoland/deno tag v2.9.6)
 `deno_core 0.411.0`, `deno_runtime 0.266.0`, `deno_graph 0.111.0`,
 `deno_resolver 0.89.0`, `deno_npm_installer 0.53.0`, `deno_npm_cache 0.77.0`,
@@ -227,6 +276,10 @@ file's goal is that the fresh chat starts here rather than at "build the
 loader again from scratch."
 
 ## 10. Resolution landed: the self-contained tar store (supersedes §8)
+
+> **Status: DONE (then refined)** — landed, then the per-version closure store
+> became the shared pool + snapshot; the resolver ABI is now 2 (this section says
+> 1), `inka pkg` was retired, and the default store moved to XDG.
 
 Implemented on `phase2-rework` (commits `9d58731`…`84c7def`), replacing the §8
 libdeno/CLI-resolution restart brief. Unlike the failed phase-2 pivot, this does
@@ -320,6 +373,9 @@ bit us when `effect` resolved to its CJS `default` build).
 
 ## 11. CommonJS support — design risks & future work (Part 2)
 
+> **Status: SUPERSEDED** — the bespoke CJS loader (Option A) was abandoned; CJS
+> is handled by Option C (§13). The risk list is historical.
+
 Status: **probe/design open**. We chose a *custom bounded CJS loader* over adopting
 `deno_runtime` node services wholesale (Option B). This section records the risks
 of that path and the open design questions a future session should resolve before
@@ -410,6 +466,9 @@ adopted.
 
 ## 12. Node services (Option B) milestone plan — deno's own node/CJS loader
 
+> **Status: OPEN (deferred)** — Option B was not built; it remains the path for
+> native addons (§13 residual-2, §17).
+
 Goal: unblock `@effect/platform`/`@effect/platform-node` (env-reading + CommonJS
 packages) by giving the engine real deno node services backed by the shared
 store, instead of a bespoke CJS loader (probes showed deno's `require()` ops are
@@ -478,6 +537,9 @@ limits. Commit per phase. Risks: still bounded, but this milestone is the
 largest single engine change; keep resolver decoupled so either path is replaceable.
 
 ## 13. Option C / P0 probe results — rolldown-as-crate + post-pass (ws ESM)
+
+> **Status: DONE** — Option C landed (P0/P1/P2-lite/P3); residual-2
+> (`@parcel/watcher`) is still open (§17).
 
 Decision context (fresh-session, supersedes the §12 Option-B-as-default stance):
 Option C was chosen (ESM-only store + seed-time patches, clean CJS rejection). The
@@ -645,6 +707,8 @@ half-wire node services without the full resolver stack.
 
 ## 15. Per-project vendoring (W1–W3 landed; W4 = engine resolution milestone)
 
+> **Status: DONE** — per-project vendoring landed (W1–W4).
+
 New store model (design in plan.md §"default store + name-keyed per-project
 vendoring"): a machine default store (unchanged) PLUS per-project vendoring of
 packages it doesn't cover. Vendored/ holds NAME-KEYED package roots (no
@@ -684,6 +748,9 @@ enforced at add. Imports in app/vendored code resolve vendored -> default store
 
 ## 16. Optional .manifest — auto-generated from package.json / deno.json
 
+> **Status: DONE, partially SUPERSEDED** — config-derived manifests landed; the
+> on-disk `--manifest`/`<stem>.manifest` input was later removed.
+
 `*.manifest` is no longer required. `inka build` resolves the effective manifest:
 `--manifest <file>` -> on-disk `<stem>.manifest`/`inka.manifest` (back-compat) ->
 auto-synthesized from project config -> defaults. The launcher only consumes
@@ -710,6 +777,9 @@ needs to express runtime + permissions; `module=` is always set to the entry.
 
 ## Relative allow-* path semantics (WS3-4)
 
+> **Status: CURRENT** — still accurate; `inka build` now also warns on relative
+> read/write grants.
+
 `allow-read`/`allow-write` lists in the config or a `.manifest` are baked VERBATIM
 and interpreted by the runtime at RUN time against the directory the executable
 is launched from (Deno semantics), NOT the project dir at build time. Copying an
@@ -718,3 +788,48 @@ but easy to misread for a portable artifact. To pin grants to the build layout,
 write ABSOLUTE paths in the config/.manifest; the trade-off is that absolute
 paths tie the artifact to a machine path layout. Canonicalizing config paths to
 the build dir at bake time is a noted future option (not implemented).
+
+---
+
+## 17. Open items / future work (as of v0.2.2)
+
+Assessed for severity (user impact + risk) and effort. None block the current
+Linux x86_64 release.
+
+1. **Release authenticity (signing)** — Medium severity, Medium effort.
+   `.sha256` sidecars prove integrity, not publisher: a compromised GitHub
+   account/release could ship a malicious toolchain/engine with matching
+   checksums. Needs a signature (minisign/sigstore) verified against a key that
+   does **not** come from the same release (e.g. served from a stable domain).
+   Today: rely on GitHub account security + protected tags.
+
+2. **Rust CI on PRs** — Low–Medium severity, Low effort.
+   `ci.yml` only lints shell; Rust is compiled/tested only at release time. Add a
+   job for the fast crates (`cargo check`/`test -p inka -p inka-launcher
+   -p inka-resolver -p inka-runtime-stub`); exclude the heavy `inka-runtime`.
+
+3. **Native addons (`.node`, e.g. `@parcel/watcher`)** — Low–Medium severity
+   (narrow), High effort. Opt-in only; the default `NodeFileSystem` uses
+   `node:fs` and works. Real support needs deno node services + ABI/FFI
+   (Option B, §12).
+
+4. **Code caches (2b)** — Low severity (perf only), High effort. Parked; startup
+   is ~0.2 s dominated by engine boot. Needs V8 module-code-cache internals and
+   stable staging paths.
+
+5. **Other platforms (macOS / native Windows)** — Medium severity (reach), High
+   effort. Linux x86_64 only; needs per-platform runtime builds and a portable
+   launcher. Windows via WSL2 today.
+
+6. **Stable install domain** — Low severity, Low effort. The GitHub release URL
+   works; a branded domain (e.g. `get.inka.dev`) is nicer and a good home for the
+   signing trust anchor (item 1).
+
+| # | Item | Severity | Effort | Blocks users today? |
+|---|---|---|---|---|
+| 1 | Release signing/authenticity | Medium | Medium | No |
+| 2 | Rust CI on PRs | Low–Medium | Low | No |
+| 3 | Native addons | Low–Medium (narrow) | High | Native-dep apps only |
+| 4 | Code caches | Low (perf) | High | No |
+| 5 | Other platforms | Medium (reach) | High | macOS / native Windows |
+| 6 | Stable install domain | Low | Low | No |
