@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "inka"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "deno_ast",
  "inka-resolver",
@@ -4369,7 +4369,7 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "libloading 0.8.9",
 ]
@@ -4385,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "deno_core",
  "deno_error",
@@ -4399,7 +4399,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.2.0"
+version = "0.2.1"
 
 [[package]]
 name = "inotify"
