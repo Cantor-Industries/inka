@@ -25,8 +25,8 @@ See the [repository README](../../README.md) for the full architecture and
   package store with the newest release (or install a specific tuple),
   sha256-verified.
 - `inka list` / `inka doctor` — show installed tuples / a diagnostic report.
-- `inka add` / `inka remove` — per-project vendoring into `vendored/`,
-  including automatic and curated CJS→ESM conversion.
+- `inka add` / `inka remove` — per-project vendoring into `vendored/` (raw
+  packages; the engine runs CommonJS natively).
 - `inka vendor …` — vendored-set list/status and git posture.
 - `inka internal snapshot-store` — hidden release-time store snapshot builder.
 

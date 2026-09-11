@@ -59,8 +59,8 @@ skips verification; `--home <dir>` sets the runtime install dir. See
 
 ## `add` / `remove` / `vendor`
 
-Per-project vendoring. `add` vendors one package (curated or automatic
-CJS→ESM); `remove` un-vendors and prunes orphaned deps; `vendor list|status`
+Per-project vendoring. `add` vendors one package (raw, exactly as npm
+resolves it); `remove` un-vendors and prunes orphaned deps; `vendor list|status`
 inspect coverage and lock drift; `vendor release|ignore` set the git posture of
 `vendored/`.
 
@@ -81,5 +81,4 @@ inspect coverage and lock drift; `vendor release|ignore` set the git posture of
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
 | `INKA_RESOLVER_VERSION` | resolver version for URL bases without a listing |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
-| `INKA_PATCHER` | path to `inka-patcher` for CJS→ESM conversion |
 | `INKA_DEBUG` | verbose runtime/resolution logging |

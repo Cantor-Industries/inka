@@ -59,10 +59,10 @@ Everything else (`lib.rs`, `inka-resolver`, the CLI) works through our own types
 A failure localizes to the seam. Run it on any PR that touches
 `crates/inka-runtime`, the Deno pins, or `runtime-version`.
 
-## Capability and fallback
+## Capability
 
-Native CJS is a runtime capability. Artifacts that rely on it should embed a
-`runtime>=` floor at the first tuple that provides it; older tuples keep working
-because artifacts can still carry patched bundles. If a bump breaks native CJS,
-ship the engine without the capability and fall back to the patch pipeline
-(`inka internal snapshot-store` + `patches/`) until the seam is fixed.
+Native CJS is a runtime capability. `inka build` embeds a `runtime>=0.266.2`
+floor by default, so artifacts always select a tuple that can run the raw
+CommonJS packages shipped in the store and `vendored/`. A tuple bump that
+changes this capability must bump the default floor in `crates/inka/src/build.rs`
+and `crates/inka-runtime/runtime-version` together.

@@ -43,15 +43,13 @@ inka remove nanoid           # un-vendor (+ prune orphaned vendored deps)
   resolved exact version.
 - `jsr:@scope/pkg` is stored under its npm-mirror identity `@jsr/scope__pkg`.
 
-## CommonJS conversion
+## CommonJS
 
-Packages whose import-reachable entry is CommonJS are converted to engine-viable
-ESM when vendored/snapshotted. Curated specs live under
-`patches/<pkg>/<version>/patch.json` and are applied by the sibling
-`inka-patcher` binary; hard cases error with the exact spec to create. Specs for
-several versions of the same package may coexist: the exact-version spec matching
-each installed copy is applied, and the store snapshot patches every hoisted and
-nested occurrence (specs that match nothing are skipped with a note).
+The engine runs CommonJS natively, so vendored and store packages are shipped
+exactly as npm resolves them — no conversion step. `require()` works inside CJS
+packages (including nested deps and cycles), and ESM `import` of a CJS package
+is served as an ESM facade with `default` plus statically-detected named
+exports. Native `.node` addons are still unsupported.
 
 ## Inspecting
 

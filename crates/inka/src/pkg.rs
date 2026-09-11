@@ -22,18 +22,14 @@
 // downloads -> verifies -> replaces node_modules. Nothing installs or runs on
 // the consumer machine.
 //
-// CommonJS packages that the engine cannot run are converted to engine-viable
-// pure ESM at snapshot time, inside the scratch node_modules BEFORE the tar:
-// repo-managed specs under `patches/<pkg>/<version>/patch.json` are applied by
-// the sibling `inka-patcher` binary ($INKA_PATCHER or next to the inka binary).
-// Discovery: --patches <dir> -> <dir of the seed manifest>/patches.
+// Packages are shipped exactly as npm resolves them: the engine runs CommonJS
+// natively, so no CJS->ESM conversion happens here.
 //
 // The set of packages to seed comes from a user-editable seed-manifest.json
 // (NOT hard-coded): { "seed": [ { "name", "version", "registry" } ] }.
 // Discovery order: --seed-manifest -> $INKA_SEED_MANIFEST -> ./seed-manifest.json
 // -> <dir of inka binary>/seed-manifest.json.
 
-use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -60,23 +56,15 @@ struct SeedSpec {
 }
 
 /// The store/payload record (what got installed / what a snapshot contains).
+/// A legacy `patched` key in an existing record is ignored on read.
 #[derive(serde::Serialize, serde::Deserialize, Default)]
 pub(crate) struct SeedRecord {
     #[serde(default)]
     seeded: Vec<Installed>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    patched: Vec<PatchRecord>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tar: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sha256: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct PatchRecord {
-    name: String,
-    version: String,
-    kind: String,
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
@@ -201,53 +189,6 @@ fn write_record(path: &Path, record: &SeedRecord) -> Result<(), String> {
     fs::rename(&tmp, path).map_err(|e| format!("cannot finalize {}: {e}", path.display()))
 }
 
-// ---- seed-time package patching (Option C) ---------------------------------
-//
-// Multiple specs for the same package (one per version) may coexist; each
-// installed occurrence is patched with the spec whose exact version matches it
-// (see crate::patches). Specs that match no installed package are skipped with
-// a note.
-
-/// Apply repo-managed patch specs to the scratch node_modules (in place,
-/// pre-tar), matching each installed occurrence's exact version. Returns the
-/// list of applied patches (deduped by package@version) for the record.
-fn apply_patches(
-    node_modules: &Path,
-    seed_manifest: &Path,
-    patches_flag: Option<&str>,
-) -> Result<Vec<PatchRecord>, String> {
-    let base = crate::patches::release_base(patches_flag, seed_manifest);
-    let (applies, skipped) = crate::patches::plan_snapshot(&base, node_modules)?;
-    if applies.is_empty() && skipped.is_empty() {
-        return Ok(Vec::new());
-    }
-    // Fail fast (before any mutation) when patches must be applied but the
-    // patcher binary is missing.
-    if !applies.is_empty() {
-        crate::patches::patcher_binary()?;
-    }
-
-    let mut record = Vec::new();
-    let mut seen: BTreeSet<(String, String)> = BTreeSet::new();
-    for (spec, nm) in &applies {
-        crate::patches::invoke(&spec.path, nm)?;
-        if seen.insert((spec.package.clone(), spec.version.clone())) {
-            record.push(PatchRecord {
-                name: spec.package.clone(),
-                version: spec.version.clone(),
-                kind: spec.kind.clone(),
-            });
-        }
-    }
-    for spec in &skipped {
-        println!(
-            "[inka] snapshot-store: note: {}@{} patch not applied (not installed)",
-            spec.package, spec.version
-        );
-    }
-    Ok(record)
-}
-
 /// Atomically replace the store's node_modules with a freshly extracted tree.
 /// Replace the store's `node_modules` with the snapshot, atomically: extract
 /// into a staging dir first, move the live pool aside, move the new one in, then
@@ -357,147 +298,10 @@ fn load_seed_manifest(path: &Path) -> Result<SeedManifest, String> {
     Ok(m)
 }
 
-// ---- seed-time CJS lint (heads-up only) -----------------------------------
-//
-// Warn about installed packages whose import-reachable entry is CommonJS and has
-// no patch record. Mirrors the resolver's classification (import/node conditions
-// => ESM by context; otherwise .cjs / non-"module" .js => CJS) as a heuristic,
-// not a full resolve. Not fatal: the resolver rejects such a package cleanly at
-// run time if it is actually imported.
-
-fn classify_cjs_file(pkg_type: &str, rel: &str) -> bool {
-    let rel = rel.trim_start_matches("./");
-    if rel.ends_with(".cjs") {
-        return true;
-    }
-    if rel.ends_with(".mjs") || rel.ends_with(".json") || rel.ends_with(".node") {
-        return false;
-    }
-    pkg_type != "module"
-}
-
-fn exports_dot_is_cjs(pkg_type: &str, v: &Value) -> bool {
-    match v {
-        Value::String(s) => classify_cjs_file(pkg_type, s),
-        Value::Array(items) => {
-            // Arrays are rare for ".": flag only if no usable branch is ESM.
-            !items.iter().any(|i| !exports_dot_is_cjs(pkg_type, i))
-        }
-        Value::Object(map) => {
-            for cond in ["import", "node"] {
-                if map.contains_key(cond) {
-                    return false; // ESM by condition (dual-package pattern)
-                }
-            }
-            if let Some(d) = map.get("default") {
-                return exports_dot_is_cjs(pkg_type, d);
-            }
-            map.contains_key("require")
-        }
-        _ => false,
-    }
-}
-
-fn package_entry_is_cjs(pkg: &Value) -> bool {
-    let pkg_type = pkg.get("type").and_then(Value::as_str).unwrap_or("");
-    match pkg.get("exports") {
-        Some(Value::String(s)) => classify_cjs_file(pkg_type, s),
-        Some(Value::Object(map)) => {
-            let is_subpath_map = map.keys().any(|k| k == "." || k.starts_with("./"));
-            if is_subpath_map {
-                match map.get(".") {
-                    Some(dot) => exports_dot_is_cjs(pkg_type, dot),
-                    None => false, // no "." export: root not importable
-                }
-            } else {
-                exports_dot_is_cjs(pkg_type, pkg.get("exports").unwrap())
-            }
-        }
-        _ => {
-            let main = pkg.get("main").and_then(Value::as_str).unwrap_or("index.js");
-            classify_cjs_file(pkg_type, main)
-        }
-    }
-}
-
-/// Collect the top-level (hoisted) packages of a node_modules tree. Unpatched CJS
-/// leaves that the ESM graph actually reaches are hoisted here (npm dedupes), so
-/// top-level-only keeps the lint signal high while skipping nested optional
-/// natives and nested dupes that aren't importable as ESM roots.
-fn top_level_packages(nm: &Path) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    let Ok(top) = fs::read_dir(nm) else { return out };
-    let mut entries: Vec<PathBuf> = top.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-    entries.sort();
-    for dir in entries {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        if name.starts_with('@') {
-            let Ok(sub) = fs::read_dir(&dir) else { continue };
-            let mut subs: Vec<PathBuf> = sub.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
-            subs.sort();
-            for p in subs {
-                let pkg = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                let display = format!("{name}/{pkg}");
-                if let Ok(raw) = fs::read(p.join("package.json")) {
-                    if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
-                        out.push((display, v));
-                    }
-                }
-            }
-        } else if let Ok(raw) = fs::read(dir.join("package.json")) {
-            if let Ok(v) = serde_json::from_slice::<Value>(&raw) {
-                out.push((name, v));
-            }
-        }
-    }
-    out
-}
-
-fn lint_unpatched_cjs(node_modules: &Path, patched: &[PatchRecord], seeds: &[SeedSpec]) {
-    // Only direct seeds are the user's responsibility: warn when a seeded package
-    // resolves CJS and has no patch spec. Transitive CJS leaves are handled by the
-    // repo's curated patch specs (discovered empirically); optional natives /
-    // unreachable CJS would otherwise flood every snapshot with noise.
-    let mut seed_names = std::collections::HashSet::new();
-    for s in seeds {
-        let reg = s.registry.trim().to_ascii_lowercase();
-        if reg == "jsr" {
-            if let Some(m) = jsr_to_mirror(&s.name) {
-                seed_names.insert(m);
-            }
-        } else {
-            seed_names.insert(s.name.clone());
-        }
-    }
-    let patched_keys: Vec<String> = patched
-        .iter()
-        .map(|p| format!("{}@{}", p.name, p.version))
-        .collect();
-    for (name, pkg) in top_level_packages(node_modules) {
-        if !seed_names.contains(&name) || !package_entry_is_cjs(&pkg) {
-            continue;
-        }
-        let version = pkg.get("version").and_then(Value::as_str).unwrap_or("?");
-        let key = format!("{name}@{version}");
-        if !patched_keys.contains(&key) {
-            eprintln!(
-                "[inka] snapshot-store: warning: seeded package {key} has a CommonJS entry and \
-                 no patches/ spec; it will fail cleanly at run time if imported — add a patch \
-                 spec under patches/{} or exclude it",
-                pkg.get("name").and_then(Value::as_str).unwrap_or(&name)
-            );
-        }
-    }
-}
-
 // ---- snapshot ---------------------------------------------------------------
 
 pub(crate) fn cmd_snapshot_store(args: &[String]) {
     let mut seed_manifest: Option<String> = None;
-    let mut patches: Option<String> = None;
     let mut out = PathBuf::from(".");
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -505,14 +309,10 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
             "--seed-manifest" => {
                 seed_manifest = Some(it.next().unwrap_or_else(|| fail("--seed-manifest needs a file")).clone())
             }
-            "--patches" => {
-                patches = Some(it.next().unwrap_or_else(|| fail("--patches needs a dir")).clone())
-            }
             "--out" => out = PathBuf::from(it.next().unwrap_or_else(|| fail("--out needs a dir"))),
             "--help" | "-h" => {
                 eprintln!(
-                    "usage: inka internal snapshot-store [--seed-manifest <file>] \
-                     [--patches <dir>] [--out <dir>]"
+                    "usage: inka internal snapshot-store [--seed-manifest <file>] [--out <dir>]"
                 );
                 std::process::exit(0);
             }
@@ -558,22 +358,6 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
         fail("npm install did not produce a node_modules directory");
     }
 
-    // 1b) apply repo-managed CommonJS->ESM patches inside the scratch pool
-    //     (before the tar), so the snapshot ships engine-viable packages.
-    let patched =
-        apply_patches(&work.join("node_modules"), &manifest_path, patches.as_deref())
-            .unwrap_or_else(|e| {
-                let _ = fs::remove_dir_all(&work);
-                fail(&e);
-            });
-    for p in &patched {
-        println!(
-            "[inka] snapshot-store: patched {}@{} ({})",
-            p.name, p.version, p.kind
-        );
-    }
-    lint_unpatched_cjs(&work.join("node_modules"), &patched, &manifest.seed);
-
     // 2) package the resolved pool as a whole-store snapshot.
     if !out.is_absolute() {
         out = std::env::current_dir().unwrap_or_default().join(out);
@@ -599,7 +383,6 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
 
     let record = SeedRecord {
         seeded: scan_installed(&work),
-        patched,
         tar: Some(SNAPSHOT_TAR.to_string()),
         sha256: Some(sha.clone()),
     };
@@ -683,7 +466,6 @@ pub(crate) fn apply_store_record(
     let seeded = scan_installed(store);
     let out_record = SeedRecord {
         seeded: seeded.clone(),
-        patched: record.patched.clone(),
         tar: record.tar.clone(),
         sha256: record.sha256.clone(),
     };

@@ -39,8 +39,8 @@ machinery. It backs Deno's native CJS loader with the inka store:
 
 Classification: app code defaults to ESM; `.js` in the store/vendored roots
 defaults to CJS; `.cjs`/`.cts` are CJS; `.mjs`/`.mts`/`.json` are not. The
-analyzer parses the source, so an ESM file inside a package root (e.g. a patched
-`esm.js`) passes through unchanged.
+analyzer parses the source, so an ESM file inside a package root passes through
+unchanged.
 
 ## Tuple updates
 

@@ -7,8 +7,7 @@ confirm the artifacts install and run on a clean machine.
 
 A GitHub Release exists for the tag (`v0.2.2`, …) with these assets:
 
-- `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
-  patcher + curated patches;
+- `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher;
 - `libinka_runtime-<runtime>.so` — the shared runtime tuple;
 - `libinka_resolver-<resolver>.so` — the resolution engine;
 - `store.tar.gz` + `seed-manifest.json` — the default-store snapshot record;
@@ -89,11 +88,13 @@ mkdir -p "$INKA_RUNTIME_HOME"
    printf 'try { Deno.readTextFileSync("x"); console.log("allow"); } catch { console.log("denied"); }\n' > p.js
    inka run p.js            # -> denied
    ```
-6. Vendored auto-conversion works (uses the installed patcher + `patches/`):
+6. Vendored CommonJS works natively (raw package, no conversion):
    ```sh
    mkdir scratch && cd scratch
    inka add ms
-   ls vendored/ms/esm.js        # proves the CJS→ESM conversion ran
+   test -f vendored/ms/index.js            # raw CJS, no esm.js
+   printf 'import { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\nconsole.log(typeof require("ms"));\n' > r.js
+   inka run -A r.js                        # -> function
    ```
 7. Re-running the installer/`inka update` is a no-op (already current):
    ```sh

@@ -44,8 +44,8 @@ extracts the archive to a temp tree when needed.
 Recognized keys:
 
 ```
-runtime=inka_runtime>=0.266.0     # floor (also >, ==, or bare exact)
-tested-against=0.266.0            # cap: do not roll forward past this
+runtime=inka_runtime>=0.266.2     # floor (also >, ==, or bare exact)
+tested-against=0.266.2            # cap: do not roll forward past this
 module=main.js                    # entry file inside the payload
 permissions=all                   # or allow-<cat>=… / deny-<cat>=…
 allow-read=./data,/etc

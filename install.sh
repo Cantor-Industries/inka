@@ -1,7 +1,7 @@
 #!/bin/sh
 # inka bootstrap installer.
 #
-# Downloads the inka toolchain (CLI + launcher + patcher + curated patches),
+# Downloads the inka toolchain (CLI + launcher),
 # installs it under <prefix>/lib/inka with a symlink in <prefix>/bin, then
 # provisions the shared runtime, resolver, and package store via `inka update`.
 # Like rustup, it installs per-user (no root) and never touches the engine
@@ -246,8 +246,7 @@ else
     verify_sha "$TMP/$TC_ARCHIVE" "$TMP/$TC_ARCHIVE.sha256"
     mkdir -p "$PREFIX/lib/inka"
     tar -xzf "$TMP/$TC_ARCHIVE" -C "$PREFIX/lib/inka"
-    chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher" \
-        "$PREFIX/lib/inka/inka-patcher"
+    chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher"
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi
 

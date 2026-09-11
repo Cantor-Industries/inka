@@ -12,9 +12,9 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 The script:
 
-1. downloads the **toolchain** archive (CLI + launcher + patcher + curated
-   patches) for `x86_64-unknown-linux-gnu`, verifies its `sha256`, and installs
-   it under `<prefix>/lib/inka` (default prefix `$HOME/.local`);
+1. downloads the **toolchain** archive (CLI + launcher) for
+   `x86_64-unknown-linux-gnu`, verifies its `sha256`, and installs it under
+   `<prefix>/lib/inka` (default prefix `$HOME/.local`);
 2. symlinks `<prefix>/bin/inka` and adds `<prefix>/bin` to your `PATH`
    (`--no-modify-path` to skip);
 3. runs `inka update` to provision the shared **runtime** and **resolver** under
@@ -107,7 +107,7 @@ The base defaults to the GitHub latest-release URL and is overridable with
 
 | State | Path | Override |
 |---|---|---|
-| Toolchain (`inka`, launcher, patcher, patches) | `<prefix>/lib/inka` (`$HOME/.local/lib/inka`) | `--prefix` at install |
+| Toolchain (`inka`, launcher) | `<prefix>/lib/inka` (`$HOME/.local/lib/inka`) | `--prefix` at install |
 | Toolchain shim | `<prefix>/bin/inka` | — |
 | Runtime/resolver | `~/.local/share/inka/runtime` | `INKA_RUNTIME_HOME` |
 | Default package store | `~/.local/share/inka/store` | `INKA_STORE` |

@@ -35,10 +35,6 @@ also point `INKA_RESOLVER` at a specific `libinka_resolver-<v>.so`.
 `inka doctor` warns that `vendored.lock` was built against a different store,
 re-run `inka update` or re-vendor the affected packages.
 
-**`inka add` fails: patcher missing.** CJS→ESM conversion needs `inka-patcher`
-next to the `inka` binary (or `$INKA_PATCHER`). Re-run `install.sh` (it ships the
-patcher in the toolchain), or build `crates/inka-patcher` and colocate it.
-
 **Artifact runs on one machine but not another.** The dependency came from the
 default store, which differs per machine. Vendor the closure (`inka install`,
 `inka build --vendor-closure`) or ensure both machines share the same store

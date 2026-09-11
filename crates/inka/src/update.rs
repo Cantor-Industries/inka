@@ -261,15 +261,15 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     Ok(true)
 }
 
-/// Replace the toolchain binaries and `patches/` in `dir` from an extracted
-/// archive in `staging`. Binary replacement is an atomic rename over the running
-/// image (Linux keeps the old inode until this process exits).
+/// Replace the toolchain binaries in `dir` from an extracted archive in
+/// `staging`. Binary replacement is an atomic rename over the running image
+/// (Linux keeps the old inode until this process exits).
 fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
     let pid = std::process::id();
     // Stage every binary first: if one is missing or unwritable, nothing is
     // replaced yet and the previous toolchain stays usable.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for f in ["inka", "inka-launcher", "inka-patcher"] {
+    for f in ["inka", "inka-launcher"] {
         let src = staging.join(f);
         if !src.is_file() {
             cleanup_staged(&staged);
@@ -289,24 +289,6 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
     // once staging succeeded).
     for (new, dst) in &staged {
         fs::rename(new, dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
-    }
-
-    let new_patches = staging.join("patches");
-    if new_patches.is_dir() {
-        let dst = dir.join("patches");
-        let old = dir.join(format!(".patches.old{pid}"));
-        let _ = fs::remove_dir_all(&old);
-        let had = dst.exists();
-        if had {
-            fs::rename(&dst, &old).map_err(|e| format!("cannot move patches aside: {e}"))?;
-        }
-        if let Err(e) = fs::rename(&new_patches, &dst) {
-            if had {
-                let _ = fs::rename(&old, &dst); // restore
-            }
-            return Err(format!("cannot install patches: {e}"));
-        }
-        let _ = fs::remove_dir_all(&old);
     }
     Ok(())
 }

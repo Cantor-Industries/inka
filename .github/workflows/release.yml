@@ -1,7 +1,7 @@
 # Release pipeline for inka.
 #
 # Triggered by every `v*` tag. On a self-hosted runner:
-#   - builds the toolchain (inka, inka-launcher, inka-patcher),
+#   - builds the toolchain (inka, inka-launcher),
 #   - builds the heavy runtime,
 #   - builds a store snapshot,
 #   - stages a toolchain tarball + engine assets + versions.json,
@@ -63,12 +63,6 @@ jobs:
           set -euo pipefail
           cargo build --release -p inka -p inka-launcher -p inka-resolver
 
-      - name: Build inka-patcher
-        run: |
-          set -euo pipefail
-          cd crates/inka-patcher
-          cargo build --release
-
       - name: Build runtime (always; tuple = runtime-version)
         run: |
           set -euo pipefail
@@ -78,10 +72,8 @@ jobs:
       - name: Build store snapshot
         run: |
           set -euo pipefail
-          INKA_PATCHER="$CARGO_TARGET_DIR/release/inka-patcher" \
           "$CARGO_TARGET_DIR/release/inka" internal snapshot-store \
             --seed-manifest seed-manifest.json \
-            --patches patches \
             --out "$STAGE"
           test -f "$STAGE/store.tar.gz"
 
@@ -91,13 +83,11 @@ jobs:
           BIN="$CARGO_TARGET_DIR/release"
           TC="inka-toolchain-${REL}-${TARGET}.tar.gz"
 
-          # Toolchain binaries + curated patches, packaged as one archive.
+          # Toolchain binaries, packaged as one archive.
           cp "$BIN/inka" "$STAGE/inka"
           cp "$BIN/inka-launcher" "$STAGE/inka-launcher"
-          cp "$BIN/inka-patcher" "$STAGE/inka-patcher"
-          cp -R patches/. "$STAGE/patches/"
-          chmod +x "$STAGE/inka" "$STAGE/inka-launcher" "$STAGE/inka-patcher"
-          tar -czf "$STAGE/$TC" -C "$STAGE" inka inka-launcher inka-patcher patches
+          chmod +x "$STAGE/inka" "$STAGE/inka-launcher"
+          tar -czf "$STAGE/$TC" -C "$STAGE" inka inka-launcher
 
           # Engine assets (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_resolver.so" "$STAGE/libinka_resolver-$RES.so"
@@ -149,7 +139,7 @@ jobs:
             Keep the toolchain, runtime, resolver, and store current with `inka update`.
 
             Assets:
-            - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher + patcher + curated patches
+            - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher
             - `libinka_runtime-${{ env.RUNTIME }}.so` — shared runtime tuple
             - `libinka_resolver-${{ env.RES }}.so` — resolution engine
             - `store.tar.gz` + `seed-manifest.json` — default store snapshot

@@ -23,7 +23,7 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 
 | Piece | Where it lives | How it updates |
 |---|---|---|
-| Toolchain (`inka`, `inka-launcher`, `inka-patcher`, `patches/`) | `<prefix>/lib/inka`, shimmed at `<prefix>/bin/inka` | `install.sh`, then `inka update` |
+| Toolchain (`inka`, `inka-launcher`) | `<prefix>/lib/inka`, shimmed at `<prefix>/bin/inka` | `install.sh`, then `inka update` |
 | `libinka_runtime-<v>.so`, `libinka_resolver-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) | `inka update` |
 | default store (`node_modules` + record) | `~/.local/share/inka/store` (`INKA_STORE`) | `inka update` (sha-gated) |
 
@@ -32,7 +32,7 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 Each `v*` tag publishes:
 
 - `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` (+ `.sha256`) — CLI +
-  launcher + patcher + curated patches;
+  launcher;
 - `libinka_runtime-<runtime>.so` (+ `.sha256`) — the shared runtime tuple;
 - `libinka_resolver-<resolver>.so` (+ `.sha256`) — the resolution engine;
 - `store.tar.gz` (+ `.sha256`) + `seed-manifest.json` — the default store
@@ -48,17 +48,16 @@ runtime `sha256`. `inka doctor` prints the installed identities.
 `.github/workflows/release.yml` runs on a self-hosted runner whenever a `v*`
 tag is pushed:
 
-1. **Build** the toolchain (`inka`, `inka-launcher`, `inka-resolver`), the
-   `inka-patcher`, and the runtime `.so`. The runtime tuple version comes from
+1. **Build** the toolchain (`inka`, `inka-launcher`, `inka-resolver`) and the
+   runtime `.so`. The runtime tuple version comes from
    `crates/inka-runtime/runtime-version` (base `deno_runtime` + inka revision);
    the resolver version from its crate.
-2. **Snapshot** the default store (`inka internal snapshot-store`) with the
-   built patcher.
+2. **Snapshot** the default store (`inka internal snapshot-store`).
 3. **Stage + package**: the toolchain tarball, engine assets, `store.tar.gz` +
    `seed-manifest.json`, `install.sh`, `versions.json`, and `.sha256` sidecars.
 4. **Smoke** the staged release in a throwaway prefix/store by running
    `install.sh --from <stage>` and then doctor, store-mode imports, an artifact
-   build+run, permission enforcement, and a vendored CJS conversion. Any failure
+   build+run, permission enforcement, and a vendored CJS require. Any failure
    aborts before publishing.
 5. **Publish** the assets to the GitHub Release for the tag (refuses to
    re-publish a tag that already has a release).

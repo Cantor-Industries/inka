@@ -14,7 +14,7 @@ case "$REL" in
     ""|*[!0-9A-Za-z.+~-]*) echo "error: invalid release tag '$TAG'" >&2; exit 1 ;;
 esac
 
-# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.1.
+# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.2.
 RUNTIME="$(tr -d '[:space:]' < "$ROOT/crates/inka-runtime/runtime-version" 2>/dev/null || true)"
 [ -n "$RUNTIME" ] || { echo "error: could not read crates/inka-runtime/runtime-version" >&2; exit 1; }
 

@@ -99,12 +99,22 @@ case "$out" in
     *) echo "smoke: baked read permission did not allow ($out)" >&2; exit 1 ;;
 esac
 
-echo "== vendored auto-conversion (patched CJS leaf) =="
+echo "== vendored raw CommonJS + native require =="
 mkdir -p "$SCRATCH/vendor" && cd "$SCRATCH/vendor"
 if ! "$INKA" add ms >/dev/null 2>&1; then
     echo "smoke: inka add ms failed" >&2
     exit 1
 fi
-[ -f "$SCRATCH/vendor/vendored/ms/esm.js" ] || { echo "smoke: ms was not auto-converted" >&2; exit 1; }
+[ -f "$SCRATCH/vendor/vendored/ms/index.js" ] || { echo "smoke: ms was not vendored raw" >&2; exit 1; }
+if [ -f "$SCRATCH/vendor/vendored/ms/esm.js" ]; then
+    echo "smoke: unexpected esm.js (no conversion should run)" >&2
+    exit 1
+fi
+printf '%s\n' 'import { createRequire } from "node:module";' 'const require = createRequire(import.meta.url);' 'console.log("smoke-cjs", typeof require("ms"));' > cjs.js
+out="$("$INKA" run -A cjs.js)"
+case "$out" in
+    *smoke-cjs*) ;;
+    *) echo "smoke: native require of vendored CJS failed ($out)" >&2; exit 1 ;;
+esac
 
 echo "smoke: OK"
