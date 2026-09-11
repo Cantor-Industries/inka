@@ -28,7 +28,7 @@ use deno_runtime::deno_fs::sync::new_rc;
 use deno_runtime::deno_node::{
     NodeExtInitServices, NodeRequireLoader, NodeRequireLoaderRc, NodeResolver, NodeResolverRc,
 };
-use deno_runtime::deno_permissions::PermissionsContainer;
+use deno_runtime::deno_permissions::{OpenAccessKind, PermissionsContainer};
 use node_resolver::analyze::{
     CjsAnalysis, CjsAnalysisExports, CjsCodeAnalyzer, CjsModuleExportAnalyzer,
     CjsModuleExportAnalyzerRc, EsmAnalysisMode, NodeCodeTranslator, NodeCodeTranslatorMode,
@@ -195,18 +195,20 @@ struct StoreRequireLoader {
 impl NodeRequireLoader for StoreRequireLoader {
     fn ensure_read_permission<'a>(
         &self,
-        _permissions: &mut PermissionsContainer,
+        permissions: &mut PermissionsContainer,
         path: Cow<'a, Path>,
     ) -> Result<Cow<'a, Path>, JsErrorBox> {
+        // Reads inside the store/vendored/artifact roots are implicit (the
+        // packages are trusted and the ESM loader already confines module
+        // reads). Anything else is deny-by-default unless `--allow-read`
+        // grants it (Deno semantics).
         if self.roots.contains(path.as_ref()) {
             return Ok(path);
         }
-        // Outside the trusted roots: deny-by-default. Permission-aware reads
-        // are a later refinement; the ESM loader already confines module reads.
-        Err(JsErrorBox::generic(format!(
-            "require read outside the package store/vendored tree is not allowed: {}",
-            path.display()
-        )))
+        let checked = permissions
+            .check_open(path, OpenAccessKind::ReadNoFollow, Some("require"))
+            .map_err(JsErrorBox::from_err)?;
+        Ok(checked.into_path())
     }
 
     fn load_text_file_lossy(&self, path: &Path) -> Result<FastString, JsErrorBox> {

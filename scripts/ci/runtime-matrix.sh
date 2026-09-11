@@ -4,10 +4,10 @@
 # Exercises the engine's node-services seam against a throwaway store. Run it
 # after any `deno_runtime` tuple bump or change to crates/inka-runtime.
 #
-# usage: runtime-matrix.sh [path-to-inka] [path-to-patched-store]
+# usage: runtime-matrix.sh [path-to-inka] [path-to-release-store]
 #
-# The patched-store checks (effect/hono/ws/@std/assert/node:vm, require(esm))
-# are skipped when no patched store is available.
+# The release-store checks (effect/hono/ws/@std/assert/node:vm, require(esm))
+# are skipped when no release store is available.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -91,8 +91,33 @@ const require = createRequire(import.meta.url);
 const a = require("circ");
 console.log("circular", a.name, a.bName);'
 
+echo "== require permission enforcement =="
+SECRET_DIR="$(mktemp -d "${TMPDIR:-/tmp}/inka-secret.XXXXXX")"
+SECRET_FILE="$SECRET_DIR/secret.cjs"
+printf 'module.exports = 42;\n' > "$SECRET_FILE"
+printf '%s\n' \
+    'import { createRequire } from "node:module";' \
+    'const require = createRequire(import.meta.url);' \
+    "try { console.log(\"perm-allowed\", require(\"$SECRET_FILE\")); }" \
+    'catch { console.log("perm-denied"); }' > p_perm.js
+out="$(INKA_STORE="$STORE" "$INKA" run p_perm.js 2>&1)" || {
+    echo "FAIL: require outside the store errored unexpectedly" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *perm-denied*) echo "ok: require outside the store denied by default" ;;
+    *) echo "FAIL: require outside the store was not denied" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+out="$(INKA_STORE="$STORE" "$INKA" run -R="$SECRET_DIR" p_perm.js 2>&1)" || {
+    echo "FAIL: require with -R errored" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"perm-allowed 42"*) echo "ok: require outside the store allowed with -R" ;;
+    *) echo "FAIL: require with -R was not allowed" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+rm -rf "$SECRET_DIR"
+
 if [ -d "$PATCHED_STORE/node_modules/effect" ]; then
-    echo "== patched-store ESM matrix =="
+    echo "== release-store ESM matrix =="
     run "patched esm matrix" "esm-matrix function" "$PATCHED_STORE" p_matrix.js \
 'import { Effect } from "effect";
 import { Hono } from "hono";
@@ -107,7 +132,7 @@ const require = createRequire(import.meta.url);
 const effect = require("effect");
 console.log("require-esm", typeof effect.Effect, typeof effect.Effect.succeed);'
 else
-    echo "skip: patched-store checks (no store at $PATCHED_STORE)"
+    echo "skip: release-store checks (no store at $PATCHED_STORE)"
 fi
 
 echo "runtime-matrix: OK"

@@ -117,4 +117,7 @@ case "$out" in
     *) echo "smoke: native require of vendored CJS failed ($out)" >&2; exit 1 ;;
 esac
 
+echo "== runtime CJS/ESM contract matrix =="
+bash "$(dirname "${BASH_SOURCE[0]}")/runtime-matrix.sh" "$INKA" "$INKA_STORE"
+
 echo "smoke: OK"

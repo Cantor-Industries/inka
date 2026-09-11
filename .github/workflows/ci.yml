@@ -37,3 +37,21 @@ jobs:
           fi
           mapfile -t files < <(git ls-files '*.sh')
           shellcheck --severity=error "${files[@]}"
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Deno pin drift
+        run: scripts/ci/deno-pins.sh
+
+      # The fast crates only; the heavy `inka-runtime` builds on the self-hosted
+      # release runner and is covered by scripts/ci/runtime-matrix.sh there.
+      - name: Fast-crate tests
+        run: |
+          set -euo pipefail
+          cargo test -p inka --bin inka
+          cargo test -p inka-resolver
+          cargo build -p inka-launcher -p inka-runtime-stub
