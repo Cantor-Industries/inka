@@ -428,7 +428,8 @@ fn update_latest(
                 runtime_sha.map(str::to_string),
                 insecure,
                 "inka_runtime",
-            );
+            )
+            .unwrap_or_else(|e| fail(&e));
             changed = true;
         } else if let Some(i) = installed_runtime {
             println!("[inka] runtime {i} is current (latest {latest_runtime})");
@@ -439,7 +440,8 @@ fn update_latest(
         if actions.resolver {
             if let Some(res) = latest_resolver {
                 let name = format!("{RESOLVER_PREFIX}{res}{RESOLVER_SUFFIX}");
-                install_file(base, &name, &target, None, insecure, "resolver");
+                install_file(base, &name, &target, None, insecure, "resolver")
+                    .unwrap_or_else(|e| fail(&e));
                 changed = true;
             }
         } else if let Some(i) = installed_resolver {
@@ -464,20 +466,20 @@ fn install_file(
     expected_override: Option<String>,
     insecure: bool,
     label: &str,
-) {
-    let (bytes, sidecar_sha) = match fetch_with_sidecar(base, name) {
-        Ok(x) => x,
-        Err(e) => fail(&format!("failed to fetch {name} from {base}: {e}")),
-    };
+) -> Result<(), String> {
+    let (bytes, sidecar_sha) = fetch_with_sidecar(base, name)
+        .map_err(|e| format!("failed to fetch {name} from {base}: {e}"))?;
 
     let expected: Option<String> = match (expected_override, sidecar_sha) {
         (Some(h), _) => Some(h),
         (None, Some(h)) => Some(h),
         (None, None) if insecure => None,
-        (None, None) => fail(&format!(
-            "no checksum available for {name}\n  provide --sha256 <hex>, publish a {name}.sha256 \
-             sidecar, or pass --insecure to skip verification"
-        )),
+        (None, None) => {
+            return Err(format!(
+                "no checksum available for {name}\n  provide --sha256 <hex>, publish a \
+                 {name}.sha256 sidecar, or pass --insecure to skip verification"
+            ))
+        }
     };
     let expected = expected.map(|e| {
         e.split_whitespace()
@@ -490,7 +492,7 @@ fn install_file(
     let actual = hex(&Sha256::digest(&bytes));
     if let Some(exp) = expected {
         if exp != actual {
-            fail(&format!(
+            return Err(format!(
                 "checksum mismatch for {name}\n  expected {exp}\n  actual   {actual}"
             ));
         }
@@ -500,12 +502,13 @@ fn install_file(
     }
 
     let target = target_dir.join(name);
-    install_atomically(&target, &bytes);
+    install_atomically(&target, &bytes)?;
     println!(
         "[inka] installed {label} {} ({})",
         target.display(),
         bytes.len()
     );
+    Ok(())
 }
 
 /// Best-effort store sync: fetch the release's store record; if its snapshot
@@ -576,7 +579,8 @@ fn update_pinned(
     if components.runtime {
         let name = format!("{FILENAME_PREFIX}{ver}{FILENAME_SUFFIX}");
         println!("[inka] installing inka_runtime {ver} from {base}");
-        install_file(base, &name, &target, sha256, insecure, "inka_runtime");
+        install_file(base, &name, &target, sha256, insecure, "inka_runtime")
+            .unwrap_or_else(|e| fail(&e));
     }
 
     // Seed the store from the release snapshot (flat assets or a `store/` subdir).
@@ -585,7 +589,7 @@ fn update_pinned(
     }
 
     if components.resolver {
-        install_resolver_payload(base, &target, insecure);
+        install_resolver_payload(base, &target, insecure).unwrap_or_else(|e| fail(&e));
     }
 }
 
@@ -596,7 +600,7 @@ fn resolver_version_from_release(base: &str) -> Option<String> {
     v.get("resolver").and_then(Value::as_str).map(str::to_string)
 }
 
-fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
+fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) -> Result<(), String> {
     // Pick a resolver from the release: newest libinka_resolver-*.so in a local
     // dir, else a URL fetch of the current resolver version ($INKA_RESOLVER_VERSION
     // overrides; DEFAULT_RESOLVER_VERSION fallback).
@@ -622,12 +626,12 @@ fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
         Some(format!("{RESOLVER_PREFIX}{ver}{RESOLVER_SUFFIX}"))
     };
     let Some(name) = name else {
-        return; // release ships no resolver
+        return Ok(()); // release ships no resolver
     };
 
     let (bytes, sidecar_sha) = match fetch_with_sidecar(base, &name) {
         Ok(x) => x,
-        Err(_) => return, // not present on this source
+        Err(_) => return Ok(()), // not present on this source
     };
     let expected = sidecar_sha.and_then(|s| {
         s.split_whitespace()
@@ -637,44 +641,43 @@ fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) {
     let actual = hex(&Sha256::digest(&bytes));
     match (&expected, insecure) {
         (Some(exp), _) if exp != &actual => {
-            eprintln!("error: checksum mismatch for {name}");
-            eprintln!("  expected {exp}");
-            eprintln!("  actual   {actual}");
-            std::process::exit(1);
+            return Err(format!(
+                "checksum mismatch for {name}\n  expected {exp}\n  actual   {actual}"
+            ));
         }
         (Some(_), _) => {}
         (None, false) => {
-            eprintln!("error: no checksum available for {name}");
-            eprintln!("  publish a {name}.sha256 sidecar, or pass --insecure to trust it");
-            std::process::exit(1);
+            return Err(format!(
+                "no checksum available for {name}\n  publish a {name}.sha256 sidecar, or pass \
+                 --insecure to trust it"
+            ));
         }
         (None, true) => {}
     }
     let target = target_dir.join(&name);
-    install_atomically(&target, &bytes);
+    install_atomically(&target, &bytes)?;
     println!(
         "[inka] installed resolver {} ({})",
         target.display(),
         bytes.len()
     );
+    Ok(())
 }
 
-fn install_atomically(target: &Path, bytes: &[u8]) {
+fn install_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
     let tmp = target.with_extension(format!("so.tmp{}", std::process::id()));
-    fs::write(&tmp, bytes).unwrap_or_else(|e| {
-        eprintln!("error: cannot write {}: {e}", tmp.display());
-        std::process::exit(1);
-    });
-    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)).unwrap_or_else(|e| {
-        eprintln!("error: cannot chmod {}: {e}", tmp.display());
+    if let Err(e) = fs::write(&tmp, bytes) {
         let _ = fs::remove_file(&tmp);
-        std::process::exit(1);
-    });
-    fs::rename(&tmp, target).unwrap_or_else(|e| {
-        eprintln!("error: cannot move {} into place: {e}", target.display());
+        return Err(format!("cannot write {}: {e}", tmp.display()));
+    }
+    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)) {
         let _ = fs::remove_file(&tmp);
-        std::process::exit(1);
-    });
+        return Err(format!("cannot chmod {}: {e}", tmp.display()));
+    }
+    fs::rename(&tmp, target).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("cannot move {} into place: {e}", target.display())
+    })
 }
 
 #[cfg(test)]

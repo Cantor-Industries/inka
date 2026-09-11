@@ -198,10 +198,47 @@ fn fetch_one(base: &str, file: &str, is_url: bool) -> Result<Vec<u8>, String> {
     }
 }
 
+/// Fetch an optional sidecar: `Ok(None)` means the file is genuinely absent
+/// (local ENOENT, or an HTTP error response such as 404); connection/DNS/TLS/
+/// timeout failures are surfaced as errors rather than hidden as "no checksum".
 fn fetch_optional(base: &str, file: &str, is_url: bool) -> Result<Option<String>, String> {
-    match fetch_one(base, file, is_url) {
-        Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
-        Err(_) => Ok(None),
+    if is_url {
+        let url = format!("{}/{}", base.trim_end_matches('/'), file);
+        Ok(http_get_optional(&url)?.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    } else {
+        let p = PathBuf::from(base).join(file);
+        match fs::read(&p) {
+            Ok(b) => Ok(Some(String::from_utf8_lossy(&b).into_owned())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(format!("{}: {e}", p.display())),
+        }
+    }
+}
+
+/// Like `fetch_http`, but `Ok(None)` when the server answers with an HTTP error
+/// (curl exit 22 / wget exit 8), while connection-level failures are errors.
+fn http_get_optional(url: &str) -> Result<Option<Vec<u8>>, String> {
+    let mut cmd = Command::new("curl");
+    if url.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--tlsv1.2"]);
+    }
+    match cmd
+        .args(["-fsSL", "--connect-timeout", "30", "--max-time", "900", url])
+        .output()
+    {
+        Ok(out) if out.status.success() => return Ok(Some(out.stdout)),
+        Ok(out) if out.status.code() == Some(22) => return Ok(None), // HTTP error
+        Ok(_) => {}                                                 // try wget
+        Err(_) => {}                                                // curl missing
+    }
+    match Command::new("wget").args(["-qO-", "--timeout=30", url]).output() {
+        Ok(out) if out.status.success() => Ok(Some(out.stdout)),
+        Ok(out) if out.status.code() == Some(8) => Ok(None), // server error
+        Ok(out) => Err(format!(
+            "failed to download {url} (wget exit {:?})",
+            out.status.code()
+        )),
+        Err(e) => Err(format!("failed to download {url}: {e}")),
     }
 }
 
