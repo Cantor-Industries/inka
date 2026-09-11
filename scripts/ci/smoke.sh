@@ -42,7 +42,17 @@ fi
 
 echo "== re-run is a no-op =="
 sh "$STAGE/install.sh" --from "$STAGE" --yes --no-modify-path --prefix "$PREFIX"
-"$INKA" update --from "$STAGE" | grep -q "is current"
+# Capture the output instead of piping into `grep -q`: grep would exit on the
+# first match and close the pipe, making inka abort on EPIPE under `pipefail`.
+update_out="$("$INKA" update --from "$STAGE")"
+case "$update_out" in
+    *"is current"*) ;;
+    *)
+        echo "smoke: update did not report current:" >&2
+        printf '%s\n' "$update_out" >&2
+        exit 1
+        ;;
+esac
 
 echo "== doctor =="
 "$INKA" doctor
@@ -83,7 +93,7 @@ esac
 printf '{ "compile": { "permissions": { "read": ["./"] } } }\n' > deno.json
 printf 'console.log("perm-allow", Deno.readTextFileSync("secret.txt").trim());\n' > allow.js
 "$INKA" build allow.js -o allow
-out="$SCRATCH/perms/allow"
+out="$("$SCRATCH/perms/allow")"
 case "$out" in
     *perm-allow*) ;;
     *) echo "smoke: baked read permission did not allow ($out)" >&2; exit 1 ;;

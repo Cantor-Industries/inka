@@ -141,6 +141,12 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
 }
 
 fn main() {
+    // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
+    // closes the pipe, and the default action (terminate quietly) is preferable to
+    // Rust's panic-on-EPIPE, which aborts with `panic = "abort"`.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
     let args: Vec<String> = env::args().skip(1).collect();
     if args.is_empty() {
         usage();
