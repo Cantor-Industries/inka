@@ -247,29 +247,56 @@ fn update_toolchain(base: &str, insecure: bool) -> Result<(), String> {
 /// archive in `staging`. Binary replacement is an atomic rename over the running
 /// image (Linux keeps the old inode until this process exits).
 fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
+    let pid = std::process::id();
+    // Stage every binary first: if one is missing or unwritable, nothing is
+    // replaced yet and the previous toolchain stays usable.
+    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     for f in ["inka", "inka-launcher", "inka-patcher"] {
         let src = staging.join(f);
         if !src.is_file() {
+            cleanup_staged(&staged);
             return Err(format!("toolchain archive is missing '{f}'"));
         }
-        let dst = dir.join(f);
-        let new = dir.join(format!(".{f}.new{}", std::process::id()));
-        fs::copy(&src, &new).map_err(|e| format!("cannot stage {f}: {e}"))?;
-        fs::set_permissions(&new, fs::Permissions::from_mode(0o755))
-            .map_err(|e| format!("cannot chmod {f}: {e}"))?;
-        fs::rename(&new, &dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
+        let new = dir.join(format!(".{f}.new{pid}"));
+        if let Err(e) = fs::copy(&src, &new).and_then(|_| {
+            fs::set_permissions(&new, fs::Permissions::from_mode(0o755))
+        }) {
+            let _ = fs::remove_file(&new);
+            cleanup_staged(&staged);
+            return Err(format!("cannot stage {f}: {e}"));
+        }
+        staged.push((new, dir.join(f)));
     }
+    // Activate: rename each staged file over its target (fast; unlikely to fail
+    // once staging succeeded).
+    for (new, dst) in &staged {
+        fs::rename(new, dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
+    }
+
     let new_patches = staging.join("patches");
     if new_patches.is_dir() {
         let dst = dir.join("patches");
-        let old = dir.join(format!(".patches.old{}", std::process::id()));
-        if dst.exists() {
-            let _ = fs::rename(&dst, &old);
+        let old = dir.join(format!(".patches.old{pid}"));
+        let _ = fs::remove_dir_all(&old);
+        let had = dst.exists();
+        if had {
+            fs::rename(&dst, &old).map_err(|e| format!("cannot move patches aside: {e}"))?;
         }
-        fs::rename(&new_patches, &dst).map_err(|e| format!("cannot install patches: {e}"))?;
+        if let Err(e) = fs::rename(&new_patches, &dst) {
+            if had {
+                let _ = fs::rename(&old, &dst); // restore
+            }
+            return Err(format!("cannot install patches: {e}"));
+        }
         let _ = fs::remove_dir_all(&old);
     }
     Ok(())
+}
+
+fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
+    for (new, _) in staged {
+        let _ = fs::remove_file(new);
+    }
 }
 
 /// Best-effort toolchain self-update used by both update paths.
@@ -279,6 +306,7 @@ fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) {
     }
     if let Err(e) = update_toolchain(base, insecure) {
         eprintln!("[inka] warning: toolchain not updated: {e}");
+        eprintln!("[inka]   the engine update continues; re-run install.sh to update the toolchain");
     }
 }
 
