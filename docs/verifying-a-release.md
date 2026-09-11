@@ -5,7 +5,7 @@ confirm the artifacts install and run on a clean machine.
 
 ## 1. What success looks like
 
-A GitHub Release exists for the tag (`v0.2.0`, …) with these assets:
+A GitHub Release exists for the tag (`v0.2.2`, …) with these assets:
 
 - `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
   patcher + curated patches;
