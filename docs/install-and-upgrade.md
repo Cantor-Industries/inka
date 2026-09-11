@@ -17,13 +17,14 @@ The script:
    it under `<prefix>/lib/inka` (default prefix `$HOME/.local`);
 2. symlinks `<prefix>/bin/inka` and adds `<prefix>/bin` to your `PATH`
    (`--no-modify-path` to skip);
-3. runs `inka update` to provision the shared **runtime**, **resolver**, and
-   package **store** under `~/.local/share/inka`.
+3. runs `inka update` to provision the shared **runtime** and **resolver** under
+   `~/.local/share/inka`, then seeds the default package **store** as its own
+   step.
 
 Useful options: `--version <tag>` (pin a release), `--from <dir-or-url>`
-(mirror/local staging), `--prefix <dir>`, `--no-engine` (toolchain only),
-`--no-runtime`/`--no-resolver`/`--no-store`, `--uninstall`. Run `install.sh
---help` for the full list.
+(mirror/local staging), `--prefix <dir>`, `--no-engine` (skip runtime +
+resolver; the store still seeds), `--no-runtime`/`--no-resolver`/`--no-store`,
+`--uninstall`. Run `install.sh --help` for the full list.
 
 > Only Linux/`x86_64` is published today. On Windows, install **WSL2** with
 > Ubuntu and run the same command inside it. macOS is not published yet — build

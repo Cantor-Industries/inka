@@ -47,7 +47,8 @@ options:
       --from <dir-or-url> release base override (mirrors, local staging)
       --prefix <dir>      toolchain prefix (default: $HOME/.local)
       --no-modify-path    do not edit shell rc files
-      --no-engine         skip runtime/resolver/store provisioning
+      --no-engine         skip runtime + resolver (the store still seeds unless
+                          --no-store)
       --no-runtime        skip the runtime .so
       --no-resolver       skip the resolver .so
       --no-store          skip the package store snapshot
@@ -153,7 +154,6 @@ VERSION=""
 FROM=""
 PREFIX="${INKA_PREFIX:-$HOME/.local}"
 MODIFY_PATH=1
-ENGINE=1
 NO_RUNTIME=0
 NO_RESOLVER=0
 NO_STORE=0
@@ -167,7 +167,7 @@ while [ $# -gt 0 ]; do
         --from) FROM="${2:?--from needs a value}"; shift ;;
         --prefix) PREFIX="${2:?--prefix needs a dir}"; shift ;;
         --no-modify-path) MODIFY_PATH=0 ;;
-        --no-engine) ENGINE=0 ;;
+        --no-engine) NO_RUNTIME=1; NO_RESOLVER=1 ;;
         --no-runtime) NO_RUNTIME=1 ;;
         --no-resolver) NO_RESOLVER=1 ;;
         --no-store) NO_STORE=1 ;;
@@ -262,13 +262,19 @@ if [ "$MODIFY_PATH" = 1 ]; then
 fi
 
 # ---- provision engine -------------------------------------------------------
-if [ "$ENGINE" = 1 ]; then
-    info "provisioning runtime, resolver, and store from $BASE"
-    set -- update --from "$BASE"
+# Runtime + resolver first, then the package store as its own step (so the store
+# seeds independently and is visible in the install output).
+if [ "$NO_RUNTIME" = 0 ] || [ "$NO_RESOLVER" = 0 ]; then
+    info "installing runtime and resolver from $BASE"
+    set -- update --from "$BASE" --no-toolchain --no-store
     [ "$NO_RUNTIME" = 1 ] && set -- "$@" --no-runtime
     [ "$NO_RESOLVER" = 1 ] && set -- "$@" --no-resolver
-    [ "$NO_STORE" = 1 ] && set -- "$@" --no-store
     "$PREFIX/lib/inka/inka" "$@"
+fi
+
+if [ "$NO_STORE" = 0 ]; then
+    info "seeding package store from $BASE"
+    "$PREFIX/lib/inka/inka" update --from "$BASE" --store-only
 fi
 
 info "inka $TC_VER installed at $PREFIX/bin/inka"

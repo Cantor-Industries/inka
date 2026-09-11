@@ -5,7 +5,7 @@ inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-again
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka install [pkg[@ver]...] [--force] [--prod]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
-             [--no-toolchain|--toolchain-only] [--no-runtime] [--no-resolver] [--no-store]
+             [--no-toolchain|--toolchain-only|--store-only] [--no-runtime] [--no-resolver] [--no-store]
 inka add     <pkg[@ver]> [--force]
 inka remove  <pkg>
 inka vendor  list|status|release|ignore
@@ -48,8 +48,9 @@ Reconcile the toolchain and shared engine with the release channel:
   (`sha256`-gated). Never downgrades; older runtime tuples are kept.
 - `<version>`: install that exact runtime tuple (offline/pinned).
 
-`--no-toolchain`/`--toolchain-only` control the toolchain; `--no-runtime`,
-`--no-resolver`, `--no-store` skip individual components.
+`--no-toolchain`/`--toolchain-only` control the toolchain; `--store-only`
+provisions just the package store; `--no-runtime`, `--no-resolver`, `--no-store`
+skip individual components.
 
 Base resolution: `--from` → `$INKA_RELEASE_BASE` → `$INKA_RT_SOURCE` → the
 built-in GitHub latest-release URL. `--sha256` pins a checksum; `--insecure`

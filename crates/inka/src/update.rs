@@ -121,6 +121,12 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--insecure" => insecure = true,
             "--no-toolchain" => toolchain = ToolchainMode::Skip,
             "--toolchain-only" => toolchain = ToolchainMode::Only,
+            "--store-only" => {
+                toolchain = ToolchainMode::Skip;
+                components.runtime = false;
+                components.resolver = false;
+                components.store = true;
+            }
             "--no-runtime" => components.runtime = false,
             "--no-resolver" => components.resolver = false,
             "--no-store" => components.store = false,
@@ -128,7 +134,7 @@ pub(crate) fn cmd_update(args: &[String]) {
                 eprintln!(
                     "usage: inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]\n\
                      \x20                  [--insecure] [--home <dir>]\n\
-                     \x20                  [--no-toolchain | --toolchain-only]\n\
+                     \x20                  [--no-toolchain | --toolchain-only | --store-only]\n\
                      \x20                  [--no-runtime] [--no-resolver] [--no-store]\n\
                      \x20 no <version>: update the toolchain (if installer-managed) and install the\n\
                      \x20                newest runtime/resolver/store that are behind\n\
