@@ -92,8 +92,8 @@ Use a base image and run the installer (its per-user layout also works under
 ```dockerfile
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y curl ca-certificates \
- && curl --proto '=https' --tlsv1.2 -sSf \
-      https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh \
+ && curl --proto '=https' --tlsv1.2 -fsSL \
+      https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh \
  && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.local/bin:$PATH
 # copy your built executable(s) in and run them

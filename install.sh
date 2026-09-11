@@ -8,8 +8,8 @@
 # copies already present unless a newer version is published.
 #
 # usage:
-#   curl --proto '=https' --tlsv1.2 -sSf \
-#     https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
+#   curl --proto '=https' --tlsv1.2 -fsSL \
+#     https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh
 #
 # options:
 #   -y, --yes              non-interactive (accepted for compatibility)
@@ -17,7 +17,7 @@
 #       --from <dir-or-url> release base override (mirrors, local staging)
 #       --prefix <dir>     toolchain prefix (default: $HOME/.local)
 #       --no-modify-path   do not edit shell rc files
-#       --no-engine        skip runtime/resolver/store provisioning
+#       --no-engine        skip runtime + resolver (the store still seeds)
 #       --no-runtime       skip the runtime .so
 #       --no-resolver      skip the resolver .so
 #       --no-store         skip the package store snapshot

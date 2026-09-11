@@ -16,8 +16,8 @@ about your setup beyond a supported machine.
 Linux and WSL2 install rootlessly with one command:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh
 ```
 
 It installs the toolchain under `~/.local/lib/inka` (shimmed at

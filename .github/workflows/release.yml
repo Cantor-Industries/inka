@@ -144,7 +144,7 @@ jobs:
 
             Install:
             ```
-            curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/${{ github.repository }}/master/install.sh | sh
+            curl --proto '=https' --tlsv1.2 -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
             Keep the toolchain, runtime, resolver, and store current with `inka update`.
 

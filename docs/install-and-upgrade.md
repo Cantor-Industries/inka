@@ -6,8 +6,8 @@ inka is distributed as release artifacts fetched by a bootstrap script — no
 package manager, no root. It installs per-user:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh
 ```
 
 The script:
@@ -21,10 +21,40 @@ The script:
    `~/.local/share/inka`, then seeds the default package **store** as its own
    step.
 
-Useful options: `--version <tag>` (pin a release), `--from <dir-or-url>`
-(mirror/local staging), `--prefix <dir>`, `--no-engine` (skip runtime +
-resolver; the store still seeds), `--no-runtime`/`--no-resolver`/`--no-store`,
-`--uninstall`. Run `install.sh --help` for the full list.
+### Options
+
+The defaults are sensible: install to `~/.local` (toolchain `<prefix>/lib/inka`,
+shim `<prefix>/bin/inka`), add `~/.local/bin` to `PATH`, and provision the
+runtime, resolver, and store under `~/.local/share/inka`.
+
+To pass options through the pipe, use `sh -s --` (the `--` stops `sh` from
+parsing them):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh \
+  | sh -s -- --prefix "$HOME/.local"
+```
+
+| Option | Effect |
+|---|---|
+| `--version <tag>` | pin the release (assets fetched from that tag) |
+| `--from <dir-or-url>` | release base override (mirror / local staging) |
+| `--prefix <dir>` | toolchain prefix (default `$HOME/.local`) |
+| `--no-modify-path` | do not edit shell rc files |
+| `--no-engine` | skip runtime + resolver (the store still seeds) |
+| `--no-runtime` / `--no-resolver` / `--no-store` | skip individual components |
+| `--uninstall` | remove the toolchain (and engine) |
+
+To pin **both** the script and the assets, fetch the script from the tag rather
+than `latest`:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/download/v0.2.1/install.sh | sh
+```
+
+`install.sh --help` lists everything.
 
 > Only Linux/`x86_64` is published today. On Windows, install **WSL2** with
 > Ubuntu and run the same command inside it. macOS is not published yet — build
@@ -108,8 +138,8 @@ Keep `inka-launcher` next to the `inka` binary, or set `INKA_LAUNCHER`.
 ## Uninstall
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh \
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh \
   | sh -s -- --uninstall
 ```
 

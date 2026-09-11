@@ -13,8 +13,8 @@ The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment
 Linux and WSL2 install with a single rootless command:
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf \
-  https://raw.githubusercontent.com/Cantor-Industries/inka/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh
 ```
 
 It installs the toolchain per-user (`~/.local/lib/inka`, shimmed at
