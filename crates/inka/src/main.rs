@@ -205,13 +205,42 @@ fn fetch_optional(base: &str, file: &str, is_url: bool) -> Result<Option<String>
     }
 }
 
+/// Download over HTTP(S), preferring `curl` and falling back to `wget`.
 fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
-    let out = Command::new("curl")
-        .args(["-fsSL", url])
+    match curl_get(url) {
+        Ok(bytes) => Ok(bytes),
+        Err(curl_err) => match wget_get(url) {
+            Ok(bytes) => Ok(bytes),
+            Err(wget_err) => Err(format!(
+                "failed to download {url}\n  curl: {curl_err}\n  wget: {wget_err}"
+            )),
+        },
+    }
+}
+
+fn curl_get(url: &str) -> Result<Vec<u8>, String> {
+    let mut cmd = Command::new("curl");
+    // Pin TLS for https (avoid downgrade); allow plain http for local mirrors.
+    if url.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--tlsv1.2"]);
+    }
+    let out = cmd
+        .args(["-fsSL", "--connect-timeout", "30", "--max-time", "900", url])
         .output()
-        .map_err(|e| format!("failed to spawn curl ({e}); HTTP sources need curl installed"))?;
+        .map_err(|e| format!("curl not available ({e})"))?;
     if !out.status.success() {
         return Err(format!("curl exited with {}", out.status));
+    }
+    Ok(out.stdout)
+}
+
+fn wget_get(url: &str) -> Result<Vec<u8>, String> {
+    let out = Command::new("wget")
+        .args(["-qO-", "--timeout=30", url])
+        .output()
+        .map_err(|e| format!("wget not available ({e})"))?;
+    if !out.status.success() {
+        return Err(format!("wget exited with {}", out.status));
     }
     Ok(out.stdout)
 }
