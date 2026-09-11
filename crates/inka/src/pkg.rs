@@ -308,22 +308,58 @@ fn apply_patches(
 }
 
 /// Atomically replace the store's node_modules with a freshly extracted tree.
+/// Replace the store's `node_modules` with the snapshot, atomically: extract
+/// into a staging dir first, move the live pool aside, move the new one in, then
+/// clean up. A failed extract (or activation) leaves the previous store intact.
 fn swap_node_modules(store: &Path, tar_bytes: &[u8]) -> Result<(), String> {
     fs::create_dir_all(store).map_err(|e| format!("cannot create {}: {e}", store.display()))?;
-    // Drop the old pool (and any legacy per-package layout) before extracting.
-    for stale in ["node_modules", "packages"] {
-        let p = store.join(stale);
-        if p.exists() {
-            fs::remove_dir_all(&p).map_err(|e| format!("cannot remove {}: {e}", p.display()))?;
-        }
-    }
-    let tmp = store.join(format!(".store.tmp{}", std::process::id()));
-    fs::write(&tmp, tar_bytes).map_err(|e| format!("cannot write {}: {e}", tmp.display()))?;
+    let pid = std::process::id();
+
+    let staging = store.join(format!(".store.stage{pid}"));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging).map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+
+    let tar_path = staging.join(".store.tar");
+    fs::write(&tar_path, tar_bytes).map_err(|e| format!("cannot write {}: {e}", tar_path.display()))?;
     let mut cmd = Command::new("tar");
-    cmd.args(["-xzf"]).arg(&tmp).arg("-C").arg(store);
-    let res = run_ok(&mut cmd, "tar extract");
-    let _ = fs::remove_file(&tmp);
-    res
+    cmd.args(["-xzf"]).arg(&tar_path).arg("-C").arg(&staging);
+    let extract = run_ok(&mut cmd, "tar extract");
+    let _ = fs::remove_file(&tar_path);
+    if let Err(e) = extract {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    let new_nm = staging.join("node_modules");
+    if !new_nm.is_dir() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err("store snapshot has no node_modules/ directory".into());
+    }
+
+    let live = store.join("node_modules");
+    let old = store.join(format!(".node_modules.old{pid}"));
+    let _ = fs::remove_dir_all(&old);
+    let had_live = live.exists();
+    if had_live {
+        fs::rename(&live, &old).map_err(|e| {
+            let _ = fs::remove_dir_all(&staging);
+            format!("cannot move the current store aside: {e}")
+        })?;
+    }
+    if let Err(e) = fs::rename(&new_nm, &live) {
+        if had_live {
+            let _ = fs::rename(&old, &live); // restore the previous pool
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("cannot activate the new store: {e}"));
+    }
+    let _ = fs::remove_dir_all(&old);
+    let _ = fs::remove_dir_all(&staging);
+    // Drop the legacy per-package layout once the new pool is live.
+    let packages = store.join("packages");
+    if packages.exists() {
+        let _ = fs::remove_dir_all(&packages);
+    }
+    Ok(())
 }
 
 // ---- manifest discovery -----------------------------------------------------
