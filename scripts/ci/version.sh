@@ -14,6 +14,12 @@ case "$REL" in
     ""|*[!0-9A-Za-z.+~-]*) echo "error: invalid release tag '$TAG'" >&2; exit 1 ;;
 esac
 
+# The `inka` crate version must match the release tag (the toolchain version
+# tracks it). Fail fast rather than publishing a mismatched toolchain.
+CRATE="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' "$ROOT/crates/inka/Cargo.toml" | head -1)"
+[ -n "$CRATE" ] || { echo "error: could not parse the inka crate version" >&2; exit 1; }
+[ "$CRATE" = "$REL" ] || { echo "error: tag '$TAG' does not match inka crate version '$CRATE'" >&2; exit 1; }
+
 # The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.2.
 RUNTIME="$(tr -d '[:space:]' < "$ROOT/crates/inka-runtime/runtime-version" 2>/dev/null || true)"
 [ -n "$RUNTIME" ] || { echo "error: could not read crates/inka-runtime/runtime-version" >&2; exit 1; }

@@ -29,7 +29,7 @@ pub(crate) const RESOLVER_PREFIX: &str = "libinka_resolver-";
 pub(crate) const RESOLVER_SUFFIX: &str = ".so";
 /// Resolver version used when fetching from a URL base that has no directory
 /// listing (and $INKA_RESOLVER_VERSION is unset).
-pub(crate) const DEFAULT_RESOLVER_VERSION: &str = "1.0.0";
+pub(crate) const DEFAULT_RESOLVER_VERSION: &str = "1.0.1";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Version(pub(crate) u64, pub(crate) u64, pub(crate) u64);

@@ -51,7 +51,7 @@ than `latest`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/Cantor-Industries/inka/releases/download/v0.2.2/install.sh | sh
+  https://github.com/Cantor-Industries/inka/releases/download/v0.3.0/install.sh | sh
 ```
 
 `install.sh --help` lists everything.
@@ -149,7 +149,7 @@ This removes the toolchain, the `PATH` block, and `~/.local/share/inka`
 
 Three independent version lines:
 
-- **Toolchain** — the release tag (`v0.2.2`); the `inka` crate version tracks it.
+- **Toolchain** — the release tag (`v0.3.0`); the `inka` crate version tracks it.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
   revision: `0.266.0` → `0.266.1`, `0.266.2`, …; when the base moves to
   `0.267.0`, revisions restart at `0.267.1`. See

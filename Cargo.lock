@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "inka"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "deno_ast",
  "inka-resolver",
@@ -4369,14 +4369,14 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "libloading 0.8.9",
 ]
 
 [[package]]
 name = "inka-resolver"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "deno_semver",
  "serde_json",
@@ -4385,7 +4385,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime"
-version = "0.2.2"
+version = "0.3.0"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4401,7 +4401,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.2.2"
+version = "0.3.0"
 
 [[package]]
 name = "inotify"

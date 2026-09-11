@@ -48,6 +48,9 @@ jobs:
           echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
           echo "CARGO_HOME=$CARGO_HOME"
 
+      - name: Deno pin drift
+        run: scripts/ci/deno-pins.sh
+
       - name: Discover versions
         run: |
           set -euo pipefail
