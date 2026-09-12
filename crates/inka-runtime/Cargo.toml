@@ -18,7 +18,7 @@ deno_runtime = { version = "=0.266.0", features = ["transpile"] }
 deno_semver = "=0.10.1"
 node_resolver = "=0.96.0"
 sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }
-tokio = { version = "=1.47.1", features = ["rt", "time", "sync", "process", "fs", "net", "io-util", "io-std", "macros", "signal"] }
+tokio = { version = "=1.53.1", features = ["rt", "time", "sync", "process", "fs", "net", "io-util", "io-std", "macros", "signal"] }
 
 [build-dependencies]
 deno_core = "=0.411.0"
