@@ -135,18 +135,39 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}), resolver ${{ env.RES }}.
 
-            Install:
-            ```
-            curl --proto '=https' --tlsv1.2 -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
-            ```
-            Keep the toolchain, runtime, resolver, and store current with `inka update`.
+            ## Highlights
 
-            Assets:
+            - **Native `.node` addons load.** The runtime is now dlopened
+              `RTLD_GLOBAL`, so N-API addons (e.g. `@parcel/watcher`) resolve the
+              `napi_*`/`uv_*` symbols they need instead of aborting with
+              `undefined symbol: napi_module_register`. Addons stay opt-in:
+              grant `ffi` (and `sys` for platform detection like `detect-libc`).
+            - **Cleaner 0.2.2 → 0.3.x upgrades.** `install.sh` now removes the
+              retired `inka-patcher` and `patches/` left behind by an older
+              install. If `inka update` won't move you off 0.2.2, re-run the
+              installer once.
+
+            ## Install
+
+            ```sh
+            curl --proto '=https' --tlsv1.2 -fsSL \
+              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
+            ```
+
+            Then keep the toolchain, runtime, resolver, and store current with
+            `inka update`.
+
+            ## Assets
+
             - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher
             - `libinka_runtime-${{ env.RUNTIME }}.so` — shared runtime tuple
             - `libinka_resolver-${{ env.RES }}.so` — resolution engine
-            - `store.tar.gz` + `seed-manifest.json` — default store snapshot
-            - `install.sh` + `versions.json` — bootstrap script + version record
+            - `store.tar.gz` + `seed-manifest.json` — default-store snapshot
+            - `install.sh` + `versions.json` — bootstrap installer + version record
+
+            `.sha256` sidecars are published for the toolchain, runtime, resolver,
+            and store archives.
+          generate_release_notes: true
           draft: false
           files: |
             ${{ env.STAGE }}/inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz
