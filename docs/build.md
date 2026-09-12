@@ -24,15 +24,15 @@ embeds it in the executable. It tells the runtime what the artifact needs and
 may do:
 
 ```
-runtime=inka_runtime>=0.266.2     # minimum engine floor
-tested-against=0.266.2            # optional cap: never auto-run on something newer
+runtime=inka_runtime>=0.266.3     # minimum engine floor
+tested-against=0.266.3            # optional cap: never auto-run on something newer
 module=app.js                     # entry name (always derived from the build)
 allow-read=./data,/etc            # permissions
 ```
 
 There is **no on-disk manifest input**: `module=` is always the packed entry,
 and the runtime requirement comes from `inka.runtime` (or `--runtime`) with a
-default floor of `>=0.266.2`. The floor is always embedded, so an artifact can
+default floor of `>=0.266.3`. The floor is always embedded, so an artifact can
 never select a runtime too old to enforce its permissions.
 
 ## Permissions from project config
@@ -47,7 +47,7 @@ could modify `deno.json` to elevate permissions):
 | `deno.json.compile.permissions` (category map, or a string naming a set) | baked automatically (build *is* the compile step) |
 | `inka.permissions = "<set>"` marker (under the `inka` block; deno wins) | that named set |
 | `permissions.default.<cat>` with **no** marker | **ignored** + a warning; artifact stays deny-by-default |
-| *(none)* | deny-all + `runtime=inka_runtime>=0.266.2` |
+| *(none)* | deny-all + `runtime=inka_runtime>=0.266.3` |
 
 A plain `permissions.default` set exists so local runs (`deno run -P`,
 `deno task`) are frictionless; to bake it explicitly use `-P default`,
