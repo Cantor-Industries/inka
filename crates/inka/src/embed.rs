@@ -459,6 +459,7 @@ fn scan_specifiers(cwd: &Path, rel: &str, bytes: &[u8], warned: &mut bool) -> Ve
         }
     }
     specs.extend(scan_dynamic_imports(&text, rel, warned));
+    specs.extend(scan_require_calls(&text));
     specs
 }
 
@@ -540,6 +541,67 @@ fn scan_dynamic_imports(text: &str, rel: &str, warned: &mut bool) -> Vec<String>
             }
         }
         i += 1;
+    }
+    out
+}
+
+/// Find literal `require("...")` calls. The engine runs CommonJS natively and
+/// vendored packages ship raw, so closure mode must follow CJS `require()` too
+/// (not just ESM `import`). Only a plain single/double-quoted string literal is
+/// embedded; computed specifiers are left for the runtime store (or
+/// `--embed-dir`). Textual scan: `parse_module` rejects some CJS files, and a
+/// missed `require` is worse than an occasional false positive (a specifier
+/// that resolves to nothing is simply ignored).
+fn scan_require_calls(text: &str) -> Vec<String> {
+    const NEEDLE: &[u8] = b"require";
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i + NEEDLE.len() <= bytes.len() {
+        if &bytes[i..i + NEEDLE.len()] != NEEDLE {
+            i += 1;
+            continue;
+        }
+        // Standalone identifier only: skip `x.require(` / `myrequire(`.
+        let prev = i.checked_sub(1).map(|p| bytes[p]);
+        let standalone = !matches!(
+            prev,
+            Some(c) if c.is_ascii_alphanumeric() || c == b'_' || c == b'$' || c == b'.'
+        );
+        let mut j = i + NEEDLE.len();
+        while standalone && j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+            j += 1;
+        }
+        if standalone && j < bytes.len() && bytes[j] == b'(' {
+            j += 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"') {
+                let quote = bytes[j];
+                let mut k = j + 1;
+                let mut spec = String::new();
+                let mut closed = false;
+                while k < bytes.len() {
+                    if bytes[k] == b'\\' {
+                        k += 2;
+                        continue;
+                    }
+                    if bytes[k] == quote {
+                        closed = true;
+                        break;
+                    }
+                    spec.push(bytes[k] as char);
+                    k += 1;
+                }
+                if closed && !spec.is_empty() {
+                    out.push(spec);
+                    i = k + 1;
+                    continue;
+                }
+            }
+        }
+        i += NEEDLE.len();
     }
     out
 }
@@ -912,5 +974,22 @@ mod tests {
             "{rels:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn scan_require_calls_finds_only_standalone_literals() {
+        let text = r#"
+            const a = require("ms");
+            const b = require('debug');
+            const c = require(`tpl`);
+            const d = require(name);
+            obj.require("no");
+            myrequire("no");
+            require.resolve("no");
+        "#;
+        assert_eq!(
+            scan_require_calls(text),
+            vec!["ms".to_string(), "debug".to_string()]
+        );
     }
 }
