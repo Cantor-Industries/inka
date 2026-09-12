@@ -59,7 +59,9 @@ pub(crate) fn cmd_vendor(args: &[String]) {
 // ---- project + store paths ------------------------------------------------
 
 pub(crate) fn vendor_root() -> PathBuf {
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(VENDOR_DIR)
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(VENDOR_DIR)
 }
 
 pub(crate) fn store_dir() -> PathBuf {
@@ -412,14 +414,20 @@ fn ensure_manifest(manifests: &mut Manifests) {
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| "app".to_string());
         let v = serde_json::json!({ "name": name, "private": true, "dependencies": {} });
-        if fs::write(&p, format!("{}\n", serde_json::to_string_pretty(&v).unwrap())).is_ok() {
+        if fs::write(
+            &p,
+            format!("{}\n", serde_json::to_string_pretty(&v).unwrap()),
+        )
+        .is_ok()
+        {
             manifests.pkg_json = Some(p);
         }
     }
 }
 
 fn read_json(path: &Path) -> Result<Value, String> {
-    let raw = fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let raw =
+        fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     serde_json::from_str(&raw).map_err(|e| {
         format!(
             "{} is not plain JSON ({e}); deno.json with comments isn't writable yet",
@@ -430,7 +438,8 @@ fn read_json(path: &Path) -> Result<Value, String> {
 
 fn write_json(path: &Path, v: &Value) -> Result<(), String> {
     let json = serde_json::to_string_pretty(v).map_err(|e| format!("encode: {e}"))?;
-    fs::write(path, format!("{json}\n")).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    fs::write(path, format!("{json}\n"))
+        .map_err(|e| format!("cannot write {}: {e}", path.display()))
 }
 
 /// Declare `name@version` in whichever manifests exist (union kept consistent).
@@ -446,7 +455,9 @@ fn manifests_add(manifests: &Manifests, name: &str, version: &str) -> Result<(),
     }
     if let Some(p) = &manifests.deno_json {
         let mut v = read_json(p)?;
-        let obj = v.as_object_mut().ok_or_else(|| "deno.json must be an object".to_string())?;
+        let obj = v
+            .as_object_mut()
+            .ok_or_else(|| "deno.json must be an object".to_string())?;
         let imports = obj
             .entry("imports")
             .or_insert_with(|| Value::Object(Default::default()));
@@ -484,7 +495,10 @@ fn manifests_remove(manifests: &Manifests, name: &str) -> Result<(), String> {
 
 /// Is `name` declared as a root in either manifest?
 fn manifests_declares(manifests: &Manifests, name: &str) -> bool {
-    for p in [&manifests.pkg_json, &manifests.deno_json].into_iter().flatten() {
+    for p in [&manifests.pkg_json, &manifests.deno_json]
+        .into_iter()
+        .flatten()
+    {
         if let Ok(v) = read_json(p) {
             if let Some(deps) = v.get("dependencies").and_then(Value::as_object) {
                 if deps.contains_key(name) {
@@ -531,20 +545,36 @@ fn scratch_install(target: &str) -> Result<PathBuf, String> {
 /// All (name, version) present anywhere in a node_modules tree (hoisted + nested).
 fn collect_instances(nm: &Path, out: &mut BTreeMap<String, BTreeSet<String>>) {
     let Ok(top) = fs::read_dir(nm) else { return };
-    let mut entries: Vec<PathBuf> = top.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let mut entries: Vec<PathBuf> = top
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     entries.sort();
     for dir in entries {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         if name.starts_with('.') {
             continue;
         }
         let pkgs: Vec<(String, PathBuf)> = if name.starts_with('@') {
             let mut v = Vec::new();
             if let Ok(sub) = fs::read_dir(&dir) {
-                let mut subs: Vec<PathBuf> = sub.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+                let mut subs: Vec<PathBuf> = sub
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| p.is_dir())
+                    .collect();
                 subs.sort();
                 for p in subs {
-                    let pkg = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    let pkg = p
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned();
                     v.push((format!("{name}/{pkg}"), p));
                 }
             }
@@ -593,7 +623,9 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
         let s = ent.path();
         let name = ent.file_name();
         let d = dst.join(name);
-        let ft = ent.file_type().map_err(|e| format!("stat {}: {e}", s.display()))?;
+        let ft = ent
+            .file_type()
+            .map_err(|e| format!("stat {}: {e}", s.display()))?;
         if ft.is_dir() {
             copy_tree(&s, &d)?;
         } else if ft.is_symlink() {
@@ -606,7 +638,6 @@ fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-
 
 // ---- add -------------------------------------------------------------------
 
@@ -622,8 +653,7 @@ pub(crate) fn cmd_add(args: &[String]) {
     }
 }
 
-const INSTALL_HELP: &str =
-    "usage: inka install [pkg[@ver]...] [--force] [--prod]\n\
+const INSTALL_HELP: &str = "usage: inka install [pkg[@ver]...] [--force] [--prod]\n\
      \x20 no packages: vendor every root declared in package.json (dependencies)\n\
      \x20              and deno.json (imports)\n\
      \x20 packages:    vendor the given packages (same as `inka add`)";
@@ -735,7 +765,12 @@ fn add_one(force: bool, spec: &AddSpec) {
     let conflicts: Vec<String> = instances
         .iter()
         .filter(|(_, vers)| vers.len() > 1)
-        .map(|(n, vers)| format!("{n} ({})", vers.iter().cloned().collect::<Vec<_>>().join(", ")))
+        .map(|(n, vers)| {
+            format!(
+                "{n} ({})",
+                vers.iter().cloned().collect::<Vec<_>>().join(", ")
+            )
+        })
         .collect();
     if !conflicts.is_empty() {
         let _ = fs::remove_dir_all(&work);
@@ -781,7 +816,8 @@ fn add_one(force: bool, spec: &AddSpec) {
 
     // 5) place roots under vendored/ (raw package files; the engine runs CJS
     //    natively, so no CJS->ESM conversion happens here).
-    fs::create_dir_all(&root).unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", root.display())));
+    fs::create_dir_all(&root)
+        .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", root.display())));
     for (name, _ver, _why) in &to_vendor {
         copy_package_root(&nm, name, &root).unwrap_or_else(|e| {
             let _ = fs::remove_dir_all(&work);
@@ -881,7 +917,8 @@ fn prune_orphans(root: &Path, lock: &mut Lock) {
         let mut changed = false;
         let names: Vec<String> = lock.entries.keys().cloned().collect();
         for name in names {
-            let is_root = manifests_declares(&manifests, &name) || lock.entries[&name].why == "root";
+            let is_root =
+                manifests_declares(&manifests, &name) || lock.entries[&name].why == "root";
             if is_root {
                 continue;
             }
@@ -915,9 +952,18 @@ fn package_requires(root: &Path, dep: &str) -> bool {
         if !dir.is_dir() {
             continue;
         }
-        let Ok(raw) = fs::read(dir.join("package.json")) else { continue };
-        let Ok(v) = serde_json::from_slice::<Value>(&raw) else { continue };
-        let key = |k: &str| v.get(k).and_then(Value::as_object).cloned().unwrap_or_default();
+        let Ok(raw) = fs::read(dir.join("package.json")) else {
+            continue;
+        };
+        let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
+            continue;
+        };
+        let key = |k: &str| {
+            v.get(k)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default()
+        };
         let deps = key("dependencies");
         if deps.contains_key(dep) {
             return true;
@@ -1021,8 +1067,18 @@ pub(crate) fn cmd_status(args: &[String]) {
         println!("  {name}@{version} {store_state}", version = e.version);
     }
     if let Ok(gi) = fs::read_to_string(root.parent().unwrap_or(&root).join(".gitignore")) {
-        let ignored = gi.lines().any(|l| l.trim().trim_end_matches('/') == VENDOR_DIR);
-        println!("git posture: {} (vendored/ {})", if ignored { "ignore (dev)" } else { "commit (release)" }, if ignored { "ignored" } else { "not ignored" });
+        let ignored = gi
+            .lines()
+            .any(|l| l.trim().trim_end_matches('/') == VENDOR_DIR);
+        println!(
+            "git posture: {} (vendored/ {})",
+            if ignored {
+                "ignore (dev)"
+            } else {
+                "commit (release)"
+            },
+            if ignored { "ignored" } else { "not ignored" }
+        );
     } else {
         println!("git posture: no .gitignore found");
     }
@@ -1039,7 +1095,9 @@ fn git_ignore_path() -> PathBuf {
 fn git_ignore_ensure(_root: &Path) {
     let gi = git_ignore_path();
     let existing = fs::read_to_string(&gi).unwrap_or_default();
-    let has = existing.lines().any(|l| l.trim().trim_end_matches('/') == VENDOR_DIR);
+    let has = existing
+        .lines()
+        .any(|l| l.trim().trim_end_matches('/') == VENDOR_DIR);
     if has {
         return;
     }
@@ -1064,7 +1122,10 @@ fn cmd_git_posture(ignore: bool, args: &[String]) {
     // release: drop the vendored/ ignore line
     let gi = git_ignore_path();
     let existing = fs::read_to_string(&gi).unwrap_or_default();
-    let kept: Vec<&str> = existing.lines().filter(|l| l.trim().trim_end_matches('/') != VENDOR_DIR).collect();
+    let kept: Vec<&str> = existing
+        .lines()
+        .filter(|l| l.trim().trim_end_matches('/') != VENDOR_DIR)
+        .collect();
     let body = if kept.is_empty() {
         String::new()
     } else {
@@ -1082,13 +1143,9 @@ mod tests {
     use super::*;
 
     fn scratch(kind: &str) -> PathBuf {
-        static N: std::sync::atomic::AtomicUsize =
-            std::sync::atomic::AtomicUsize::new(0);
+        static N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "inkavendor-{kind}-{}-{n}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("inkavendor-{kind}-{}-{n}", std::process::id()));
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
@@ -1118,7 +1175,11 @@ mod tests {
     #[test]
     fn bare_package_counts_as_present() {
         let store = scratch("bare");
-        write_file(&store, "node_modules/zod/package.json", r#"{"version":"3.23.0"}"#);
+        write_file(
+            &store,
+            "node_modules/zod/package.json",
+            r#"{"version":"3.23.0"}"#,
+        );
         assert!(store_has_packages(&store));
         let _ = fs::remove_dir_all(&store);
     }
@@ -1206,11 +1267,19 @@ mod tests {
         let mut lock = Lock::default();
         lock.entries.insert(
             "a".to_string(),
-            LockEntry { version: "1.0.0".into(), why: "root".into(), converted: vec![] },
+            LockEntry {
+                version: "1.0.0".into(),
+                why: "root".into(),
+                converted: vec![],
+            },
         );
         lock.entries.insert(
             "b".to_string(),
-            LockEntry { version: "1.0.0".into(), why: "dep".into(), converted: vec![] },
+            LockEntry {
+                version: "1.0.0".into(),
+                why: "dep".into(),
+                converted: vec![],
+            },
         );
         // A still references B (optional) -> B is not pruned.
         prune_orphans(&root, &mut lock);
@@ -1232,7 +1301,11 @@ mod tests {
         lock.store = Some("/tmp/store sha256=abc123".to_string());
         lock.entries.insert(
             "zod".to_string(),
-            LockEntry { version: "3.23.0".into(), why: "root".into(), converted: vec![] },
+            LockEntry {
+                version: "3.23.0".into(),
+                why: "root".into(),
+                converted: vec![],
+            },
         );
         let json = serde_json::to_string(&lock).unwrap();
         assert!(json.contains("\"store\""), "{json}");

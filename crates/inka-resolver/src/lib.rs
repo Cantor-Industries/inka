@@ -211,7 +211,10 @@ fn vendor_pinned_lookup(vendor: &Path, spec: &str) -> Result<Option<PathBuf>, St
     }
     if let Some(req) = ps.req.as_deref() {
         let Some(installed) = installed_version(&pkg_root) else {
-            return Err(format!("vendored package '{}' has no readable version", ps.name));
+            return Err(format!(
+                "vendored package '{}' has no readable version",
+                ps.name
+            ));
         };
         if !version_satisfies(&installed, req) {
             return Ok(None); // pinned to a version we don't have vendored
@@ -233,13 +236,48 @@ fn referrer_file_path(referrer: &str) -> Option<PathBuf> {
 /// Bare specifiers that map to Node built-ins (Node semantics: core wins).
 fn node_builtin_spec(spec: &str) -> Option<String> {
     const SIMPLE: &[&str] = &[
-        "assert", "async_hooks", "buffer", "child_process", "cluster", "console",
-        "constants", "crypto", "dgram", "diagnostics_channel", "dns", "domain",
-        "events", "fs", "http", "http2", "https", "inspector", "module", "net",
-        "os", "path", "perf_hooks", "process", "punycode", "querystring",
-        "readline", "repl", "stream", "string_decoder", "sys", "timers", "tls",
-        "trace_events", "tty", "url", "util", "v8", "vm", "wasi",
-        "worker_threads", "zlib",
+        "assert",
+        "async_hooks",
+        "buffer",
+        "child_process",
+        "cluster",
+        "console",
+        "constants",
+        "crypto",
+        "dgram",
+        "diagnostics_channel",
+        "dns",
+        "domain",
+        "events",
+        "fs",
+        "http",
+        "http2",
+        "https",
+        "inspector",
+        "module",
+        "net",
+        "os",
+        "path",
+        "perf_hooks",
+        "process",
+        "punycode",
+        "querystring",
+        "readline",
+        "repl",
+        "stream",
+        "string_decoder",
+        "sys",
+        "timers",
+        "tls",
+        "trace_events",
+        "tty",
+        "url",
+        "util",
+        "v8",
+        "vm",
+        "wasi",
+        "worker_threads",
+        "zlib",
     ];
     const SUB: &[(&str, &str)] = &[
         ("assert/strict", "node:assert/strict"),
@@ -536,7 +574,9 @@ fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, S
             .components()
             .any(|c| matches!(c, std::path::Component::ParentDir))
     {
-        return Err(format!("export target '{target}' escapes the package directory"));
+        return Err(format!(
+            "export target '{target}' escapes the package directory"
+        ));
     }
     if !file.is_file() {
         return Err(format!(
@@ -604,7 +644,8 @@ fn to_c(payload: &str) -> *mut c_char {
 #[no_mangle]
 pub extern "C" fn inka_resolver_version() -> *const c_char {
     static V: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-    V.get_or_init(|| CString::new(env!("CARGO_PKG_VERSION")).expect("nul")).as_ptr()
+    V.get_or_init(|| CString::new(env!("CARGO_PKG_VERSION")).expect("nul"))
+        .as_ptr()
 }
 
 #[no_mangle]
@@ -718,7 +759,9 @@ mod tests {
         let d = resolve(None, "file:///a/main.ts", "fs/promises");
         assert_eq!(d, Decision::Builtin("node:fs/promises".into()));
         let d = resolve(None, "file:///a/main.ts", "https://x/y.js");
-        assert!(matches!(d, Decision::Error(m) if m.contains("network module imports are disabled")));
+        assert!(
+            matches!(d, Decision::Error(m) if m.contains("network module imports are disabled"))
+        );
         let d = resolve(None, "file:///a/main.ts", "nosuchpkg");
         assert!(matches!(d, Decision::Error(m) if m.contains("no package store configured")));
     }
@@ -753,7 +796,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
         write_pkg(&tmp, "zod", "3.23.0", "./index.js");
         let d = resolve(Some(&tmp), "file:///a/main.ts", "zod");
-        assert!(matches!(&d, Decision::File(p) if p.ends_with("zod/index.js")), "{d:?}");
+        assert!(
+            matches!(&d, Decision::File(p) if p.ends_with("zod/index.js")),
+            "{d:?}"
+        );
         let d = resolve(Some(&tmp), "file:///a/main.ts", "npm:zod@3.23.0");
         assert!(matches!(d, Decision::File(_)));
         let d = resolve(Some(&tmp), "file:///a/main.ts", "npm:zod@9.9.9");
@@ -787,10 +833,7 @@ mod tests {
     fn scratch_dir(kind: &str) -> std::path::PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "inkares-{kind}-{}-{n}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("inkares-{kind}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
     }
@@ -878,8 +921,11 @@ mod tests {
         let name = pkg.get("name").and_then(serde_json::Value::as_str).unwrap();
         let dir = root.join("vend").join(name);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("package.json"), serde_json::to_string_pretty(&pkg).unwrap())
-            .unwrap();
+        std::fs::write(
+            dir.join("package.json"),
+            serde_json::to_string_pretty(&pkg).unwrap(),
+        )
+        .unwrap();
         for (rel, body) in files {
             let p = dir.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -956,13 +1002,11 @@ mod tests {
         let store_root = &tmp;
         let vendor_root = &tmp.join("vend");
         // a store-internal referrer must resolve the STORE copy, never vendored/
-        let referrer = format!("file://{}", store_root.join("node_modules/widget/index.js").display());
-        let d = resolve_v2(
-            Some(store_root),
-            Some(vendor_root),
-            &referrer,
-            "widget",
+        let referrer = format!(
+            "file://{}",
+            store_root.join("node_modules/widget/index.js").display()
         );
+        let d = resolve_v2(Some(store_root), Some(vendor_root), &referrer, "widget");
         assert!(
             matches!(&d, Decision::File(p) if p.starts_with(&store_root.join("node_modules/widget"))),
             "store-internal import must not see vendored, got {d:?}"
@@ -994,10 +1038,20 @@ mod tests {
         );
         let vendor_root = &tmp.join("vend");
         // pinned to a version we don't have vendored, and no store configured
-        let d = resolve_v2(None, Some(vendor_root), "file:///app/main.ts", "npm:widget@1.0.0");
+        let d = resolve_v2(
+            None,
+            Some(vendor_root),
+            "file:///app/main.ts",
+            "npm:widget@1.0.0",
+        );
         assert!(matches!(&d, Decision::Error(_)), "got {d:?}");
         // pin matching the vendored version resolves from vendor
-        let d = resolve_v2(None, Some(vendor_root), "file:///app/main.ts", "npm:widget@9.0.0");
+        let d = resolve_v2(
+            None,
+            Some(vendor_root),
+            "file:///app/main.ts",
+            "npm:widget@9.0.0",
+        );
         assert!(matches!(&d, Decision::File(p) if p.starts_with(&tmp.join("vend/widget"))));
         let _ = std::fs::remove_dir_all(&tmp);
         let _ = v;

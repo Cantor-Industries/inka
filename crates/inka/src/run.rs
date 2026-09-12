@@ -176,7 +176,11 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
                         CATEGORIES.join(", ")
                     ));
                 }
-                let list = if list.is_empty() { "*".to_string() } else { list };
+                let list = if list.is_empty() {
+                    "*".to_string()
+                } else {
+                    list
+                };
                 let slot = if deny { &mut f.deny } else { &mut f.allow };
                 slot.push((cat, list));
             }
@@ -253,7 +257,9 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
                             .join(", ")
                     ));
                 }
-                None => fail(&format!("--runtime needs a version like 0.266.0, got '{ver}'")),
+                None => fail(&format!(
+                    "--runtime needs a version like 0.266.0, got '{ver}'"
+                )),
             }
         }
         i += 1;
@@ -291,8 +297,8 @@ fn join_components(rel: &Path) -> String {
 /// roots at the nearest ancestor project (vendored/ | package.json | deno.json),
 /// falling back to the file's own directory.
 fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> {
-    let canon = fs::canonicalize(file)
-        .map_err(|e| format!("cannot resolve {}: {e}", file.display()))?;
+    let canon =
+        fs::canonicalize(file).map_err(|e| format!("cannot resolve {}: {e}", file.display()))?;
     if !canon.is_file() {
         return Err(format!("'{}' is not a file", file.display()));
     }

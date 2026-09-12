@@ -19,8 +19,8 @@ use deno_runtime::deno_permissions::{
     RuntimePermissionDescriptorParser,
 };
 use deno_runtime::deno_web::{BlobStore, InMemoryBroadcastChannel};
-use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use deno_runtime::transpile::maybe_transpile_source;
+use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use deno_runtime::{FeatureChecker, WorkerLogLevel};
 
 use deno_error::JsErrorBox;
@@ -30,8 +30,7 @@ use sys_traits::impls::RealSys;
 /// `deno_runtime` base (`0.xxx.0`) plus an inka runtime revision (`.1`, `.2`, …).
 const RUNTIME_VERSION: &str = env!("INKA_RUNTIME_VERSION");
 
-static STARTUP_SNAPSHOT: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/CLI_SNAPSHOT.bin"));
+static STARTUP_SNAPSHOT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/CLI_SNAPSHOT.bin"));
 
 mod runtime_snapshot {
     include!(concat!(env!("OUT_DIR"), "/EXTENSION_RESIDUAL_SOURCES.rs"));
@@ -43,9 +42,12 @@ mod node_services;
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
 // resource when node services are enabled. We always run with node_services
 // None, so inject RealSys ourselves via a tiny state extension.
-deno_core::extension!(inka_rt_state, state = |state: &mut deno_core::OpState| {
-    state.put(sys_traits::impls::RealSys);
-});
+deno_core::extension!(
+    inka_rt_state,
+    state = |state: &mut deno_core::OpState| {
+        state.put(sys_traits::impls::RealSys);
+    }
+);
 
 /// Store-backed module loader. Serves:
 ///   - the artifact tree (or the staged single-entry tree) — local files,
@@ -204,7 +206,9 @@ fn resolve_with_resolver(
         }
     }
     match kind {
-        KIND_USE_DEFAULT => deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err),
+        KIND_USE_DEFAULT => {
+            deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+        }
         KIND_FILE => file_url_response(&PathBuf::from(a_str)),
         KIND_BUILTIN => {
             if a_str.is_empty() {
@@ -299,9 +303,7 @@ impl ModuleLoader for PkgLoader {
         let fut = async move {
             let mut path = module_url_to_path(&specifier)?;
             let in_artifact = path.starts_with(&artifact_root);
-            let in_store = store_root
-                .as_ref()
-                .is_some_and(|s| path.starts_with(s));
+            let in_store = store_root.as_ref().is_some_and(|s| path.starts_with(s));
             if !in_artifact && !in_store {
                 return Err(JsErrorBox::generic(format!(
                     "refusing to load module outside the artifact tree and package store: {specifier}"
@@ -324,9 +326,7 @@ impl ModuleLoader for PkgLoader {
                 }
             }
             let in_artifact = path.starts_with(&artifact_root);
-            let in_store = store_root
-                .as_ref()
-                .is_some_and(|s| path.starts_with(s));
+            let in_store = store_root.as_ref().is_some_and(|s| path.starts_with(s));
             if !in_artifact && !in_store {
                 return Err(JsErrorBox::generic(format!(
                     "refusing to load module outside the artifact tree and package store: {specifier}"
@@ -345,9 +345,7 @@ impl ModuleLoader for PkgLoader {
                     ModuleType::Json
                 } else {
                     match &options.requested_module_type {
-                        deno_core::RequestedModuleType::Other(ty) => {
-                            ModuleType::Other(ty.clone())
-                        }
+                        deno_core::RequestedModuleType::Other(ty) => ModuleType::Other(ty.clone()),
                         deno_core::RequestedModuleType::Text => ModuleType::Text,
                         deno_core::RequestedModuleType::Bytes => ModuleType::Bytes,
                         _ => ModuleType::JavaScript,
@@ -379,11 +377,14 @@ impl ModuleLoader for PkgLoader {
             if module_type == ModuleType::JavaScript && node_services.maybe_cjs(&path) {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 if let Some(facade) =
-                    node_services.cjs_facade(&specifier, text).await.map_err(|e| {
-                        JsErrorBox::generic(format!(
-                            "failed to convert CommonJS module {specifier} to ESM: {e}"
-                        ))
-                    })?
+                    node_services
+                        .cjs_facade(&specifier, text)
+                        .await
+                        .map_err(|e| {
+                            JsErrorBox::generic(format!(
+                                "failed to convert CommonJS module {specifier} to ESM: {e}"
+                            ))
+                        })?
                 {
                     return Ok(ModuleSource::new(
                         ModuleType::JavaScript,
@@ -435,9 +436,9 @@ impl ModuleLoader for PkgLoader {
 }
 
 fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox> {
-    specifier.to_file_path().map_err(|_| {
-        JsErrorBox::type_error(format!("not a file URL module: {specifier}"))
-    })
+    specifier
+        .to_file_path()
+        .map_err(|_| JsErrorBox::type_error(format!("not a file URL module: {specifier}")))
 }
 
 // ---- npm/node services -----------------------------------------------------
@@ -550,9 +551,7 @@ fn parse_perm_dsl(dsl: &str) -> Result<PermSpec, String> {
 }
 
 fn find<'a>(list: &'a [(String, Vec<String>)], cat: &str) -> Option<&'a Vec<String>> {
-    list.iter()
-        .find(|(c, _)| c == cat)
-        .map(|(_, v)| v)
+    list.iter().find(|(c, _)| c == cat).map(|(_, v)| v)
 }
 
 /// `*` in a manifest value means "all in this category", which at the options
@@ -590,9 +589,8 @@ fn build_options_permissions(
             None => None,                         // deny-by-default
         }
     };
-    let cat_deny = |cat: &str| -> Option<Vec<String>> {
-        find(&spec.deny, cat).map(|items| expand(items))
-    };
+    let cat_deny =
+        |cat: &str| -> Option<Vec<String>> { find(&spec.deny, cat).map(|items| expand(items)) };
 
     // A deny with no allow in that category cannot trim anything under
     // deny-by-default; surface it so the manifest author isn't misled.
@@ -802,8 +800,7 @@ fn run_dir_inner(
 fn version_cstr() -> &'static CStr {
     static V: OnceLock<CString> = OnceLock::new();
     V.get_or_init(|| {
-        CString::new(format!("inka_runtime-{RUNTIME_VERSION}"))
-            .expect("nul in version string")
+        CString::new(format!("inka_runtime-{RUNTIME_VERSION}")).expect("nul in version string")
     })
 }
 
@@ -911,14 +908,7 @@ pub unsafe extern "C" fn inka_runtime_run_module_perm(
     perms: *const c_char,
 ) -> c_int {
     run_from_raw(
-        specifier,
-        source,
-        source_len,
-        argc,
-        argv,
-        exit_code,
-        err_msg,
-        perms,
+        specifier, source, source_len, argc, argv, exit_code, err_msg, perms,
     )
 }
 

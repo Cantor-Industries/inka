@@ -95,7 +95,10 @@ pub fn cmd_build(args: &[String]) {
     let source = match source_flag {
         Some(s) => {
             if !positional.is_empty() {
-                eprintln!("error: unexpected argument '{}' (source already given with -s/--source)", positional[0].display());
+                eprintln!(
+                    "error: unexpected argument '{}' (source already given with -s/--source)",
+                    positional[0].display()
+                );
                 std::process::exit(2);
             }
             s
@@ -263,10 +266,7 @@ pub fn cmd_build(args: &[String]) {
     }
 
     // ---- single-file build (back-compatible v1 trailer) --------------------
-    let entry_bytes = files
-        .first()
-        .map(|(_, b)| b.clone())
-        .unwrap_or_default();
+    let entry_bytes = files.first().map(|(_, b)| b.clone()).unwrap_or_default();
     let source_name = Path::new(&entry_rel)
         .file_name()
         .map(|s| s.to_string_lossy().into_owned())
@@ -368,9 +368,7 @@ fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
 }
 
 fn ext_of(name: &str) -> Option<String> {
-    name.rsplit('.')
-        .next()
-        .map(|e| e.to_ascii_lowercase())
+    name.rsplit('.').next().map(|e| e.to_ascii_lowercase())
 }
 
 fn ts_family(name: &str) -> bool {
@@ -491,7 +489,10 @@ fn find_launcher() -> PathBuf {
         if p.is_file() {
             return p;
         }
-        err(&format!("INKA_LAUNCHER points to a missing file: {}", p.display()));
+        err(&format!(
+            "INKA_LAUNCHER points to a missing file: {}",
+            p.display()
+        ));
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
@@ -547,7 +548,11 @@ mod tests {
     #[test]
     fn runtime_flag_overrides_default_and_config() {
         let cwd = scratch();
-        write(&cwd, "deno.json", r#"{ "inka": { "runtime": ">=0.300.0" } }"#);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "inka": { "runtime": ">=0.300.0" } }"#,
+        );
         // config `inka.runtime` wins over the default floor...
         let m = manifest(&cwd, None, None, None);
         assert!(m.contains("runtime=inka_runtime>=0.300.0"), "{m}");

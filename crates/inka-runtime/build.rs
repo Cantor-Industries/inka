@@ -49,8 +49,7 @@ fn create_cli_snapshot(snapshot_path: &Path, residual_path: &Path, out_dir: &Pat
         target: env::var("TARGET").unwrap(),
     };
 
-    let output =
-        create_runtime_snapshot(snapshot_path.to_path_buf(), snapshot_options, vec![]);
+    let output = create_runtime_snapshot(snapshot_path.to_path_buf(), snapshot_options, vec![]);
 
     let consumed: HashSet<&str> = output
         .consumed_lazy_specifiers
@@ -99,10 +98,8 @@ fn transpile_residual_source(out_dir: &Path, specifier: &str, src_path: &Path) -
         )
     });
     let name = ModuleName::from(specifier.to_string());
-    let (transpiled, _source_map) =
-        maybe_transpile_source(name, ModuleCodeString::from(source)).unwrap_or_else(|e| {
-            panic!("failed to transpile residual lazy source {specifier}: {e}")
-        });
+    let (transpiled, _source_map) = maybe_transpile_source(name, ModuleCodeString::from(source))
+        .unwrap_or_else(|e| panic!("failed to transpile residual lazy source {specifier}: {e}"));
 
     let sanitized: String = specifier
         .chars()

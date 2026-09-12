@@ -27,8 +27,8 @@ pub fn rel_from_cwd(cwd: &Path, p: &Path) -> Result<String, String> {
     } else {
         cwd.join(p)
     };
-    let canon = fs::canonicalize(&abs)
-        .map_err(|e| format!("cannot resolve {}: {e}", abs.display()))?;
+    let canon =
+        fs::canonicalize(&abs).map_err(|e| format!("cannot resolve {}: {e}", abs.display()))?;
     let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let rel = canon.strip_prefix(&canon_cwd).map_err(|_| {
         format!(
@@ -53,8 +53,7 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
         if files.contains_key(&rel) {
             continue;
         }
-        let bytes = fs::read(&abs)
-            .map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
+        let bytes = fs::read(&abs).map_err(|e| format!("cannot read {}: {e}", abs.display()))?;
         files.insert(rel.clone(), bytes.clone());
 
         let specifiers = scan_specifiers(cwd, &rel, &bytes, &mut warned);
@@ -220,7 +219,7 @@ fn scan_specifiers(cwd: &Path, rel: &str, bytes: &[u8], warned: &mut bool) -> Ve
 }
 
 fn parse_program(cwd: &Path, rel: &str, text: &str) -> Option<deno_ast::ParsedSource> {
-    use deno_ast::{MediaType, ParseParams, parse_module};
+    use deno_ast::{parse_module, MediaType, ParseParams};
 
     let media = MediaType::from_path(Path::new(rel));
     if matches!(media, MediaType::Json) {
@@ -261,8 +260,7 @@ fn scan_dynamic_imports(text: &str, rel: &str, warned: &mut bool) -> Vec<String>
             }
             j += 1;
             // skip whitespace
-            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n')
-            {
+            while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t' || bytes[j] == b'\n') {
                 j += 1;
             }
             if j < bytes.len() && (bytes[j] == b'\'' || bytes[j] == b'"' || bytes[j] == b'`') {
@@ -279,7 +277,8 @@ fn scan_dynamic_imports(text: &str, rel: &str, warned: &mut bool) -> Vec<String>
                 }
                 // skip to the closing paren
                 let mut k2 = k + 1;
-                while k2 < bytes.len() && (bytes[k2] == b' ' || bytes[k2] == b'\t' || bytes[k2] == b'\n')
+                while k2 < bytes.len()
+                    && (bytes[k2] == b' ' || bytes[k2] == b'\t' || bytes[k2] == b'\n')
                 {
                     k2 += 1;
                 }
@@ -336,7 +335,11 @@ fn resolve_local(cwd: &Path, from_rel: &str, spec: &str) -> Option<String> {
 }
 
 fn existing_rel(cwd: &Path, p: &Path) -> Option<String> {
-    let abs = if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) };
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        cwd.join(p)
+    };
     if !abs.is_file() {
         return None;
     }
@@ -468,7 +471,11 @@ fn is_vendor_noise(name: &str) -> bool {
         || l.ends_with(".d.cts")
 }
 
-fn walk_vendored(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+fn walk_vendored(
+    cwd: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
     let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
     for ent in rd.flatten() {
         let ft = ent.file_type().map_err(|e| e.to_string())?;
@@ -515,10 +522,7 @@ mod tests {
     fn scratch() -> PathBuf {
         static N: AtomicUsize = AtomicUsize::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let d = std::env::temp_dir().join(format!(
-            "inkaembed-{}-{n}",
-            std::process::id()
-        ));
+        let d = std::env::temp_dir().join(format!("inkaembed-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -533,7 +537,11 @@ mod tests {
     #[test]
     fn collect_vendored_skips_non_package_entries() {
         let cwd = scratch();
-        mk(&cwd, "vendored/ws/package.json", r#"{"name":"ws","version":"1.0.0"}"#);
+        mk(
+            &cwd,
+            "vendored/ws/package.json",
+            r#"{"name":"ws","version":"1.0.0"}"#,
+        );
         mk(&cwd, "vendored/ws/index.js", "export const x = 1;\n");
         // stray dir and stray top-level file: not package roots -> not embedded
         mk(&cwd, "vendored/junk/file.txt", "stray\n");
@@ -556,7 +564,11 @@ mod tests {
             "vendored/@effect/platform/package.json",
             r#"{"name":"@effect/platform","version":"1.0.0"}"#,
         );
-        mk(&cwd, "vendored/@effect/platform/lib/mod.ts", "export const p = 1;\n");
+        mk(
+            &cwd,
+            "vendored/@effect/platform/lib/mod.ts",
+            "export const p = 1;\n",
+        );
         // a stray file directly inside a scope container is not a package
         mk(&cwd, "vendored/@junk/note.txt", "not a package\n");
         let files = collect_vendored(&cwd).unwrap();
@@ -612,7 +624,10 @@ mod tests {
         ] {
             assert!(rels.contains(&want.to_string()), "missing {want}: {rels:?}");
         }
-        assert!(rels.iter().all(|r| !r.starts_with("vendored/extra")), "{rels:?}");
+        assert!(
+            rels.iter().all(|r| !r.starts_with("vendored/extra")),
+            "{rels:?}"
+        );
         assert!(
             rels.iter().all(|r| r != "app.js" && r != "util.js"),
             "app files must not be returned: {rels:?}"
@@ -636,7 +651,11 @@ mod tests {
         mk(&cwd, "vendored/ws/spec.test.js", "export const t = 1;\n");
         mk(&cwd, "vendored/ws/y.spec.ts", "export const t = 1;\n");
         mk(&cwd, "vendored/ws/index.js.map", "{}");
-        mk(&cwd, "vendored/ws/index.d.ts", "export declare const i: number;\n");
+        mk(
+            &cwd,
+            "vendored/ws/index.d.ts",
+            "export declare const i: number;\n",
+        );
         let files = collect_vendored(&cwd).unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert_eq!(

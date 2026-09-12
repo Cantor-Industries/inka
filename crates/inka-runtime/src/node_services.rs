@@ -40,9 +40,8 @@ use node_resolver::errors::{
     PackageNotFoundError,
 };
 use node_resolver::{
-    DenoIsBuiltInNodeModuleChecker, InNpmPackageChecker, NpmPackageFolderResolver,
-    NodeConditionOptions, NodeResolverOptions, PackageJsonResolver, PackageJsonResolverRc,
-    UrlOrPathRef,
+    DenoIsBuiltInNodeModuleChecker, InNpmPackageChecker, NodeConditionOptions, NodeResolverOptions,
+    NpmPackageFolderResolver, PackageJsonResolver, PackageJsonResolverRc, UrlOrPathRef,
 };
 use sys_traits::impls::RealSys;
 
@@ -213,7 +212,9 @@ impl NodeRequireLoader for StoreRequireLoader {
 
     fn load_text_file_lossy(&self, path: &Path) -> Result<FastString, JsErrorBox> {
         let bytes = std::fs::read(path).map_err(JsErrorBox::from_err)?;
-        Ok(FastString::from(String::from_utf8_lossy(&bytes).into_owned()))
+        Ok(FastString::from(
+            String::from_utf8_lossy(&bytes).into_owned(),
+        ))
     }
 
     fn is_maybe_cjs(&self, specifier: &Url) -> Result<bool, PackageJsonLoadError> {
@@ -264,9 +265,7 @@ impl CjsCodeAnalyzer for InkaCjsCodeAnalyzer {
             scope_analysis: false,
             maybe_syntax: None,
         })
-        .map_err(|e| {
-            JsErrorBox::generic(format!("failed to parse CJS module {specifier}: {e}"))
-        })?;
+        .map_err(|e| JsErrorBox::generic(format!("failed to parse CJS module {specifier}: {e}")))?;
         if !parsed.compute_is_script() {
             // It's an ES module; hand it back unchanged.
             return Ok(CjsAnalysis::Esm(Cow::Owned(source), None));
@@ -329,8 +328,8 @@ impl NodeServices {
         let folder = StoreFolderResolver {
             roots: roots.clone(),
         };
-        let node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys> = new_rc(
-            NodeResolver::new(
+        let node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys> =
+            new_rc(NodeResolver::new(
                 checker.clone(),
                 DenoIsBuiltInNodeModuleChecker,
                 folder.clone(),
@@ -342,8 +341,7 @@ impl NodeServices {
                     bundle_mode: false,
                     typescript_version: None,
                 },
-            ),
-        );
+            ));
         let analyzer: InkaAnalyzer = new_rc(CjsModuleExportAnalyzer::new(
             InkaCjsCodeAnalyzer {
                 roots: roots.clone(),

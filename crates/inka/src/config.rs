@@ -125,10 +125,7 @@ fn read_config_file(cwd: &Path, name: &str) -> LoadOutcome {
     };
     match serde_json::from_str(&text) {
         Ok(v) => LoadOutcome::Ok(v),
-        Err(e) => LoadOutcome::Unparseable(format!(
-            "{} is not valid JSON: {e}",
-            path.display()
-        )),
+        Err(e) => LoadOutcome::Unparseable(format!("{} is not valid JSON: {e}", path.display())),
     }
 }
 
@@ -200,11 +197,7 @@ fn inka_block_runtime(cfg: &ConfigFiles) -> (Option<String>, Option<String>) {
         }
     }
     // deno wins over package.json
-    if let Some(blk) = cfg
-        .deno
-        .as_ref()
-        .and_then(|d| d.get("inka"))
-    {
+    if let Some(blk) = cfg.deno.as_ref().and_then(|d| d.get("inka")) {
         if let Some(r) = blk.get("runtime").and_then(Value::as_str) {
             runtime = Some(r.to_string());
         }
@@ -238,7 +231,12 @@ fn render_val(v: &Value) -> Option<String> {
 
 /// Apply one category map (`{ cat: bool | string | array | {allow,deny,ignore} }`)
 /// into aggregated allow/deny lists. deno has no `ignore`/`import` inka equivalent.
-fn apply_category_map(map: &Value, allow: &mut Vec<(String, String)>, deny: &mut Vec<(String, String)>, warns: &mut Vec<String>) {
+fn apply_category_map(
+    map: &Value,
+    allow: &mut Vec<(String, String)>,
+    deny: &mut Vec<(String, String)>,
+    warns: &mut Vec<String>,
+) {
     let Some(obj) = map.as_object() else { return };
     for (cat, val) in obj {
         if !CATEGORIES.contains(&cat.as_str()) {
@@ -288,10 +286,7 @@ fn apply_category_map(map: &Value, allow: &mut Vec<(String, String)>, deny: &mut
 /// True when a permission descriptor looks like a relative filesystem path
 /// (not `*`, not absolute, not a URL/scheme).
 fn is_relative_path(item: &str) -> bool {
-    !item.is_empty()
-        && item != "*"
-        && !item.starts_with('/')
-        && !item.contains("://")
+    !item.is_empty() && item != "*" && !item.starts_with('/') && !item.contains("://")
 }
 
 /// Append the scalar string items of a category value (`true` counts as `*`).
@@ -570,13 +565,11 @@ pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>
 /// permission flags selected. Never applies the set.
 pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
     let (cfg, _) = load(cwd);
-    [cfg.deno.as_ref(), cfg.pkg.as_ref()]
-        .iter()
-        .any(|file| {
-            named_set_in(*file, "default")
-                .map(|set| set_declares_grants(&set))
-                .unwrap_or(false)
-        })
+    [cfg.deno.as_ref(), cfg.pkg.as_ref()].iter().any(|file| {
+        named_set_in(*file, "default")
+            .map(|set| set_declares_grants(&set))
+            .unwrap_or(false)
+    })
 }
 
 pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
@@ -696,7 +689,10 @@ mod tests {
         let (s, warns) = read_synth(&cwd, None);
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
         assert!(
-            has_note(&warns, "deno.json declares permissions but none were selected"),
+            has_note(
+                &warns,
+                "deno.json declares permissions but none were selected"
+            ),
             "{warns:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
@@ -733,7 +729,10 @@ mod tests {
         assert!(!s.contains("allow-import"), "{s}");
         assert!(s.contains("deny-ffi=libc.so"), "{s}");
         assert!(has_note(&warns, "no inka equivalent"), "{warns:?}");
-        assert!(has_note(&warns, "'ignore' has no inka equivalent"), "{warns:?}");
+        assert!(
+            has_note(&warns, "'ignore' has no inka equivalent"),
+            "{warns:?}"
+        );
         // compile.permissions was selected, so the "none selected" note is absent.
         assert!(!has_note(&warns, "none were selected"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
@@ -795,11 +794,17 @@ mod tests {
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
         assert!(s.contains("runtime=inka_runtime>=0.266.0"), "{s}");
         assert!(s.contains("tested-against=0.266.0"), "{s}");
-        assert!(has_note(&warns, "declares permissions but none were selected"), "{warns:?}");
+        assert!(
+            has_note(&warns, "declares permissions but none were selected"),
+            "{warns:?}"
+        );
 
         // -P default: both files define it -> per-category merge, deno wins.
         let s2 = read_manifest(&cwd, Some("default"));
-        assert!(s2.contains("allow-read=./deno"), "deno read wins per key: {s2}");
+        assert!(
+            s2.contains("allow-read=./deno"),
+            "deno read wins per key: {s2}"
+        );
         assert!(s2.contains("allow-net=*"), "{s2}");
         assert!(!s2.contains("./pkg"), "{s2}");
 
@@ -937,7 +942,10 @@ mod tests {
         );
         let (s, warns) = read_synth(&cwd, Some("nope"));
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
-        assert!(has_note(&warns, "-P names permission set 'nope'"), "{warns:?}");
+        assert!(
+            has_note(&warns, "-P names permission set 'nope'"),
+            "{warns:?}"
+        );
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -954,7 +962,10 @@ mod tests {
         let (s, warns) = read_synth(&cwd, None);
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
         assert!(
-            has_note(&warns, "compile.permissions must be a permissions map or a set-name string"),
+            has_note(
+                &warns,
+                "compile.permissions must be a permissions map or a set-name string"
+            ),
             "{warns:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
@@ -972,7 +983,10 @@ mod tests {
         let (s, warns) = read_synth(&cwd, None);
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
         assert!(
-            has_note(&warns, "inka.permissions must name a permission set (string)"),
+            has_note(
+                &warns,
+                "inka.permissions must name a permission set (string)"
+            ),
             "{warns:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
@@ -983,11 +997,7 @@ mod tests {
     fn empty_default_set_produces_no_note() {
         let cwd = PathBuf::from("/tmp/inkaconf-emptyd");
         let _ = std::fs::remove_dir_all(&cwd);
-        write(
-            &cwd,
-            "deno.json",
-            r#"{ "permissions": { "default": {} } }"#,
-        );
+        write(&cwd, "deno.json", r#"{ "permissions": { "default": {} } }"#);
         let (s, warns) = read_synth(&cwd, None);
         assert_eq!(s, "");
         assert!(warns.is_empty(), "{warns:?}");
@@ -1093,7 +1103,10 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         assert!(!config_has_default_grants(&cwd));
         write(&cwd, "deno.json", r#"{ "permissions": { "default": {} } }"#);
-        assert!(!config_has_default_grants(&cwd), "empty default grants nothing");
+        assert!(
+            !config_has_default_grants(&cwd),
+            "empty default grants nothing"
+        );
         write(
             &cwd,
             "deno.json",
@@ -1155,4 +1168,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }
-

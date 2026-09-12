@@ -80,7 +80,10 @@ fn data_root(home: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>) -> P
 }
 
 fn data_root_now() -> PathBuf {
-    data_root(env::var_os("HOME").as_deref(), env::var_os("XDG_DATA_HOME").as_deref())
+    data_root(
+        env::var_os("HOME").as_deref(),
+        env::var_os("XDG_DATA_HOME").as_deref(),
+    )
 }
 
 /// Per-user inka data dir: `$XDG_DATA_HOME/inka` (`~/.local/share/inka`).
@@ -167,7 +170,10 @@ fn cmd_internal(args: &[String]) {
 
 /// Fetch `<base>/<file>` plus `<base>/<file>.sha256` when available.
 /// `base` may be a local directory path or an http(s) URL.
-pub(crate) fn fetch_with_sidecar(base: &str, file: &str) -> Result<(Vec<u8>, Option<String>), String> {
+pub(crate) fn fetch_with_sidecar(
+    base: &str,
+    file: &str,
+) -> Result<(Vec<u8>, Option<String>), String> {
     let is_url = base.starts_with("http://") || base.starts_with("https://");
     let main = fetch_one(base, file, is_url)?;
     let sidecar = fetch_optional(base, &format!("{file}.sha256"), is_url)?;
@@ -220,10 +226,13 @@ fn http_get_optional(url: &str) -> Result<Option<Vec<u8>>, String> {
     {
         Ok(out) if out.status.success() => return Ok(Some(out.stdout)),
         Ok(out) if out.status.code() == Some(22) => return Ok(None), // HTTP error
-        Ok(_) => {}                                                 // try wget
-        Err(_) => {}                                                // curl missing
+        Ok(_) => {}                                                  // try wget
+        Err(_) => {}                                                 // curl missing
     }
-    match Command::new("wget").args(["-qO-", "--timeout=30", url]).output() {
+    match Command::new("wget")
+        .args(["-qO-", "--timeout=30", url])
+        .output()
+    {
         Ok(out) if out.status.success() => Ok(Some(out.stdout)),
         Ok(out) if out.status.code() == Some(8) => Ok(None), // server error
         Ok(out) => Err(format!(
@@ -395,7 +404,10 @@ fn pool_package_count(pool: &Path) -> usize {
             n += 1;
         } else if name.starts_with('@') {
             if let Ok(sub) = fs::read_dir(&p) {
-                n += sub.flatten().filter(|s| s.path().join("package.json").is_file()).count();
+                n += sub
+                    .flatten()
+                    .filter(|s| s.path().join("package.json").is_file())
+                    .count();
             }
         }
     }
@@ -406,7 +418,11 @@ fn seed_sha(store: &Path) -> String {
     fs::read(store.join("seed-manifest.json"))
         .ok()
         .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| v.get("sha256").and_then(serde_json::Value::as_str).map(str::to_string))
+        .and_then(|v| {
+            v.get("sha256")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
         .unwrap_or_default()
 }
 
@@ -433,7 +449,11 @@ fn lock_summary(lock_path: &Path) -> (usize, Option<String>) {
 fn git_posture(vendored: &Path) -> String {
     let gi = vendored.parent().unwrap_or(vendored).join(".gitignore");
     match fs::read_to_string(&gi) {
-        Ok(text) if text.lines().any(|l| l.trim().trim_end_matches('/') == "vendored") => {
+        Ok(text)
+            if text
+                .lines()
+                .any(|l| l.trim().trim_end_matches('/') == "vendored") =>
+        {
             "ignore (dev)".to_string()
         }
         Ok(_) => "commit (release)".to_string(),
@@ -474,11 +494,16 @@ fn cmd_doctor(args: &[String]) {
     match &res_path {
         None => {
             println!("  resolver: none installed (vendored resolution disabled)");
-            warnings.push("no inka resolver installed; run `inka update` or set INKA_RESOLVER".into());
+            warnings
+                .push("no inka resolver installed; run `inka update` or set INKA_RESOLVER".into());
         }
         Some((v, p)) => {
             let abi = abi.unwrap_or(-1);
-            println!("  resolver {v}  {}  abi={abi} version={}", p.display(), res_version.as_deref().unwrap_or("?"));
+            println!(
+                "  resolver {v}  {}  abi={abi} version={}",
+                p.display(),
+                res_version.as_deref().unwrap_or("?")
+            );
             if abi != EXPECTED_RESOLVER_ABI {
                 warnings.push(format!(
                     "resolver abi {abi} != expected {EXPECTED_RESOLVER_ABI}; runtime/resolver mismatch"
@@ -513,11 +538,18 @@ fn cmd_doctor(args: &[String]) {
 
     let (lock_entries, lock_store) = lock_summary(&vendored.join("vendored.lock"));
     if lock_entries > 0 {
-        println!("vendored.lock: {lock_entries} entr{}", if lock_entries == 1 { "y" } else { "ies" });
+        println!(
+            "vendored.lock: {lock_entries} entr{}",
+            if lock_entries == 1 { "y" } else { "ies" }
+        );
         let current = format!(
             "{} sha256={}",
             store.display(),
-            if sha.is_empty() { "no-sha-record" } else { &sha }
+            if sha.is_empty() {
+                "no-sha-record"
+            } else {
+                &sha
+            }
         );
         match lock_store {
             Some(recorded) if recorded != current => {
@@ -543,7 +575,6 @@ fn cmd_doctor(args: &[String]) {
         }
     }
 }
-
 
 pub(crate) fn hex(bytes: &[u8]) -> String {
     let mut s = String::with_capacity(bytes.len() * 2);
@@ -596,7 +627,13 @@ mod tests {
     fn xdg_store_and_runtime_are_siblings_under_inka() {
         // Derived from data_root; assert the shape without touching the env.
         let root = data_root(Some(os("/home/u")), None);
-        assert_eq!(root.join("inka/store"), PathBuf::from("/home/u/.local/share/inka/store"));
-        assert_eq!(root.join("inka/runtime"), PathBuf::from("/home/u/.local/share/inka/runtime"));
+        assert_eq!(
+            root.join("inka/store"),
+            PathBuf::from("/home/u/.local/share/inka/store")
+        );
+        assert_eq!(
+            root.join("inka/runtime"),
+            PathBuf::from("/home/u/.local/share/inka/runtime")
+        );
     }
 }

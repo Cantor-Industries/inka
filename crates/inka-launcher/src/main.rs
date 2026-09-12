@@ -150,8 +150,7 @@ fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
-        fs::write(&target, data)
-            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        fs::write(&target, data).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     }
     Ok(root)
 }
@@ -182,10 +181,7 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
         let val = line[eq + 1..].trim();
         match key {
             "runtime" => {
-                let rest = val
-                    .strip_prefix("inka_runtime")
-                    .unwrap_or(val)
-                    .trim_start();
+                let rest = val.strip_prefix("inka_runtime").unwrap_or(val).trim_start();
                 if let Some(x) = rest.strip_prefix(">=") {
                     m.min = parse_version(x);
                 } else if let Some(x) = rest.strip_prefix(">") {
@@ -251,7 +247,9 @@ fn pick_resolver(dirs: &[PathBuf]) -> Option<PathBuf> {
             let Some(vstr) = stripped.strip_suffix(".so") else {
                 continue;
             };
-            let Some(v) = parse_version(vstr) else { continue };
+            let Some(v) = parse_version(vstr) else {
+                continue;
+            };
             if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
                 best = Some((v, ent.path()));
             }
@@ -281,7 +279,9 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
             let Some(vstr) = stripped.strip_suffix(".so") else {
                 continue;
             };
-            let Some(v) = parse_version(vstr) else { continue };
+            let Some(v) = parse_version(vstr) else {
+                continue;
+            };
             if let Some(exact) = m.exact {
                 if v != exact {
                     continue;
@@ -315,13 +315,7 @@ fn required_string(m: &Manifest) -> String {
     }
 }
 
-fn load_and_run(
-    lib: &Path,
-    module: &str,
-    payload: &[u8],
-    args: &[String],
-    perms: &str,
-) -> i32 {
+fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms: &str) -> i32 {
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
@@ -351,8 +345,9 @@ fn load_and_run(
             .expect("missing inka_runtime_version");
         let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
 
-        let create: libloading::Symbol<FnCreate> =
-            library.get(b"inka_runtime_create").expect("missing inka_runtime_create");
+        let create: libloading::Symbol<FnCreate> = library
+            .get(b"inka_runtime_create")
+            .expect("missing inka_runtime_create");
         let destroy: libloading::Symbol<FnDestroy> = library
             .get(b"inka_runtime_destroy")
             .expect("missing inka_runtime_destroy");
@@ -402,7 +397,10 @@ fn load_and_run(
         );
 
         if !err_msg.is_null() {
-            eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+            eprintln!(
+                "[inka] runtime error message: {}",
+                CStr::from_ptr(err_msg).to_string_lossy()
+            );
         }
         destroy(rt);
 
@@ -414,13 +412,7 @@ fn load_and_run(
     }
 }
 
-fn load_and_run_dir(
-    lib: &Path,
-    dir: &str,
-    entry: &str,
-    args: &[String],
-    perms: &str,
-) -> i32 {
+fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: &str) -> i32 {
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
@@ -451,24 +443,24 @@ fn load_and_run_dir(
         let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|c| c.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
-            library.get(b"inka_runtime_create").expect("missing inka_runtime_create");
+        let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> = library
+            .get(b"inka_runtime_create")
+            .expect("missing inka_runtime_create");
         let destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = library
             .get(b"inka_runtime_destroy")
             .expect("missing inka_runtime_destroy");
-        let run_dir: libloading::Symbol<FnRunDir> = match library
-            .get(b"inka_runtime_run_module_dir")
-        {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!(
-                    "[inka] this artifact is multi-file but runtime {} does not support it \
+        let run_dir: libloading::Symbol<FnRunDir> =
+            match library.get(b"inka_runtime_run_module_dir") {
+                Ok(s) => s,
+                Err(_) => {
+                    eprintln!(
+                        "[inka] this artifact is multi-file but runtime {} does not support it \
                      (missing inka_runtime_run_module_dir); install a newer runtime",
-                    lib.display()
-                );
-                std::process::exit(4);
-            }
-        };
+                        lib.display()
+                    );
+                    std::process::exit(4);
+                }
+            };
 
         let rt = create();
         let mut exit_code: c_int = 0;
@@ -485,7 +477,10 @@ fn load_and_run_dir(
         );
 
         if !err_msg.is_null() {
-            eprintln!("[inka] runtime error message: {}", CStr::from_ptr(err_msg).to_string_lossy());
+            eprintln!(
+                "[inka] runtime error message: {}",
+                CStr::from_ptr(err_msg).to_string_lossy()
+            );
         }
         destroy(rt);
 
@@ -509,7 +504,10 @@ fn main() {
             // Only the standalone launcher (no trailer) answers --version/-V.
             // An artifact has a valid trailer, so its args (including
             // `--version`) pass through to the program instead.
-            if matches!(args.first().map(String::as_str), Some("--version") | Some("-V")) {
+            if matches!(
+                args.first().map(String::as_str),
+                Some("--version") | Some("-V")
+            ) {
                 println!("inka-launcher {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
@@ -560,9 +558,16 @@ fn main() {
     }
 
     let code = match trailer {
-        Trailer::Single { source, manifest: _ } => {
+        Trailer::Single {
+            source,
+            manifest: _,
+        } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
-            debug_log!("[inka] module '{}' payload {} bytes", m.module, source.len());
+            debug_log!(
+                "[inka] module '{}' payload {} bytes",
+                m.module,
+                source.len()
+            );
             // A single-file artifact embeds no vendored packages; never let a
             // caller-exported INKA_VENDOR point the resolver at an external tree.
             env::remove_var("INKA_VENDOR");
@@ -570,9 +575,7 @@ fn main() {
             load_and_run(&path, &m.module, source, &args, &m.perms)
         }
         Trailer::Archive {
-            files,
-            precompiled,
-            ..
+            files, precompiled, ..
         } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
             debug_log!("[inka] module '{}' archive {} files", m.module, files.len());
@@ -597,18 +600,15 @@ fn main() {
             let vendor_dir = root.join("vendored");
             if vendor_dir.is_dir() {
                 env::set_var("INKA_VENDOR", &vendor_dir);
-                debug_log!("[inka] embedded vendored packages at {}", vendor_dir.display());
+                debug_log!(
+                    "[inka] embedded vendored packages at {}",
+                    vendor_dir.display()
+                );
             } else {
                 env::remove_var("INKA_VENDOR");
                 debug_log!("[inka] no embedded vendored packages; INKA_VENDOR cleared");
             }
-            let code = load_and_run_dir(
-                &path,
-                &root.to_string_lossy(),
-                &m.module,
-                &args,
-                &m.perms,
-            );
+            let code = load_and_run_dir(&path, &root.to_string_lossy(), &m.module, &args, &m.perms);
             let _ = fs::remove_dir_all(&root);
             code
         }

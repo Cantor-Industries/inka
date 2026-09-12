@@ -51,8 +51,7 @@ impl Drop for TempDir {
 }
 
 fn resolve_base(from: Option<String>) -> String {
-    from
-        .or_else(|| env::var("INKA_RELEASE_BASE").ok())
+    from.or_else(|| env::var("INKA_RELEASE_BASE").ok())
         .or_else(|| env::var("INKA_RT_SOURCE").ok())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_CHANNEL.to_string())
@@ -154,7 +153,15 @@ pub(crate) fn cmd_update(args: &[String]) {
 
     let base = resolve_base(from);
     match version {
-        Some(v) => update_pinned(&base, &v, sha256, insecure, home.as_deref(), &components, toolchain),
+        Some(v) => update_pinned(
+            &base,
+            &v,
+            sha256,
+            insecure,
+            home.as_deref(),
+            &components,
+            toolchain,
+        ),
         None => update_latest(&base, insecure, home.as_deref(), &components, toolchain),
     }
 }
@@ -165,7 +172,10 @@ pub(crate) fn cmd_update(args: &[String]) {
 /// `VERSION` marker is present, so a dev build in `target/release` is never
 /// clobbered by a published toolchain.
 fn toolchain_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(Path::to_path_buf)
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(Path::to_path_buf)
 }
 
 fn installed_toolchain_version(dir: &Path) -> String {
@@ -214,8 +224,8 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     }
 
     println!("[inka] updating toolchain {installed} -> {latest}");
-    let (bytes, sidecar) = fetch_with_sidecar(base, archive)
-        .map_err(|e| format!("failed to fetch {archive}: {e}"))?;
+    let (bytes, sidecar) =
+        fetch_with_sidecar(base, archive).map_err(|e| format!("failed to fetch {archive}: {e}"))?;
     let expected = tc
         .get("sha256")
         .and_then(Value::as_str)
@@ -276,9 +286,9 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
             return Err(format!("toolchain archive is missing '{f}'"));
         }
         let new = dir.join(format!(".{f}.new{pid}"));
-        if let Err(e) = fs::copy(&src, &new).and_then(|_| {
-            fs::set_permissions(&new, fs::Permissions::from_mode(0o755))
-        }) {
+        if let Err(e) = fs::copy(&src, &new)
+            .and_then(|_| fs::set_permissions(&new, fs::Permissions::from_mode(0o755)))
+        {
             let _ = fs::remove_file(&new);
             cleanup_staged(&staged);
             return Err(format!("cannot stage {f}: {e}"));
@@ -558,9 +568,8 @@ fn update_pinned(
         return;
     }
 
-    let ver = parse_version(version_str).unwrap_or_else(|| {
-        fail(&format!("'{version_str}' is not a valid x.y.z version"))
-    });
+    let ver = parse_version(version_str)
+        .unwrap_or_else(|| fail(&format!("'{version_str}' is not a valid x.y.z version")));
     let target = target_dir(home);
     ensure_dir(&target);
 
@@ -585,7 +594,9 @@ fn update_pinned(
 fn resolver_version_from_release(base: &str) -> Option<String> {
     let text = fetch_text(base, "versions.json").ok()?;
     let v: Value = serde_json::from_str(&text).ok()?;
-    v.get("resolver").and_then(Value::as_str).map(str::to_string)
+    v.get("resolver")
+        .and_then(Value::as_str)
+        .map(str::to_string)
 }
 
 fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) -> Result<(), String> {
@@ -597,8 +608,12 @@ fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) -> Re
         if let Ok(rd) = fs::read_dir(base) {
             for ent in rd.flatten() {
                 let n = ent.file_name().to_string_lossy().into_owned();
-                let Some(stripped) = n.strip_prefix(RESOLVER_PREFIX) else { continue };
-                let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) else { continue };
+                let Some(stripped) = n.strip_prefix(RESOLVER_PREFIX) else {
+                    continue;
+                };
+                let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) else {
+                    continue;
+                };
                 if let Some(v) = parse_version(vstr) {
                     if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
                         best = Some((v, n));
@@ -675,7 +690,13 @@ mod tests {
     #[test]
     fn plan_installs_when_nothing_installed() {
         let a = plan_actions(None, None, Version(0, 266, 1), Some(Version(1, 0, 0)));
-        assert_eq!(a, Actions { runtime: true, resolver: true });
+        assert_eq!(
+            a,
+            Actions {
+                runtime: true,
+                resolver: true
+            }
+        );
     }
 
     #[test]
@@ -686,7 +707,13 @@ mod tests {
             Version(0, 266, 1),
             Some(Version(1, 0, 0)),
         );
-        assert_eq!(a, Actions { runtime: false, resolver: false });
+        assert_eq!(
+            a,
+            Actions {
+                runtime: false,
+                resolver: false
+            }
+        );
 
         // Never downgrade: installed newer than the release.
         let b = plan_actions(
@@ -695,7 +722,13 @@ mod tests {
             Version(0, 266, 1),
             Some(Version(1, 0, 0)),
         );
-        assert_eq!(b, Actions { runtime: false, resolver: false });
+        assert_eq!(
+            b,
+            Actions {
+                runtime: false,
+                resolver: false
+            }
+        );
     }
 
     #[test]
@@ -706,7 +739,13 @@ mod tests {
             Version(0, 266, 1),
             Some(Version(1, 0, 0)),
         );
-        assert_eq!(a, Actions { runtime: true, resolver: false });
+        assert_eq!(
+            a,
+            Actions {
+                runtime: true,
+                resolver: false
+            }
+        );
 
         let b = plan_actions(
             Some(Version(0, 266, 1)),
@@ -714,13 +753,25 @@ mod tests {
             Version(0, 266, 1),
             Some(Version(2, 0, 0)),
         );
-        assert_eq!(b, Actions { runtime: false, resolver: true });
+        assert_eq!(
+            b,
+            Actions {
+                runtime: false,
+                resolver: true
+            }
+        );
     }
 
     #[test]
     fn plan_without_resolver_metadata_never_installs_resolver() {
         let a = plan_actions(Some(Version(0, 266, 1)), None, Version(0, 266, 1), None);
-        assert_eq!(a, Actions { runtime: false, resolver: false });
+        assert_eq!(
+            a,
+            Actions {
+                runtime: false,
+                resolver: false
+            }
+        );
     }
 
     #[test]

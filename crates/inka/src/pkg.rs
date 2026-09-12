@@ -119,7 +119,10 @@ fn install_target(spec: &SeedSpec) -> Result<String, String> {
             })?;
             Ok(format!("{mirror}@{}", spec.version))
         }
-        other => Err(format!("unknown registry '{}' (expected npm or jsr)", other)),
+        other => Err(format!(
+            "unknown registry '{}' (expected npm or jsr)",
+            other
+        )),
     }
 }
 
@@ -146,26 +149,50 @@ fn scan_installed(store: &Path) -> Vec<Installed> {
         };
         serde_json::from_slice::<serde_json::Value>(&raw)
             .ok()
-            .and_then(|v| v.get("version").and_then(serde_json::Value::as_str).map(str::to_string))
+            .and_then(|v| {
+                v.get("version")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| "?".into())
     }
     let mut out = Vec::new();
     let nm = store.join("node_modules");
-    let Ok(top) = fs::read_dir(&nm) else { return out };
-    let mut entries: Vec<PathBuf> = top.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let Ok(top) = fs::read_dir(&nm) else {
+        return out;
+    };
+    let mut entries: Vec<PathBuf> = top
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     entries.sort();
     for dir in entries {
-        let name = dir.file_name().unwrap_or_default().to_string_lossy().into_owned();
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
         if name.starts_with('.') {
             continue; // .bin, .package-lock.json, …
         }
         if name.starts_with('@') {
             // scoped: @scope/<pkg>
-            let Ok(sub) = fs::read_dir(&dir) else { continue };
-            let mut subs: Vec<PathBuf> = sub.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+            let Ok(sub) = fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut subs: Vec<PathBuf> = sub
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir())
+                .collect();
             subs.sort();
             for p in subs {
-                let pkg = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let pkg = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .into_owned();
                 out.push(Installed {
                     name: format!("{name}/{pkg}"),
                     version: version_of(&p),
@@ -199,7 +226,8 @@ fn swap_node_modules(store: &Path, tar_bytes: &[u8]) -> Result<(), String> {
 
     let staging = store.join(format!(".store.stage{pid}"));
     let _ = fs::remove_dir_all(&staging);
-    fs::create_dir_all(&staging).map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+    fs::create_dir_all(&staging)
+        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
 
     let tar_path = staging.join(".store.tar");
     if let Err(e) = fs::write(&tar_path, tar_bytes) {
@@ -290,10 +318,13 @@ fn manifest_from_flag(flag: Option<&str>) -> Result<PathBuf, String> {
 
 fn load_seed_manifest(path: &Path) -> Result<SeedManifest, String> {
     let raw = fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    let m: SeedManifest =
-        serde_json::from_slice(&raw).map_err(|e| format!("invalid seed manifest {}: {e}", path.display()))?;
+    let m: SeedManifest = serde_json::from_slice(&raw)
+        .map_err(|e| format!("invalid seed manifest {}: {e}", path.display()))?;
     if m.seed.is_empty() {
-        return Err(format!("seed manifest {} lists no packages", path.display()));
+        return Err(format!(
+            "seed manifest {} lists no packages",
+            path.display()
+        ));
     }
     Ok(m)
 }
@@ -307,7 +338,11 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--seed-manifest" => {
-                seed_manifest = Some(it.next().unwrap_or_else(|| fail("--seed-manifest needs a file")).clone())
+                seed_manifest = Some(
+                    it.next()
+                        .unwrap_or_else(|| fail("--seed-manifest needs a file"))
+                        .clone(),
+                )
             }
             "--out" => out = PathBuf::from(it.next().unwrap_or_else(|| fail("--out needs a dir"))),
             "--help" | "-h" => {
@@ -362,12 +397,16 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
     if !out.is_absolute() {
         out = std::env::current_dir().unwrap_or_default().join(out);
     }
-    fs::create_dir_all(&out).unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", out.display())));
+    fs::create_dir_all(&out)
+        .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", out.display())));
     let tar_file = out.join(SNAPSHOT_TAR);
     let tar_tmp = out.join(format!(".{SNAPSHOT_TAR}.tmp{}", std::process::id()));
     let _ = fs::remove_file(&tar_tmp);
     let mut cmd = Command::new("tar");
-    cmd.current_dir(&work).args(["-czf"]).arg(&tar_tmp).arg("node_modules");
+    cmd.current_dir(&work)
+        .args(["-czf"])
+        .arg(&tar_tmp)
+        .arg("node_modules");
     if let Err(e) = run_ok(&mut cmd, "tar") {
         let _ = fs::remove_dir_all(&work);
         fail(&e);
@@ -378,8 +417,11 @@ pub(crate) fn cmd_snapshot_store(args: &[String]) {
     });
     let tar_bytes = fs::read(&tar_file).unwrap_or_default();
     let sha = sha256_bytes(&tar_bytes);
-    fs::write(out.join(format!("{SNAPSHOT_TAR}.sha256")), format!("{sha}\n"))
-        .unwrap_or_else(|e| fail(&format!("cannot write checksum sidecar: {e}")));
+    fs::write(
+        out.join(format!("{SNAPSHOT_TAR}.sha256")),
+        format!("{sha}\n"),
+    )
+    .unwrap_or_else(|e| fail(&format!("cannot write checksum sidecar: {e}")));
 
     let record = SeedRecord {
         seeded: scan_installed(&work),
@@ -429,7 +471,10 @@ pub(crate) fn store_record_sha(store: &Path) -> String {
 /// Fetch the snapshot tar named by `record` (flat first, then `store/` subdir),
 /// verifying against the record's `sha256` or the `.sha256` sidecar.
 pub(crate) fn fetch_store_tar(base: &str, record: &SeedRecord) -> Result<Vec<u8>, String> {
-    let tar_name = record.tar.clone().unwrap_or_else(|| SNAPSHOT_TAR.to_string());
+    let tar_name = record
+        .tar
+        .clone()
+        .unwrap_or_else(|| SNAPSHOT_TAR.to_string());
     let (tbytes, sidecar) = match fetch_with_sidecar(base, &tar_name) {
         Ok(x) => x,
         Err(_) => fetch_with_sidecar(base, &format!("store/{tar_name}"))

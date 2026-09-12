@@ -4,7 +4,7 @@
 
 #[cfg(feature = "transpile")]
 pub fn ts_to_js(text: &str, source_name: &str) -> Result<String, String> {
-    use deno_ast::{MediaType, ParseParams, SourceMapOption, parse_module};
+    use deno_ast::{parse_module, MediaType, ParseParams, SourceMapOption};
     use std::path::Path;
 
     let media_type = MediaType::from_path(Path::new(source_name));
