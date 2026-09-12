@@ -22,7 +22,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 It installs the toolchain under `~/.local/lib/inka` (shimmed at
 `~/.local/bin/inka`), adds `~/.local/bin` to your `PATH`, and provisions the
-shared engine (runtime + resolver + package store). On macOS/other OSes, build
+shared engine (runtime + package store). On macOS/other OSes, build
 from source (see [Building from source](#5-building-from-source)).
 
 > `install.sh --help` lists options (`--version`, `--prefix`, `--no-engine`,
@@ -31,8 +31,8 @@ from source (see [Building from source](#5-building-from-source)).
 
 ## 2. Install / update the engine
 
-The installer already provisioned the shared engine (runtime + resolver +
-package store). To update everything to the newest release:
+The installer already provisioned the shared engine (runtime + package store).
+To update everything to the newest release:
 
 ```sh
 inka update
@@ -50,8 +50,8 @@ inka update
 inka doctor
 ```
 
-`inka doctor` prints your runtime dir, installed runtimes + resolver, and your
-package store, and warns about anything missing or mismatched. If it shows a
+`inka doctor` prints your runtime dir, installed runtimes, and your package
+store, and warns about anything missing or mismatched. If it shows a
 runtime and says no warnings, you're ready.
 
 ## 4. Build your first app
@@ -87,7 +87,7 @@ The toolchain is a normal Rust workspace:
 ```sh
 git clone https://github.com/Cantor-Industries/inka
 cd inka
-cargo build --release -p inka -p inka-launcher -p inka-resolver
+cargo build --release -p inka -p inka-launcher
 # target/release/inka
 ```
 

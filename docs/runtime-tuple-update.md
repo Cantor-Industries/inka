@@ -19,7 +19,7 @@ All Deno API surface is confined to two places so a bump stays contained:
   `deno_node` / `node_resolver` / `deno_core` types (the CJS/node-services seam),
 - `crates/inka-runtime/build.rs` — the V8 snapshot + residual lazy sources.
 
-Everything else (`lib.rs`, `inka-resolver`, the CLI) works through our own types.
+Everything else (`lib.rs`, the CLI) works through our own types.
 
 ## Bump procedure
 

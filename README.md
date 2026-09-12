@@ -18,8 +18,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 It installs the toolchain per-user (`~/.local/lib/inka`, shimmed at
-`~/.local/bin/inka`) and provisions the shared engine (runtime + resolver +
-package store) via `inka update`. On Windows, install **WSL2** with Ubuntu and
+`~/.local/bin/inka`) and provisions the shared engine (runtime + package store)
+via `inka update`. On Windows, install **WSL2** with Ubuntu and
 run the same command inside it. macOS isn't published yet — **build from
 source** (below).
 
@@ -29,19 +29,19 @@ Then confirm everything is ready:
 inka doctor
 ```
 
-`doctor` shows your installed runtimes, resolver, and package store, and tells
+`doctor` shows your installed runtimes and package store, and tells
 you if anything needs fixing. If it's clean, you're ready to go.
 
 > Newer runtime versions are fine — inka rolls forward to the newest installed
 > tuple that satisfies each executable's manifest. Keep current with `inka
-> update` (toolchain + runtime + resolver + store).
+> update` (toolchain + runtime + store).
 
 ### Building from source (macOS and other platforms)
 
 The toolchain is a normal Rust workspace — clone the repo and build:
 
 ```sh
-cargo build --release -p inka -p inka-launcher -p inka-resolver
+cargo build --release -p inka -p inka-launcher
 ```
 
 The **runtime** is the heavy part (a Deno/V8 build, ~10–15 min on a roomy disk). Until release binaries exist for your platform, build it too and copy the `.so` into `~/.local/share/inka/runtime`:
@@ -101,8 +101,8 @@ import { z } from "zod";
 ```sh
 inka install              # vendor every dependency declared in package.json/deno.json
 inka add nanoid           # vendor a single package the store doesn't provide
-inka update               # fetch the newest runtime + resolver + store for this machine
-inka doctor               # machine state: runtimes, resolver, store, vendored pool
+inka update               # fetch the newest runtime + store for this machine
+inka doctor               # machine state: runtimes, store, vendored pool
 ```
 
 - **Permissions** — inka executables are **deny-by-default**; you grant access explicitly at build or run time. Nothing is allowed until you say so.
@@ -134,5 +134,4 @@ authors (Copyright (c) the Deno authors), distributed under the MIT license with
 portions under Apache-2.0. See <https://github.com/denoland/deno>. Crates that
 link Deno-project code (and the specific crates used) are acknowledged in their
 own READMEs: `crates/inka-runtime` (`deno_core`, `deno_runtime`, `deno_error`,
-`deno_semver`), `crates/inka` (`deno_ast`), and `crates/inka-resolver`
-(`deno_semver`).
+`deno_semver`) and `crates/inka` (`deno_ast`).

@@ -9,15 +9,13 @@ A GitHub Release exists for the tag (`v0.3.0`, …) with these assets:
 
 - `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher;
 - `libinka_runtime-<runtime>.so` — the shared runtime tuple;
-- `libinka_resolver-<resolver>.so` — the resolution engine;
 - `store.tar.gz` + `seed-manifest.json` — the default-store snapshot record;
 - `install.sh` — the bootstrap installer;
 - `.sha256` sidecars for the above, and `versions.json`.
 
 `versions.json` records the release, a `toolchain` block (version/target/archive/
-sha256), the `runtime` tuple + its `deno_runtime` base, the `resolver`, and the
-runtime `sha256` — `inka doctor` prints the installed identities, which should
-match.
+sha256), the `runtime` tuple + its `deno_runtime` base, and the runtime `sha256`
+— `inka doctor` prints the installed identities, which should match.
 
 ## 2. The release download base
 
@@ -41,7 +39,7 @@ base (no trailing filename).
 
 ```sh
 cd <download-dir>
-for f in inka-toolchain-*.tar.gz libinka_runtime-*.so libinka_resolver-*.so store.tar.gz; do
+for f in inka-toolchain-*.tar.gz libinka_runtime-*.so store.tar.gz; do
   sha256sum -c "$f.sha256"        # sidecars are bare-hex
 done
 # runtime file matches versions.json:
@@ -67,8 +65,8 @@ mkdir -p "$INKA_RUNTIME_HOME"
    ```sh
    "$HOME/.cache/inka-verify/prefix/bin/inka" doctor
    ```
-   Expect: the installed runtime + resolver (ABI 2) and a **present** store
-   (`packages=N`, `sha=` matching the release).
+   Expect: the installed runtime and a **present** store (`packages=N`, `sha=`
+   matching the release).
 3. Store-mode imports work — write small apps and run them:
    ```sh
    printf 'import { Effect } from "effect"; console.log(typeof Effect.succeed);\n' > e.js
@@ -99,7 +97,7 @@ mkdir -p "$INKA_RUNTIME_HOME"
 7. Re-running the installer/`inka update` is a no-op (already current):
    ```sh
    ./install.sh --from <base> --yes --prefix "$HOME/.cache/inka-verify/prefix"
-   inka update --from <base>    # -> "is current" for toolchain/runtime/resolver/store
+   inka update --from <base>    # -> "is current" for toolchain/runtime/store
    ```
 
 If every step above passes, the release is good to promote.
@@ -111,7 +109,7 @@ If every step above passes, the release is good to promote.
 | No release created for the tag | The workflow failed before publish — open the Actions run; it fails at smoke if any check trips or at publish if a release already exists for the tag |
 | `install.sh` checksum error | A sidecar or `versions.json` `sha256` doesn't match the asset — re-run the workflow |
 | `inka doctor` shows no store | The store snapshot wasn't published or `inka update` couldn't fetch it; re-run `inka update --from <base>` |
-| `doctor` resolver warning / ABI mismatch | Re-run `inka update --from <base>`; confirm the resolver asset is present |
+| `doctor` shows no runtime / exit 3 | Re-run `inka update --from <base>`; confirm the runtime asset is present |
 | `NotCapable` / permission errors | Deny-by-default — add `-A`, `-P`, or granular `--allow-*` flags (see [Permissions](permissions.md)) |
 | Store seeding network errors | The store snapshot step needs npm + registry access at *build* time; seeding needs network at *install* time |
 

@@ -5,7 +5,7 @@ inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-again
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka install [pkg[@ver]...] [--force] [--prod]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
-             [--no-toolchain|--toolchain-only|--store-only] [--no-runtime] [--no-resolver] [--no-store]
+             [--no-toolchain|--toolchain-only|--store-only] [--no-runtime] [--no-store]
 inka add     <pkg[@ver]> [--force]
 inka remove  <pkg>
 inka vendor  list|status|release|ignore
@@ -44,13 +44,13 @@ Reconcile the toolchain and shared engine with the release channel:
 
 - no version: read `<base>/versions.json`; self-update the toolchain when an
   installer-managed install is present (`VERSION` marker), install only the
-  runtime/resolver that are missing or behind, and sync the store snapshot
+  runtime when it is missing or behind, and sync the store snapshot
   (`sha256`-gated). Never downgrades; older runtime tuples are kept.
 - `<version>`: install that exact runtime tuple (offline/pinned).
 
 `--no-toolchain`/`--toolchain-only` control the toolchain; `--store-only`
-provisions just the package store; `--no-runtime`, `--no-resolver`, `--no-store`
-skip individual components.
+provisions just the package store; `--no-runtime`, `--no-store` skip individual
+components.
 
 Base resolution: `--from` → `$INKA_RELEASE_BASE` → `$INKA_RT_SOURCE` → the
 built-in GitHub latest-release URL. `--sha256` pins a checksum; `--insecure`
@@ -66,8 +66,8 @@ inspect coverage and lock drift; `vendor release|ignore` set the git posture of
 
 ## `list` / `doctor`
 
-`list` prints installed runtime tuples and resolvers (across all search dirs;
-`--home` narrows to one). `doctor` prints a full diagnostic report.
+`list` prints installed runtime tuples (across all search dirs; `--home` narrows
+to one). `doctor` prints a full diagnostic report.
 
 ## Environment
 
@@ -76,9 +76,7 @@ inspect coverage and lock drift; `vendor release|ignore` set the git posture of
 | `XDG_DATA_HOME` | base for `inka/runtime` and `inka/store` (default `~/.local/share`) |
 | `INKA_RUNTIME_HOME` | override the per-user runtime dir |
 | `INKA_STORE` | override the default store dir |
-| `INKA_RESOLVER` | use a specific resolver `.so` |
 | `INKA_VENDOR` | override the vendored root |
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
-| `INKA_RESOLVER_VERSION` | resolver version for URL bases without a listing |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
 | `INKA_DEBUG` | verbose runtime/resolution logging |

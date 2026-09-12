@@ -11,7 +11,6 @@ machine and loaded at run time.
 | Launcher | small Rust program (`crates/inka-launcher`) | copied into every artifact |
 | Manifest | a few text lines | appended inside the artifact |
 | Runtime | `libinka_runtime-<v>.so` — the Deno engine (`crates/inka-runtime`) | per-user `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) |
-| Resolver | `libinka_resolver-<v>.so` — package resolution | alongside the runtime |
 
 The runtime tuple's version is the pinned `deno_runtime` base (`0.xxx.0`) plus an
 inka runtime revision (`.1`, `.2`, …), tracked in
@@ -83,6 +82,7 @@ entry point, so deny-by-default cannot degrade to allow-all.
 
 ## Resolution
 
-Bare/`npm:`/`jsr:` imports resolve through the resolver ABI (`inka_resolver_abi`
-must equal 2) against the project `vendored/` root, then the default store, then
-built-ins. See [Packages & the store](packages.md).
+ESM `import` and CJS `require()` share one policy: Deno's store-backed
+`NodeResolver`. Bare/`npm:`/`jsr:` imports resolve against the project
+`vendored/` root (name-keyed, shadowing the store), then the default store's
+`node_modules`, then built-ins. See [Packages & the store](packages.md).

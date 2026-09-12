@@ -1,8 +1,7 @@
 # Troubleshooting
 
-Start with `inka doctor` — it prints the runtime dirs, installed
-runtime/resolver (+ ABI), the default store (packages + seed `sha256`), the
-vendored pool, and any warnings.
+Start with `inka doctor` — it prints the runtime dirs, installed runtimes, the
+default store (packages + seed `sha256`), the vendored pool, and any warnings.
 
 ## Exit codes
 
@@ -28,9 +27,6 @@ runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
 **`NotCapable` / permission errors.** inka artifacts are deny-by-default. Grant
 access with `-A`, `-P`, or granular `--allow-*` (see [Permissions](permissions.md)).
 
-**"no inka resolver installed".** `inka update` installs the resolver. You can
-also point `INKA_RESOLVER` at a specific `libinka_resolver-<v>.so`.
-
 **Store missing / `packages=0`.** `inka update` seeds the default store. If
 `inka doctor` warns that `vendored.lock` was built against a different store,
 re-run `inka update` or re-vendor the affected packages.
@@ -47,5 +43,5 @@ fully offline against a local directory.
 **`inka update` didn't upgrade the toolchain from 0.2.2 to 0.3.0.** The 0.2.2
 self-updater expects an `inka-patcher` binary that 0.3.0 no longer ships, so it
 warns and leaves the old CLI in place. Re-run `install.sh` (the same command you
-installed with) to replace the toolchain; the runtime, resolver, and store were
+installed with) to replace the toolchain; the runtime and store were
 already updated. From 0.3.0 on, `inka update` self-updates normally.

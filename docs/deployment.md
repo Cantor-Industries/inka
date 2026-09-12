@@ -13,18 +13,18 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 
 - `install.sh` downloads the toolchain archive, verifies its `sha256`, installs
   it under `<prefix>/lib/inka` (default `~/.local`), symlinks
-  `<prefix>/bin/inka`, and then runs `inka update` to provision the runtime,
-  resolver, and store.
-- `inka update` keeps the toolchain, runtime, resolver, and store current from
-  the same release channel. The runtime and resolver are fetched only when
-  missing or newer; older tuples are retained for roll-forward.
+  `<prefix>/bin/inka`, and then runs `inka update` to provision the runtime and
+  store.
+- `inka update` keeps the toolchain, runtime, and store current from the same
+  release channel. The runtime is fetched only when missing or newer; older
+  tuples are retained for roll-forward.
 
 ## What ships where
 
 | Piece | Where it lives | How it updates |
 |---|---|---|
 | Toolchain (`inka`, `inka-launcher`) | `<prefix>/lib/inka`, shimmed at `<prefix>/bin/inka` | `install.sh`, then `inka update` |
-| `libinka_runtime-<v>.so`, `libinka_resolver-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) | `inka update` |
+| `libinka_runtime-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) | `inka update` |
 | default store (`node_modules` + record) | `~/.local/share/inka/store` (`INKA_STORE`) | `inka update` (sha-gated) |
 
 ## Release assets
@@ -34,24 +34,22 @@ Each `v*` tag publishes:
 - `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` (+ `.sha256`) — CLI +
   launcher;
 - `libinka_runtime-<runtime>.so` (+ `.sha256`) — the shared runtime tuple;
-- `libinka_resolver-<resolver>.so` (+ `.sha256`) — the resolution engine;
 - `store.tar.gz` (+ `.sha256`) + `seed-manifest.json` — the default store
   snapshot;
 - `install.sh` and `versions.json`.
 
 `versions.json` records the release, the toolchain block (version/target/archive/
-sha256), the runtime tuple and its base `deno_runtime`, the resolver, and the
-runtime `sha256`. `inka doctor` prints the installed identities.
+sha256), the runtime tuple and its base `deno_runtime`, and the runtime `sha256`.
+`inka doctor` prints the installed identities.
 
 ## Release CI (tags → GitHub Release assets)
 
 `.github/workflows/release.yml` runs on a self-hosted runner whenever a `v*`
 tag is pushed:
 
-1. **Build** the toolchain (`inka`, `inka-launcher`, `inka-resolver`) and the
-   runtime `.so`. The runtime tuple version comes from
-   `crates/inka-runtime/runtime-version` (base `deno_runtime` + inka revision);
-   the resolver version from its crate.
+1. **Build** the toolchain (`inka`, `inka-launcher`) and the runtime `.so`. The
+   runtime tuple version comes from `crates/inka-runtime/runtime-version` (base
+   `deno_runtime` + inka revision).
 2. **Snapshot** the default store (`inka internal snapshot-store`).
 3. **Stage + package**: the toolchain tarball, engine assets, `store.tar.gz` +
    `seed-manifest.json`, `install.sh`, `versions.json`, and `.sha256` sidecars.
@@ -104,8 +102,8 @@ deterministic store-mode resolution) and only the resulting exe copied in.
 ## Operations
 
 - After any install/upgrade/deploy, run `inka doctor`; it reports runtime dirs,
-  installed runtimes/resolvers + ABI, store packages + sha, and the vendored
-  pool, and prints warnings.
+  installed runtimes, store packages + sha, and the vendored pool, and prints
+  warnings.
 - Releases carry `.sha256` sidecars and are verified on install. Today that
   verifies integrity, not authenticity — sign checksums (e.g. minisign) and pin
   a trust anchor for production distribution.
