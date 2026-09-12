@@ -4,8 +4,10 @@
 # Downloads the inka toolchain (CLI + launcher),
 # installs it under <prefix>/lib/inka with a symlink in <prefix>/bin, then
 # provisions the shared runtime and package store via `inka update`.
-# Like rustup, it installs per-user (no root) and never touches the engine
-# copies already present unless a newer version is published.
+# Like rustup, it installs per-user (no root). A pre-0.4.0 install is reset
+# first (0.4.0 is a clean break: the resolver was retired and the runtime tuple
+# moved), then the runtime and store are provisioned fresh. Later 0.4.x
+# installs are ordinary upgrades.
 #
 # usage:
 #   curl --proto '=https' --tlsv1.2 -fsSL \
@@ -232,6 +234,33 @@ fi
 # ---- install toolchain ------------------------------------------------------
 CURRENT=""
 [ -f "$PREFIX/lib/inka/VERSION" ] && CURRENT=$(cat "$PREFIX/lib/inka/VERSION" 2>/dev/null || true)
+
+# ---- previous-generation reset ----------------------------------------------
+# 0.4.0 is a clean break: the resolver was retired and the runtime tuple moved.
+# Detect a pre-0.4.0 install (toolchain VERSION not 0.4.x, or the retired
+# resolver .so present) and remove the old toolchain + engine (+ store) so the
+# new release installs fresh. Fresh machines and later 0.4.x upgrades skip this.
+engine_dir="${INKA_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/runtime}"
+store_dir="${INKA_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/store}"
+reset=0
+case "$CURRENT" in
+    ""|0.4.*) ;;
+    *) reset=1 ;;
+esac
+if [ "$reset" = 0 ] && ls "$engine_dir"/libinka_resolver-*.so >/dev/null 2>&1; then
+    reset=1
+fi
+if [ "$reset" = 1 ]; then
+    info "resetting previous inka install (pre-0.4.0)"
+    rm -rf "$PREFIX/lib/inka"
+    CURRENT=""
+    if [ "$NO_RUNTIME" = 0 ]; then
+        rm -f "$engine_dir"/libinka_runtime-*.so "$engine_dir"/libinka_resolver-*.so
+    fi
+    if [ "$NO_STORE" = 0 ]; then
+        rm -rf "$store_dir"
+    fi
+fi
 
 if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$TC_VER" ] && [ -x "$PREFIX/lib/inka/inka" ]; then
     info "inka toolchain $TC_VER is current"
