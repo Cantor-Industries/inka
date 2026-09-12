@@ -24,8 +24,8 @@ permissions.
 Deny-by-default. The manifest/`inka run` DSL (`permissions=all|none`,
 `allow-<cat>`, `deny-<cat>`) maps onto the Deno permission model; prompts are
 disabled. Reads a few env vars set by the launcher/CLI: `INKA_STORE`,
-`INKA_VENDOR`, `INKA_RESOLVER`, and `INKA_PRECOMPILED` (serve an archive's
-already-transpiled TS as JS).
+`INKA_VENDOR`, and `INKA_PRECOMPILED` (serve an archive's already-transpiled TS
+as JS).
 
 ## CommonJS / node services
 

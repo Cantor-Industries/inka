@@ -61,9 +61,6 @@ struct PkgLoader {
     /// Root of the global package store (`<store>/node_modules/<name>/…`, one
     /// hoisted pool).
     store_root: Option<PathBuf>,
-    /// Root of the artifact's embedded vendored package roots
-    /// (`<artifact-root>/vendored/<name>/…`, name-keyed, no node_modules).
-    vendor_root: Option<PathBuf>,
     /// True when the artifact's `.ts/.mts/.cts` payloads were transpiled at
     /// build time (`--transpile`); such files are served as plain JS.
     precompiled: bool,
@@ -83,190 +80,6 @@ fn precompiled_flag() -> bool {
     std::env::var_os("INKA_PRECOMPILED").is_some()
 }
 
-fn has_scheme(spec: &str) -> bool {
-    spec.split_once(':').is_some()
-}
-
-fn resolver_path_env() -> Option<PathBuf> {
-    std::env::var_os("INKA_RESOLVER").map(PathBuf::from)
-}
-
-type FnResolve = unsafe extern "C" fn(
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *const c_char,
-    *mut *mut c_char,
-    *mut *mut c_char,
-) -> c_int;
-type FnFree = unsafe extern "C" fn(*mut c_char);
-type FnAbi = unsafe extern "C" fn() -> c_int;
-
-const RESOLVER_ABI: c_int = 2;
-const KIND_USE_DEFAULT: c_int = 0;
-const KIND_FILE: c_int = 1;
-const KIND_BUILTIN: c_int = 2;
-const KIND_ERROR: c_int = 3;
-
-struct ResolverApi {
-    resolve: FnResolve,
-    free: FnFree,
-}
-
-/// Loaded once per process from `$INKA_RESOLVER` (set by the launcher). The
-/// library is leaked after copying the function pointers, so only the
-/// fn-pointer values live on.
-static RESOLVER: OnceLock<Result<&'static ResolverApi, &'static str>> = OnceLock::new();
-
-fn resolver_api() -> Result<&'static ResolverApi, &'static str> {
-    RESOLVER.get_or_init(init_resolver).clone()
-}
-
-fn init_resolver() -> Result<&'static ResolverApi, &'static str> {
-    let path = resolver_path_env().ok_or(
-        "no inka resolver configured (INKA_RESOLVER is unset); install it with `inka update`",
-    )?;
-    // Safety: we dlopen a path supplied by the launcher (or INKA_RESOLVER) and
-    // read the exported resolver symbols below.
-    let lib = unsafe { libloading::Library::new(&path) }
-        .map_err(|_| "failed to load the inka resolver library (libinka_resolver)")?;
-    unsafe {
-        let abi: libloading::Symbol<FnAbi> = lib
-            .get(b"inka_resolver_abi")
-            .map_err(|_| "missing inka_resolver_abi in resolver library")?;
-        if abi() != RESOLVER_ABI {
-            return Err("inka resolver ABI mismatch (expected 2); run `inka update`");
-        }
-    }
-    let resolve: FnResolve = unsafe {
-        let s: libloading::Symbol<FnResolve> = lib
-            .get(b"inka_resolver_resolve")
-            .map_err(|_| "missing inka_resolver_resolve in resolver library")?;
-        *s
-    };
-    let free: FnFree = unsafe {
-        let s: libloading::Symbol<FnFree> = lib
-            .get(b"inka_resolver_free")
-            .map_err(|_| "missing inka_resolver_free in resolver library")?;
-        *s
-    };
-    // Keep the underlying library alive for the process lifetime.
-    std::mem::forget(lib);
-    Ok(Box::leak(Box::new(ResolverApi { resolve, free })))
-}
-
-fn cstring(s: &str) -> CString {
-    CString::new(s).unwrap_or_else(|_| CString::new("").expect("empty has no nul"))
-}
-
-/// Ask the resolver library how to resolve `specifier`, then translate its
-/// decision into a `ModuleResolveResponse`.
-fn resolve_with_resolver(
-    api: &ResolverApi,
-    store: Option<&Path>,
-    vendor: Option<&Path>,
-    specifier: &str,
-    referrer: &str,
-) -> ModuleResolveResponse {
-    let store_s = store
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let vendor_s = vendor
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let store_c = cstring(&store_s);
-    let vendor_c = cstring(&vendor_s);
-    let referrer_c = cstring(referrer);
-    let spec_c = cstring(specifier);
-    let mut a: *mut c_char = std::ptr::null_mut();
-    let mut b: *mut c_char = std::ptr::null_mut();
-    // Safety: fn pointers come from a compatible, process-lifetime library.
-    let kind = unsafe {
-        (api.resolve)(
-            store_c.as_ptr(),
-            vendor_c.as_ptr(),
-            referrer_c.as_ptr(),
-            spec_c.as_ptr(),
-            &mut a,
-            &mut b,
-        )
-    };
-    let a_str = if a.is_null() {
-        String::new()
-    } else {
-        // Safety: `a` is owned by the resolver; read before freeing it below.
-        unsafe { CStr::from_ptr(a).to_string_lossy().into_owned() }
-    };
-    unsafe {
-        if !a.is_null() {
-            (api.free)(a);
-        }
-        if !b.is_null() {
-            (api.free)(b);
-        }
-    }
-    match kind {
-        KIND_USE_DEFAULT => {
-            deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
-        }
-        KIND_FILE => file_url_response(&PathBuf::from(a_str)),
-        KIND_BUILTIN => {
-            if a_str.is_empty() {
-                Err(JsErrorBox::generic(
-                    "resolver returned an empty built-in specifier",
-                ))
-            } else {
-                deno_core::resolve_import(&a_str, referrer).map_err(JsErrorBox::from_err)
-            }
-        }
-        KIND_ERROR => Err(JsErrorBox::generic(if a_str.is_empty() {
-            format!("cannot resolve module '{specifier}'")
-        } else {
-            a_str
-        })),
-        other => Err(JsErrorBox::generic(format!(
-            "resolver returned an unknown decision ({other}) for '{specifier}'"
-        ))),
-    }
-}
-
-/// Minimal resolution used when the resolver library is not installed: only
-/// relative/file/node:/data: imports and the offline http(s) rejection remain;
-/// store/bare resolution reports why the resolver is needed.
-fn fallback_resolve(specifier: &str, referrer: &str, reason: &str) -> ModuleResolveResponse {
-    if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
-        return Err(JsErrorBox::generic(format!(
-            "vendored package resolution requires the inka resolver ({reason})"
-        )));
-    }
-    if specifier.starts_with("http://") || specifier.starts_with("https://") {
-        return Err(JsErrorBox::generic(format!(
-            "network module imports are disabled ('{specifier}'); \
-             vendor the package with `inka update` instead"
-        )));
-    }
-    if has_scheme(specifier)
-        || specifier.starts_with("./")
-        || specifier.starts_with("../")
-        || specifier.starts_with('/')
-    {
-        return deno_core::resolve_import(specifier, referrer).map_err(JsErrorBox::from_err);
-    }
-    Err(JsErrorBox::generic(format!(
-        "bare import '{specifier}' cannot be resolved ({reason})"
-    )))
-}
-
-fn file_url_response(path: &Path) -> ModuleResolveResponse {
-    match ModuleSpecifier::from_file_path(path) {
-        Ok(u) => Ok(u),
-        Err(_) => Err(JsErrorBox::generic(format!(
-            "cannot form a file URL for {}",
-            path.display()
-        ))),
-    }
-}
-
 impl ModuleLoader for PkgLoader {
     fn resolve(
         &self,
@@ -274,19 +87,11 @@ impl ModuleLoader for PkgLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
-        // All import-resolution policy lives in the standalone inka resolver
-        // (libinka_resolver). When it isn't installed we degrade to the small
-        // built-in fallback (relative/file/node:/data: plus offline rejection).
-        match resolver_api() {
-            Ok(api) => resolve_with_resolver(
-                api,
-                self.store_root.as_deref(),
-                self.vendor_root.as_deref(),
-                specifier,
-                referrer,
-            ),
-            Err(reason) => fallback_resolve(specifier, referrer, reason),
-        }
+        // All import-resolution policy lives in the store-backed node services
+        // (deno's `NodeResolver`), the same seam CJS `require()` uses.
+        self.node_services
+            .resolve_specifier(specifier, referrer)
+            .map_err(JsErrorBox::generic)
     }
 
     fn load(
@@ -742,7 +547,6 @@ fn run_tree(
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
             store_root,
-            vendor_root,
             precompiled: precompiled_flag(),
             node_services,
         });
