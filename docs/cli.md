@@ -1,7 +1,7 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure|--no-vendor] [--no-node-modules]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka install [pkg[@ver]...] [--force] [--prod]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
@@ -59,10 +59,10 @@ skips verification; `--home <dir>` sets the runtime install dir. See
 
 ## `add` / `remove` / `vendor`
 
-Per-project vendoring. `add` vendors one package (raw, exactly as npm
-resolves it); `remove` un-vendors and prunes orphaned deps; `vendor list|status`
-inspect coverage and lock drift; `vendor release|ignore` set the git posture of
-`vendored/`.
+Per-project vendoring into a real npm tree (`vendored/node_modules/…`). `add`
+re-resolves the whole root set and vendors one package; `remove` drops a root and
+re-resolves; `vendor list|status` inspect roots and store coverage; `vendor
+release|ignore` set the git posture of `vendored/`.
 
 ## `list` / `doctor`
 

@@ -83,6 +83,8 @@ entry point, so deny-by-default cannot degrade to allow-all.
 ## Resolution
 
 ESM `import` and CJS `require()` share one policy: Deno's store-backed
-`NodeResolver`. Bare/`npm:`/`jsr:` imports resolve against the project
-`vendored/` root (name-keyed, shadowing the store), then the default store's
-`node_modules`, then built-ins. See [Packages & the store](packages.md).
+`NodeResolver`, driven by a nearest-`node_modules` walk over three derived
+roots in precedence order — `vendored/node_modules`, the project/artifact
+`node_modules` (BYONM), then the default store — followed by built-ins. Nested
+packages beat hoisted ones; store referrers stay confined to the store. See
+[Packages & the store](packages.md).

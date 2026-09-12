@@ -7,6 +7,7 @@ executable.
 inka build [source] [-s|--source <file>] [-o|--output <file>]
            [--runtime <spec>] [--tested-against <ver>]
            [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
+           [--no-node-modules]
 ```
 
 ## Defaults
@@ -78,17 +79,21 @@ Embedding is automatic and happens in one of two modes:
 - **`--embed-dir`:** embed the whole current-directory tree (skipping `.git`,
   `target`, `node_modules`, `.inka`, `dist`) for computed dynamic imports.
 
-### Vendored-package embedding
+### Dependency embedding
 
-By default the whole per-project `vendored/` pool is embedded so artifacts are
-self-contained. Two flags tune that for import-closure builds (combining either
-with `--embed-dir` errors):
+- **Project `node_modules`** — when the project has a `node_modules` directory,
+  `inka build` embeds the reachable graph under `node_modules/…` so the artifact
+  is self-contained (hoisted, nested, and symlinked layouts all work).
+  `--no-node-modules` opts out (dependencies then resolve from the machine
+  store).
+- **`vendored/`** — the whole per-project vendored tree is embedded by default.
+  `--vendor-closure` embeds only the vendored modules reachable from the entry
+  graph (each reached root's `package.json` included). `--no-vendor` embeds no
+  vendored packages. Store-only packages always resolve from the machine store at
+  run time.
 
-- `--vendor-closure` — embed only the vendored modules reachable from the entry
-  graph (each reached root's `package.json` included). Store-only packages still
-  resolve from the machine store at run time.
-- `--no-vendor` — embed no vendored packages; the artifact relies on the machine
-  default store (clean store-lookup error if a package is only vendored).
+Combining `--vendor-closure`/`--no-vendor` with `--embed-dir` errors (the
+whole-tree embed already includes `vendored/`).
 
 ## TypeScript
 

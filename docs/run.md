@@ -1,9 +1,10 @@
 # `inka run`
 
 Executes a `.ts`/`.js`/`.mjs`/`.cts` file directly through the installed
-runtime — no artifact build. Imports (relative, vendored, store, and `node:`)
-resolve exactly as they would in a built artifact, and `.ts` is transpiled at
-load.
+runtime — no artifact build. Imports (relative, the project's `node_modules`,
+vendored, store, and `node:`) resolve exactly as they would in a built artifact,
+and `.ts` is transpiled at load. A project with a `node_modules` directory needs
+no vendoring step: `inka run` resolves from it directly.
 
 ```sh
 inka run [options] <file> [args...]
