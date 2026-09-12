@@ -1,0 +1,84 @@
+# Runtime contract matrix on the self-hosted runner.
+#
+# The heavy `inka-runtime` crate builds here (the hosted `ci.yml` rust job only
+# covers the fast crates). Triggered only when runtime-coupled files change, so
+# the shared release runner is not scheduled for unrelated PRs.
+#
+# Security: never run untrusted fork code on the self-hosted runner. The job is
+# skipped for pull requests whose head repo is not this repository.
+
+name: runtime-ci
+
+on:
+  pull_request:
+    paths:
+      - 'crates/inka-runtime/**'
+      - 'crates/inka/**'
+      - 'crates/inka-resolver/**'
+      - 'scripts/ci/runtime-matrix.sh'
+      - 'scripts/ci/deno-pins.sh'
+      - 'seed-manifest.json'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/runtime-ci.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'crates/inka-runtime/**'
+      - 'crates/inka/**'
+      - 'crates/inka-resolver/**'
+      - 'scripts/ci/runtime-matrix.sh'
+      - 'seed-manifest.json'
+      - 'Cargo.lock'
+      - '.github/workflows/runtime-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: runtime-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: self-hosted
+    timeout-minutes: 45
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      - name: Deno pin drift
+        run: scripts/ci/deno-pins.sh
+
+      - name: Build fast crates + runtime (debug)
+        run: |
+          set -euo pipefail
+          : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
+          cargo build -p inka -p inka-resolver -p inka-runtime
+
+      - name: Stage runtime + resolver for the matrix
+        run: |
+          set -euo pipefail
+          runtime="$(tr -d '[:space:]' < crates/inka-runtime/runtime-version)"
+          resolver="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' crates/inka-resolver/Cargo.toml | head -1)"
+          home="${RUNNER_TEMP:-/tmp}/inka-runtime"
+          mkdir -p "$home"
+          cp "$CARGO_TARGET_DIR/debug/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
+          cp "$CARGO_TARGET_DIR/debug/libinka_resolver.so" "$home/libinka_resolver-$resolver.so"
+          echo "INKA_RUNTIME_HOME=$home" >> "$GITHUB_ENV"
+
+      - name: Seed release store
+        run: |
+          set -euo pipefail
+          store="${RUNNER_TEMP:-/tmp}/inka-store"
+          mkdir -p "$store"
+          "$CARGO_TARGET_DIR/debug/inka" internal snapshot-store \
+            --seed-manifest seed-manifest.json --out "$store"
+          tar -xzf "$store/store.tar.gz" -C "$store"
+          echo "INKA_STORE=$store" >> "$GITHUB_ENV"
+
+      - name: Runtime contract matrix
+        run: |
+          set -euo pipefail
+          bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/debug/inka" "$INKA_STORE"

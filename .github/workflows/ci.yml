@@ -47,8 +47,19 @@ jobs:
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
 
-      # The fast crates only; the heavy `inka-runtime` builds on the self-hosted
-      # release runner and is covered by scripts/ci/runtime-matrix.sh there.
+      - name: Rust components
+        run: rustup component add clippy rustfmt
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      # Fast crates only; `inka-runtime` is built and contract-tested on the
+      # self-hosted runtime-ci workflow (see .github/workflows/runtime-ci.yml).
+      - name: Clippy (fast crates, deny warnings)
+        run: |
+          set -euo pipefail
+          cargo clippy -p inka --bin inka -p inka-launcher -p inka-resolver -p inka-runtime-stub -- -D warnings
+
       - name: Fast-crate tests
         run: |
           set -euo pipefail
