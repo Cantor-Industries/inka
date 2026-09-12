@@ -80,37 +80,6 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
     Ok(out)
 }
 
-/// Resolve a non-relative specifier to a cwd-relative `vendored/…` file that a
-/// `--vendor-closure` build should embed. Only a vendored package root (with a
-/// `package.json`) under the project's `vendored/` is embeddable; store/builtin
-/// results (and everything outside `vendored/`) are left for runtime resolution.
-fn vendored_target(cwd: &Path, vendor_root: &Path, _from_rel: &str, spec: &str) -> Option<String> {
-    let (name, sub) = vendored_spec(spec)?;
-    for ident in vendored_identities(&name) {
-        let pkg_root = vendor_root.join(&ident);
-        if !pkg_root.join("package.json").is_file() {
-            continue;
-        }
-        let Ok(file) = resolve_pkg_file(&pkg_root, sub.as_deref()) else {
-            continue;
-        };
-        if !file.starts_with(vendor_root) {
-            continue;
-        }
-        let rel = file
-            .strip_prefix(cwd)
-            .ok()?
-            .components()
-            .map(|c| c.as_os_str().to_string_lossy())
-            .collect::<Vec<_>>()
-            .join("/");
-        if rel.starts_with("vendored/") {
-            return Some(rel);
-        }
-    }
-    None
-}
-
 /// Split a bare/`npm:`/`jsr:` specifier into `(npm identity name, subpath)`.
 /// Schemes (other than npm:/jsr:) and relative/absolute specifiers are not
 /// vendored targets.
@@ -376,48 +345,19 @@ fn package_json_for(cwd: &Path, rel: &str) -> Option<String> {
 /// time. Each reached package root's `package.json` is embedded too (the
 /// runtime resolver reads it). Entries are cwd-relative `vendored/…` paths, as
 /// in `collect_vendored`.
+/// Collect only the vendored `node_modules` modules reachable from the entry
+/// graph (`--vendor-closure`). The vendored tree is a real npm layout under
+/// `vendored/node_modules/`; nearest-`node_modules` wins, and store/builtin
+/// specifiers are left for runtime resolution.
 pub fn collect_vendored_closure(
     cwd: &Path,
     entry_rel: &str,
 ) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let vendor_root = cwd.join("vendored");
-    if !vendor_root.is_dir() {
+    let nm = cwd.join("vendored").join("node_modules");
+    if !nm.is_dir() {
         return Ok(Vec::new());
     }
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let mut visited: BTreeSet<String> = BTreeSet::new();
-    let mut queue: Vec<String> = vec![entry_rel.to_string()];
-    let mut warned = false;
-
-    while let Some(rel) = queue.pop() {
-        if !visited.insert(rel.clone()) {
-            continue;
-        }
-        let bytes = fs::read(cwd.join(&rel))
-            .map_err(|e| format!("cannot read {}: {e}", cwd.join(&rel).display()))?;
-        if rel.starts_with("vendored/") {
-            files.insert(rel.clone(), bytes.clone());
-            if let Some(pj) = package_json_for(cwd, &rel) {
-                if let Ok(b) = fs::read(cwd.join(&pj)) {
-                    files.entry(pj).or_insert(b);
-                }
-            }
-        }
-        for s in scan_specifiers(cwd, &rel, &bytes, &mut warned) {
-            if let Some(target) = resolve_local(cwd, &rel, &s) {
-                if !visited.contains(&target) {
-                    queue.push(target);
-                }
-            } else if let Some(vtarget) = vendored_target(cwd, &vendor_root, &rel, &s) {
-                if !visited.contains(&vtarget) {
-                    queue.push(vtarget);
-                }
-            }
-            // store / builtin / network specifiers are never embedded.
-        }
-    }
-
-    Ok(files.into_iter().collect())
+    collect_closure(cwd, entry_rel, &nm, "vendored/node_modules/")
 }
 
 /// Collect the project's `node_modules` files reachable from the entry graph
@@ -435,6 +375,17 @@ pub fn collect_node_modules_closure(
     if !nm.is_dir() {
         return Ok(Vec::new());
     }
+    collect_closure(cwd, entry_rel, &nm, "node_modules/")
+}
+
+/// Walk the import graph from `entry_rel`, embedding reached files under the
+/// `node_modules` tree at `nm` (whose cwd-relative prefix is `prefix`).
+fn collect_closure(
+    cwd: &Path,
+    entry_rel: &str,
+    nm: &Path,
+    prefix: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut visited: BTreeSet<String> = BTreeSet::new();
     let mut queue: Vec<String> = vec![entry_rel.to_string()];
@@ -446,7 +397,7 @@ pub fn collect_node_modules_closure(
         }
         let bytes = fs::read(cwd.join(&rel))
             .map_err(|e| format!("cannot read {}: {e}", cwd.join(&rel).display()))?;
-        let in_nm = rel.starts_with("node_modules/");
+        let in_nm = rel.starts_with(prefix);
         if in_nm {
             files.insert(rel.clone(), bytes.clone());
             if let Some(pj) = package_json_for(cwd, &rel) {
@@ -457,9 +408,9 @@ pub fn collect_node_modules_closure(
         }
         for s in scan_specifiers(cwd, &rel, &bytes, &mut warned) {
             let target = if in_nm {
-                resolve_local_raw(cwd, &rel, &s).or_else(|| node_modules_target(cwd, &nm, &rel, &s))
+                resolve_local_raw(cwd, &rel, &s).or_else(|| node_modules_target(cwd, nm, &rel, &s))
             } else {
-                resolve_local(cwd, &rel, &s).or_else(|| node_modules_target(cwd, &nm, &rel, &s))
+                resolve_local(cwd, &rel, &s).or_else(|| node_modules_target(cwd, nm, &rel, &s))
             };
             if let Some(t) = target {
                 if !visited.contains(&t) {
@@ -497,6 +448,18 @@ fn node_modules_target(cwd: &Path, nm: &Path, from_rel: &str, spec: &str) -> Opt
             }
         }
         dir = d.parent();
+    }
+    // Hoisted root, for referrers outside this node_modules tree (e.g. app code
+    // importing a vendored package).
+    for ident in &identities {
+        let pkg = nm.join(ident);
+        if pkg.join("package.json").is_file() {
+            if let Ok(file) = resolve_pkg_file(&pkg, sub.as_deref()) {
+                if let Some(rel) = rel_of(cwd, &file) {
+                    return Some(rel);
+                }
+            }
+        }
     }
     None
 }
@@ -877,37 +840,80 @@ pub fn collect_vendored(cwd: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
         return Ok(Vec::new());
     }
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    for ent in fs::read_dir(&vendored)
-        .map_err(|e| format!("cannot read dir {}: {e}", vendored.display()))?
+    let nm = vendored.join("node_modules");
+    if nm.is_dir() {
+        walk_node_modules(cwd, &nm, &mut files)?;
+    } else {
+        // Legacy flat layout: name-keyed package roots directly under vendored/.
+        walk_flat_packages(cwd, &vendored, &mut files)?;
+    }
+    Ok(files.into_iter().collect())
+}
+
+/// Walk every package under a `node_modules` dir, recursing into each package's
+/// nested `node_modules` (via `walk_vendored`).
+fn walk_node_modules(
+    cwd: &Path,
+    nm: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    for ent in fs::read_dir(nm)
+        .map_err(|e| format!("cannot read dir {}: {e}", nm.display()))?
         .flatten()
     {
         let name = ent.file_name().to_string_lossy().into_owned();
         if name.starts_with('.') {
-            continue; // hidden entries (and bookkeeping dotfiles) are not packages
+            continue; // .bin / .deno / .pnpm and dotfiles are not packages
         }
-        let ft = ent.file_type().map_err(|e| e.to_string())?;
-        if !ft.is_dir() {
-            continue; // a stray file at the pool root is not a package
+        let p = ent.path();
+        if !p.is_dir() {
+            continue;
+        }
+        if p.join("package.json").is_file() {
+            walk_vendored(cwd, &p, files)?;
+        } else if name.starts_with('@') {
+            for sub in fs::read_dir(&p)
+                .map_err(|e| format!("cannot read dir {}: {e}", p.display()))?
+                .flatten()
+            {
+                if sub.path().is_dir() && sub.path().join("package.json").is_file() {
+                    walk_vendored(cwd, &sub.path(), files)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Legacy flat pool: package roots directly under `vendored/`.
+fn walk_flat_packages(
+    cwd: &Path,
+    vendored: &Path,
+    files: &mut BTreeMap<String, Vec<u8>>,
+) -> Result<(), String> {
+    for ent in fs::read_dir(vendored)
+        .map_err(|e| format!("cannot read dir {}: {e}", vendored.display()))?
+        .flatten()
+    {
+        let name = ent.file_name().to_string_lossy().into_owned();
+        if name.starts_with('.') || !ent.path().is_dir() {
+            continue;
         }
         let root = ent.path();
         if root.join("package.json").is_file() {
-            walk_vendored(cwd, &root, &mut files)?;
+            walk_vendored(cwd, &root, files)?;
         } else if name.starts_with('@') {
-            // scope container (vendored/@scope/<name>/package.json): descend one
-            // level and embed only the child dirs that are real package roots.
             for sub in fs::read_dir(&root)
                 .map_err(|e| format!("cannot read dir {}: {e}", root.display()))?
                 .flatten()
             {
-                let ft = sub.file_type().map_err(|e| e.to_string())?;
-                if ft.is_dir() && sub.path().join("package.json").is_file() {
-                    walk_vendored(cwd, &sub.path(), &mut files)?;
+                if sub.path().is_dir() && sub.path().join("package.json").is_file() {
+                    walk_vendored(cwd, &sub.path(), files)?;
                 }
             }
         }
-        // anything else: not a package root -> skip entirely.
     }
-    Ok(files.into_iter().collect())
+    Ok(())
 }
 
 /// Files that never run and bloat whole-pool artifacts. Vendored packages ship
@@ -943,7 +949,11 @@ fn walk_vendored(
             continue;
         }
         if ft.is_dir() {
-            if name == "node_modules" || name == ".git" {
+            if name == ".git" {
+                continue;
+            }
+            if name == "node_modules" {
+                walk_node_modules(cwd, &ent.path(), files)?;
                 continue;
             }
             walk_vendored(cwd, &ent.path(), files)?;
@@ -1053,34 +1063,43 @@ mod tests {
         mk(&cwd, "util.js", "export const u = 1;\n");
         mk(
             &cwd,
-            "vendored/onetime/package.json",
+            "vendored/node_modules/onetime/package.json",
             r#"{"name":"onetime","version":"7.2.0","type":"module","exports":{".":"./index.js"}}"#,
         );
         mk(
             &cwd,
-            "vendored/onetime/index.js",
+            "vendored/node_modules/onetime/index.js",
             "import { x } from \"./lib/x.js\";\nexport function once() { return x; }\n",
         );
-        mk(&cwd, "vendored/onetime/lib/x.js", "export const x = 1;\n");
+        mk(
+            &cwd,
+            "vendored/node_modules/onetime/lib/x.js",
+            "export const x = 1;\n",
+        );
         // unrelated vendored package nothing imports
         mk(
             &cwd,
-            "vendored/extra/package.json",
+            "vendored/node_modules/extra/package.json",
             r#"{"name":"extra","version":"1.0.0","type":"module","main":"index.js"}"#,
         );
-        mk(&cwd, "vendored/extra/index.js", "export const e = 2;\n");
+        mk(
+            &cwd,
+            "vendored/node_modules/extra/index.js",
+            "export const e = 2;\n",
+        );
 
         let files = collect_vendored_closure(&cwd, "app.js").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         for want in [
-            "vendored/onetime/index.js",
-            "vendored/onetime/lib/x.js",
-            "vendored/onetime/package.json",
+            "vendored/node_modules/onetime/index.js",
+            "vendored/node_modules/onetime/lib/x.js",
+            "vendored/node_modules/onetime/package.json",
         ] {
             assert!(rels.contains(&want.to_string()), "missing {want}: {rels:?}");
         }
         assert!(
-            rels.iter().all(|r| !r.starts_with("vendored/extra")),
+            rels.iter()
+                .all(|r| !r.starts_with("vendored/node_modules/extra")),
             "{rels:?}"
         );
         assert!(

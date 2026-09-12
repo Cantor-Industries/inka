@@ -16,7 +16,7 @@
 //   vendored.lock pins the whole vendored closure (roots + auto-vendored deps).
 //   package.json + deno.json (union) declare the user ROOT set (direct adds only).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -181,6 +181,7 @@ fn store_has_packages(store: &Path) -> bool {
 
 // ---- spec parsing ----------------------------------------------------------
 
+#[derive(Clone)]
 struct AddSpec {
     /// The canonical identity this package lives under everywhere inka records
     /// it (vendored dir name, `package.json` dependency key, `deno.json`
@@ -329,24 +330,24 @@ fn declared_root_specs(cwd: &Path) -> Result<Vec<AddSpec>, String> {
 
 // ---- lock file -------------------------------------------------------------
 
+/// Lock format 2: `vendored/` holds a real npm `node_modules` tree (see
+/// `node_modules/`), so dependencies are implicit; the lock records the
+/// declared roots and the default-store identity consulted for dedupe.
+const LOCK_VERSION: u32 = 2;
+
 #[derive(serde::Serialize, serde::Deserialize, Default, Clone)]
 struct Lock {
+    /// Lock format version. 0/1 = legacy flat name-keyed layout.
     #[serde(default)]
-    entries: BTreeMap<String, LockEntry>,
-    /// Informational record of the default store used for dedupe at add time
-    /// (WS3-3). Never gates anything; `cmd_status` warns when the current store
-    /// identity differs.
+    version: u32,
+    /// Declared roots: package identity -> exact resolved version.
+    #[serde(default)]
+    roots: BTreeMap<String, String>,
+    /// Informational record of the default store used for dedupe at add time.
+    /// Never gates anything; `cmd_status` warns when the current store identity
+    /// differs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     store: Option<String>,
-}
-
-#[derive(serde::Serialize, serde::Deserialize, Clone)]
-struct LockEntry {
-    version: String,
-    #[serde(default)]
-    why: String, // "root" | "dep"
-    #[serde(default)]
-    converted: Vec<String>,
 }
 
 fn lock_path(root: &Path) -> PathBuf {
@@ -493,108 +494,10 @@ fn manifests_remove(manifests: &Manifests, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Is `name` declared as a root in either manifest?
-fn manifests_declares(manifests: &Manifests, name: &str) -> bool {
-    for p in [&manifests.pkg_json, &manifests.deno_json]
-        .into_iter()
-        .flatten()
-    {
-        if let Ok(v) = read_json(p) {
-            if let Some(deps) = v.get("dependencies").and_then(Value::as_object) {
-                if deps.contains_key(name) {
-                    return true;
-                }
-            }
-            if let Some(imports) = v.get("imports").and_then(Value::as_object) {
-                if imports.contains_key(name) {
-                    return true;
-                }
-            }
-        }
-    }
-    false
-}
-
 // ---- npm scratch install ---------------------------------------------------
 
 fn jsr_npmrc(work: &Path) {
     let _ = fs::write(work.join(".npmrc"), "@jsr:registry=https://npm.jsr.io\n");
-}
-
-/// Install `target` alone in a scratch dir; return the dir whose `node_modules`
-/// holds the resolved closure (network only here).
-fn scratch_install(target: &str) -> Result<PathBuf, String> {
-    let work = std::env::temp_dir().join(format!("inka-vendor-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work).map_err(|e| format!("cannot create workdir: {e}"))?;
-    jsr_npmrc(&work);
-    let mut cmd = Command::new("npm");
-    cmd.current_dir(&work)
-        .args(["install", "--no-save", "--omit=dev", target]);
-    pkg::run_ok(&mut cmd, "npm install").inspect_err(|_| {
-        let _ = fs::remove_dir_all(&work);
-    })?;
-    if !work.join("node_modules").is_dir() {
-        let _ = fs::remove_dir_all(&work);
-        return Err("npm install did not produce a node_modules directory".into());
-    }
-    Ok(work)
-}
-
-/// All (name, version) present anywhere in a node_modules tree (hoisted + nested).
-fn collect_instances(nm: &Path, out: &mut BTreeMap<String, BTreeSet<String>>) {
-    let Ok(top) = fs::read_dir(nm) else { return };
-    let mut entries: Vec<PathBuf> = top
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    entries.sort();
-    for dir in entries {
-        let name = dir
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        let pkgs: Vec<(String, PathBuf)> = if name.starts_with('@') {
-            let mut v = Vec::new();
-            if let Ok(sub) = fs::read_dir(&dir) {
-                let mut subs: Vec<PathBuf> = sub
-                    .flatten()
-                    .map(|e| e.path())
-                    .filter(|p| p.is_dir())
-                    .collect();
-                subs.sort();
-                for p in subs {
-                    let pkg = p
-                        .file_name()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into_owned();
-                    v.push((format!("{name}/{pkg}"), p));
-                }
-            }
-            v
-        } else {
-            vec![(name.clone(), dir)]
-        };
-        for (full, pkg_dir) in pkgs {
-            if let Ok(raw) = fs::read(pkg_dir.join("package.json")) {
-                if let Ok(val) = serde_json::from_slice::<Value>(&raw) {
-                    if let Some(ver) = val.get("version").and_then(Value::as_str) {
-                        out.entry(full).or_default().insert(ver.to_string());
-                    }
-                }
-            }
-            let nested = pkg_dir.join("node_modules");
-            if nested.is_dir() {
-                collect_instances(&nested, out);
-            }
-        }
-    }
 }
 
 /// Resolve the version npm installed for a top-level package in a scratch tree.
@@ -602,17 +505,6 @@ fn installed_version(nm: &Path, name: &str) -> Option<String> {
     let raw = fs::read(nm.join(name).join("package.json")).ok()?;
     let v: Value = serde_json::from_slice(&raw).ok()?;
     v.get("version").and_then(Value::as_str).map(str::to_string)
-}
-
-/// Copy a package root's files (no nested node_modules) to `dest/<name>`.
-fn copy_package_root(nm: &Path, name: &str, dest: &Path) -> Result<(), String> {
-    let src = nm.join(name);
-    let dst = dest.join(name);
-    let _ = fs::remove_dir_all(&dst);
-    copy_tree(&src, &dst)?;
-    // never carry a package's own nested node_modules into the flat pool
-    let _ = fs::remove_dir_all(dst.join("node_modules"));
-    Ok(())
 }
 
 fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
@@ -660,23 +552,50 @@ const INSTALL_HELP: &str = "usage: inka install [pkg[@ver]...] [--force] [--prod
 /// `inka install`: vendor this project's dependencies into `vendored/`.
 pub(crate) fn cmd_install(args: &[String]) {
     let (force, specs) = parse_add_flags(args, INSTALL_HELP);
-    if specs.is_empty() {
-        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        let declared = declared_root_specs(&cwd).unwrap_or_else(|e| fail(&e));
-        if declared.is_empty() {
-            println!("[inka] no dependencies declared in package.json or deno.json");
-            return;
-        }
-        notice_missing_store();
-        for spec in &declared {
-            add_one(force, spec);
-        }
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let roots: Vec<AddSpec> = if specs.is_empty() {
+        declared_root_specs(&cwd).unwrap_or_else(|e| fail(&e))
     } else {
-        notice_missing_store();
-        for raw in &specs {
-            let spec = parse_add_spec(raw).unwrap_or_else(|e| fail(&e));
-            add_one(force, &spec);
-        }
+        specs
+            .iter()
+            .map(|raw| parse_add_spec(raw))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|e| fail(&e))
+    };
+    if roots.is_empty() {
+        println!("[inka] no dependencies declared in package.json or deno.json");
+        return;
+    }
+    notice_missing_store();
+
+    // Root-level dedupe: skip exact roots the default store already provides.
+    let store = store_dir();
+    let roots: Vec<AddSpec> = roots
+        .into_iter()
+        .filter(|s| {
+            force || s.declared_range || !store_satisfies(&store, &s.name, s.req.as_deref())
+        })
+        .collect();
+    if roots.is_empty() {
+        println!(
+            "[inka] all declared dependencies are provided by the default store; nothing vendored"
+        );
+        return;
+    }
+
+    sync_vendored(&roots).unwrap_or_else(|e| fail(&e));
+    let root = vendor_root();
+    pin_manifests(&root);
+    git_ignore_ensure(&root);
+    let lock = load_lock(&root);
+    println!(
+        "[inka] vendored {} root{} into {}",
+        lock.roots.len(),
+        if lock.roots.len() == 1 { "" } else { "s" },
+        root.display()
+    );
+    for (name, ver) in &lock.roots {
+        println!("  {name}@{ver}");
     }
 }
 
@@ -714,37 +633,7 @@ fn add_one(force: bool, spec: &AddSpec) {
     let store = store_dir();
     let root = vendor_root();
 
-    // 0) already vendored (idempotent) — unless a new exact version or --force
-    {
-        let lock = load_lock(&root);
-        if let Some(cur) = lock.entries.get(&spec.name) {
-            if !force {
-                match spec.req.as_deref() {
-                    None => {
-                        println!(
-                            "[inka] '{}' is already vendored at {} (use '{}' or --force to refresh)",
-                            spec.name, cur.version, cur.version
-                        );
-                        return;
-                    }
-                    Some(r) if r == cur.version => {
-                        println!(
-                            "[inka] '{}' is already vendored at {}",
-                            spec.name, cur.version
-                        );
-                        return;
-                    }
-                    Some(_) => {} // version change: refresh below
-                }
-            }
-        }
-    }
-
-    // 0.5) missing/empty default store is surfaced once by the caller.
-
-    // 1) dedupe: default store already satisfies -> skip (unless --force).
-    //    Declared ranges bypass this: their concrete version is only known
-    //    after the scratch install below.
+    // Root-level dedupe: the default store already provides this exact root.
     if !force && !spec.declared_range && store_satisfies(&store, &spec.name, spec.req.as_deref()) {
         println!(
             "[inka] '{}' is already provided by the default store; nothing vendored (use --force to vendor anyway)",
@@ -753,116 +642,115 @@ fn add_one(force: bool, spec: &AddSpec) {
         return;
     }
 
-    // 2) install the package alone (network) to learn its resolved closure
-    let work = scratch_install(&spec.target).unwrap_or_else(|e| fail(&e));
-    let nm = work.join("node_modules");
-
-    // 3) detect flatten conflicts (one version per vendored name)
-    let mut instances: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
-    collect_instances(&nm, &mut instances);
-    let conflicts: Vec<String> = instances
-        .iter()
-        .filter(|(_, vers)| vers.len() > 1)
-        .map(|(n, vers)| {
-            format!(
-                "{n} ({})",
-                vers.iter().cloned().collect::<Vec<_>>().join(", ")
-            )
-        })
-        .collect();
-    if !conflicts.is_empty() {
-        let _ = fs::remove_dir_all(&work);
-        fail(&format!(
-            "the vendored set cannot flatten version conflicts for: {}\n  pin compatible versions or keep the conflicting copy in the default store",
-            conflicts.join("; ")
-        ));
+    // Re-resolve the whole vendored root set (existing roots + this one) so npm
+    // computes one consistent tree, nesting any version conflicts.
+    let lock = load_lock(&root);
+    let mut specs: BTreeMap<String, AddSpec> = BTreeMap::new();
+    for (name, ver) in &lock.roots {
+        specs.insert(name.clone(), pinned_spec(name, ver));
     }
+    specs.insert(spec.name.clone(), spec.clone());
+    let list: Vec<AddSpec> = specs.into_values().collect();
+    sync_vendored(&list).unwrap_or_else(|e| fail(&e));
 
-    // 4) decide which closure members to vendor: requested root always; other
-    //    members only when the default store cannot satisfy their exact version.
-    let requested_ver = installed_version(&nm, &spec.name)
-        .ok_or_else(|| {
-            let _ = fs::remove_dir_all(&work);
-            format!("npm did not install '{}'", spec.name)
-        })
-        .unwrap_or_else(|e| fail(&e));
-
-    // A declared range resolves to a concrete version; if the store already
-    // provides exactly that, treat it as store-provided (nothing to vendor).
-    if !force && spec.declared_range && store_satisfies(&store, &spec.name, Some(&requested_ver)) {
-        let _ = fs::remove_dir_all(&work);
-        println!(
-            "[inka] '{}' is already provided by the default store; nothing vendored (use --force to vendor anyway)",
-            spec.name
-        );
-        return;
-    }
-
-    let mut to_vendor: Vec<(String, String, String)> = Vec::new(); // (name, ver, why)
-    to_vendor.push((spec.name.clone(), requested_ver.clone(), "root".to_string()));
-    let mut names: Vec<String> = instances.keys().cloned().collect();
-    names.sort();
-    for name in names {
-        if name == spec.name {
-            continue;
-        }
-        let ver = instances[&name].iter().next().cloned().unwrap_or_default();
-        if !store_satisfies(&store, &name, Some(&ver)) {
-            to_vendor.push((name, ver, "dep".to_string()));
-        }
-    }
-
-    // 5) place roots under vendored/ (raw package files; the engine runs CJS
-    //    natively, so no CJS->ESM conversion happens here).
-    fs::create_dir_all(&root)
-        .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", root.display())));
-    for (name, _ver, _why) in &to_vendor {
-        copy_package_root(&nm, name, &root).unwrap_or_else(|e| {
-            let _ = fs::remove_dir_all(&work);
-            fail(&e)
-        });
-    }
-    let _ = fs::remove_dir_all(&work);
-
-    // 7) lock + manifests
-    let mut lock = load_lock(&root);
-    for (name, ver, why) in &to_vendor {
-        let entry = lock.entries.entry(name.clone()).or_insert(LockEntry {
-            version: ver.clone(),
-            why: why.clone(),
-            converted: Vec::new(),
-        });
-        entry.version = ver.clone();
-        if why == "root" {
-            entry.why = "root".to_string();
-        } else if entry.why != "root" {
-            entry.why = "dep".to_string();
-        }
-    }
-    // WS3-3: record which default store the dedupe consulted.
-    lock.store = Some(store_identity(&store));
-    save_lock(&root, &lock).unwrap_or_else(|e| fail(&e));
-
-    let mut manifests = project_manifests();
-    ensure_manifest(&mut manifests);
-    manifests_add(&manifests, &spec.name, &requested_ver).unwrap_or_else(|e| fail(&e));
-
-    // a version refresh may leave dep entries no other vendored package needs
-    prune_orphans(&root, &mut lock);
-    save_lock(&root, &lock).unwrap_or_else(|e| fail(&e));
-
+    pin_manifests(&root);
     git_ignore_ensure(&root);
+    let resolved = load_lock(&root)
+        .roots
+        .get(&spec.name)
+        .cloned()
+        .unwrap_or_default();
     println!(
-        "[inka] vendored {}@{} (+{} dependency entr{} into {})",
+        "[inka] vendored {}@{} ({} root{}) into {}",
         spec.name,
-        requested_ver,
-        to_vendor.len() - 1,
-        if to_vendor.len() == 2 { "y" } else { "ies" },
+        resolved,
+        list.len(),
+        if list.len() == 1 { "" } else { "s" },
         root.display()
     );
-    for (name, ver, why) in &to_vendor {
-        println!("  vendored {name}@{ver} ({why})");
+}
+
+/// An exact-version `AddSpec` for an already-resolved root.
+fn pinned_spec(name: &str, version: &str) -> AddSpec {
+    AddSpec {
+        name: name.to_string(),
+        req: None,
+        target: format!("{name}@{version}"),
+        declared_range: false,
     }
+}
+
+/// Pin every resolved root to its exact version in the project manifests.
+fn pin_manifests(root: &Path) {
+    let lock = load_lock(root);
+    let mut manifests = project_manifests();
+    ensure_manifest(&mut manifests);
+    for (name, ver) in &lock.roots {
+        manifests_add(&manifests, name, ver).unwrap_or_else(|e| fail(&e));
+    }
+}
+
+/// Remove everything under `vendored/` except the lock, so a re-resolution
+/// replaces the tree (and clears a legacy flat layout).
+fn clear_vendored_packages(root: &Path) {
+    let Ok(rd) = fs::read_dir(root) else { return };
+    for ent in rd.flatten() {
+        if ent.file_name() == LOCK_FILE {
+            continue;
+        }
+        let _ = fs::remove_dir_all(ent.path());
+    }
+}
+
+/// Resolve `roots` together with one `npm install` and replace
+/// `vendored/node_modules` with the resulting tree (nested conflicts kept).
+fn sync_vendored(roots: &[AddSpec]) -> Result<(), String> {
+    let root = vendor_root();
+    let store = store_dir();
+    clear_vendored_packages(&root);
+
+    if roots.is_empty() {
+        let mut lock = load_lock(&root);
+        lock.version = LOCK_VERSION;
+        lock.roots.clear();
+        lock.store = Some(store_identity(&store));
+        return save_lock(&root, &lock);
+    }
+
+    let work = std::env::temp_dir().join(format!("inka-vendor-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).map_err(|e| format!("cannot create workdir: {e}"))?;
+    jsr_npmrc(&work);
+    let targets: Vec<String> = roots.iter().map(|s| s.target.clone()).collect();
+    let mut cmd = Command::new("npm");
+    cmd.current_dir(&work)
+        .args(["install", "--no-save", "--omit=dev"])
+        .args(&targets);
+    if let Err(e) = pkg::run_ok(&mut cmd, "npm install") {
+        let _ = fs::remove_dir_all(&work);
+        return Err(e);
+    }
+    if !work.join("node_modules").is_dir() {
+        let _ = fs::remove_dir_all(&work);
+        return Err("npm install did not produce a node_modules directory".into());
+    }
+
+    fs::create_dir_all(&root).map_err(|e| format!("cannot create {}: {e}", root.display()))?;
+    let dst = root.join("node_modules");
+    let _ = fs::remove_dir_all(&dst);
+    let copy = copy_tree(&work.join("node_modules"), &dst);
+    let _ = fs::remove_dir_all(&work);
+    copy?;
+
+    let mut lock = load_lock(&root);
+    lock.version = LOCK_VERSION;
+    lock.roots.clear();
+    for s in roots {
+        let v = installed_version(&dst, &s.name).unwrap_or_default();
+        lock.roots.insert(s.name.clone(), v);
+    }
+    lock.store = Some(store_identity(&store));
+    save_lock(&root, &lock)
 }
 
 // ---- remove ----------------------------------------------------------------
@@ -876,116 +764,32 @@ pub(crate) fn cmd_remove(args: &[String]) {
         std::process::exit(0);
     }
     let spec = parse_add_spec(&args[0]).unwrap_or_else(|e| fail(&e));
-    let store = store_dir();
     let root = vendor_root();
-    let pkg_dir = root.join(&spec.name);
+    let mut lock = load_lock(&root);
 
-    if !pkg_dir.is_dir() {
-        if store_satisfies(&store, &spec.name, None) {
+    if !lock.roots.contains_key(&spec.name) {
+        if store_satisfies(&store_dir(), &spec.name, None) {
             println!(
                 "[inka] '{}' is provided by the default store, not vendored; nothing to remove",
                 spec.name
             );
         } else {
-            fail(&format!(
-                "'{}' is neither vendored nor in the default store",
-                spec.name
-            ));
+            fail(&format!("'{}' is not vendored", spec.name));
         }
         return;
     }
 
-    let _ = fs::remove_dir_all(&pkg_dir);
-
-    let mut lock = load_lock(&root);
-    lock.entries.remove(&spec.name);
-    prune_orphans(&root, &mut lock);
-    save_lock(&root, &lock).unwrap_or_else(|e| fail(&e));
+    lock.roots.remove(&spec.name);
+    let specs: Vec<AddSpec> = lock
+        .roots
+        .iter()
+        .map(|(name, ver)| pinned_spec(name, ver))
+        .collect();
+    sync_vendored(&specs).unwrap_or_else(|e| fail(&e));
 
     let manifests = project_manifests();
     manifests_remove(&manifests, &spec.name).unwrap_or_else(|e| fail(&e));
     println!("[inka] removed vendored '{}'", spec.name);
-}
-
-/// Prune vendored dep entries no longer referenced by any remaining vendored
-/// package and not declared as roots in the manifests.
-fn prune_orphans(root: &Path, lock: &mut Lock) {
-    let manifests = project_manifests();
-    loop {
-        let mut changed = false;
-        let names: Vec<String> = lock.entries.keys().cloned().collect();
-        for name in names {
-            let is_root =
-                manifests_declares(&manifests, &name) || lock.entries[&name].why == "root";
-            if is_root {
-                continue;
-            }
-            let referenced = lock
-                .entries
-                .iter()
-                .any(|(n, _)| n.as_str() != name.as_str() && package_requires(root, &name));
-            if !referenced {
-                lock.entries.remove(&name);
-                let _ = fs::remove_dir_all(root.join(&name));
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-}
-
-/// Is `dep` a runtime dependency of any package root currently under `root`?
-/// WS3-2: `dep` counts when it appears in ANY of `dependencies`,
-/// `optionalDependencies`, or `peerDependencies` (skipping `peerDependenciesMeta`
-/// entries marked optional=true) of an on-disk vendored package root. Only
-/// affects prune/remove decisions; never auto-vendors.
-fn package_requires(root: &Path, dep: &str) -> bool {
-    let Ok(top) = fs::read_dir(root) else {
-        return false;
-    };
-    for ent in top.flatten() {
-        let dir = ent.path();
-        if !dir.is_dir() {
-            continue;
-        }
-        let Ok(raw) = fs::read(dir.join("package.json")) else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_slice::<Value>(&raw) else {
-            continue;
-        };
-        let key = |k: &str| {
-            v.get(k)
-                .and_then(Value::as_object)
-                .cloned()
-                .unwrap_or_default()
-        };
-        let deps = key("dependencies");
-        if deps.contains_key(dep) {
-            return true;
-        }
-        if key("optionalDependencies").contains_key(dep) {
-            return true;
-        }
-        let peers = key("peerDependencies");
-        if peers.contains_key(dep) {
-            // skip peers declared optional in peerDependenciesMeta
-            let meta = v
-                .get("peerDependenciesMeta")
-                .and_then(Value::as_object)
-                .and_then(|m| m.get(dep))
-                .and_then(Value::as_object)
-                .and_then(|m| m.get("optional"))
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !meta {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 // ---- list / status ---------------------------------------------------------
@@ -997,27 +801,19 @@ pub(crate) fn cmd_list(args: &[String]) {
     }
     let root = vendor_root();
     let lock = load_lock(&root);
-    if lock.entries.is_empty() {
+    if lock.roots.is_empty() {
         println!("(no vendored packages; `inka add <pkg>` to vendor one)");
         return;
     }
-    let manifests = project_manifests();
-    for (name, e) in &lock.entries {
-        let root_mark = if manifests_declares(&manifests, name) || e.why == "root" {
-            "root"
-        } else {
-            "dep"
-        };
-        println!(
-            "{name}@{version} [{root_mark}{converted}]",
-            version = e.version,
-            converted = if e.converted.is_empty() {
-                String::new()
-            } else {
-                format!(", converted={}", e.converted.join("+"))
-            }
-        );
+    for (name, ver) in &lock.roots {
+        println!("{name}@{ver} [root]");
     }
+    let packages = crate::pool_package_count(&root);
+    println!(
+        "vendored node_modules: {packages} package root{} under {}",
+        if packages == 1 { "" } else { "s" },
+        root.join("node_modules").display()
+    );
 }
 
 pub(crate) fn cmd_status(args: &[String]) {
@@ -1051,18 +847,18 @@ pub(crate) fn cmd_status(args: &[String]) {
             );
         }
     }
-    if lock.entries.is_empty() {
+    if lock.roots.is_empty() {
         println!("vendored: (none)");
     }
-    for (name, e) in &lock.entries {
-        let store_state = if store_satisfies(&store, name, Some(&e.version)) {
+    for (name, ver) in &lock.roots {
+        let store_state = if store_satisfies(&store, name, Some(ver)) {
             "also in store"
         } else if store_satisfies(&store, name, None) {
             "store has a different version"
         } else {
             "not in store"
         };
-        println!("  {name}@{version} {store_state}", version = e.version);
+        println!("  {name}@{ver} {store_state}");
     }
     if let Ok(gi) = fs::read_to_string(root.parent().unwrap_or(&root).join(".gitignore")) {
         let ignored = gi
@@ -1225,97 +1021,26 @@ mod tests {
         assert_eq!(mirror.name, "@jsr/std__path");
     }
 
-    // ---- WS3-2: prune considers optional/peer dependencies --------------------
+    // ---- lock v2 ---------------------------------------------------------------
 
     #[test]
-    fn package_requires_sees_optional_and_nonoptional_peers() {
-        let root = scratch("reqs");
-        // a -> b only under optionalDependencies
-        write_file(
-            &root,
-            "a/package.json",
-            r#"{"name":"a","version":"1.0.0","optionalDependencies":{"b":"1.0.0"}}"#,
-        );
-        // a2 -> peers b (non-optional) and c (optional via peerDependenciesMeta)
-        write_file(
-            &root,
-            "a2/package.json",
-            r#"{"name":"a2","version":"1.0.0","peerDependencies":{"b":"1.0.0","c":"1.0.0"},"peerDependenciesMeta":{"c":{"optional":true}}}"#,
-        );
-        write_file(&root, "b/package.json", r#"{"name":"b","version":"1.0.0"}"#);
-        write_file(&root, "c/package.json", r#"{"name":"c","version":"1.0.0"}"#);
-        // "b" referenced via optionalDependencies and a non-optional peer
-        assert!(package_requires(&root, "b"));
-        // "c" only referenced as an optional peer -> not a hard reference
-        assert!(!package_requires(&root, "c"));
-        // an unreferenced name is not required
-        assert!(!package_requires(&root, "nope"));
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn prune_keeps_optional_dep_until_referrer_removed() {
-        let root = scratch("prune");
-        write_file(
-            &root,
-            "a/package.json",
-            r#"{"name":"a","version":"1.0.0","optionalDependencies":{"b":"1.0.0"}}"#,
-        );
-        write_file(&root, "b/package.json", r#"{"name":"b","version":"1.0.0"}"#);
+    fn lock_v2_round_trips_and_legacy_parses_empty() {
         let mut lock = Lock::default();
-        lock.entries.insert(
-            "a".to_string(),
-            LockEntry {
-                version: "1.0.0".into(),
-                why: "root".into(),
-                converted: vec![],
-            },
-        );
-        lock.entries.insert(
-            "b".to_string(),
-            LockEntry {
-                version: "1.0.0".into(),
-                why: "dep".into(),
-                converted: vec![],
-            },
-        );
-        // A still references B (optional) -> B is not pruned.
-        prune_orphans(&root, &mut lock);
-        assert!(lock.entries.contains_key("b"));
-        // Remove A (dir + lock entry), then B becomes an orphan and is pruned.
-        let _ = fs::remove_dir_all(root.join("a"));
-        lock.entries.remove("a");
-        prune_orphans(&root, &mut lock);
-        assert!(!lock.entries.contains_key("b"));
-        assert!(!root.join("b").exists());
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    // ---- WS3-3: lock store note -----------------------------------------------
-
-    #[test]
-    fn lock_store_note_round_trips_and_defaults_backward_compatibly() {
-        let mut lock = Lock::default();
+        lock.version = LOCK_VERSION;
         lock.store = Some("/tmp/store sha256=abc123".to_string());
-        lock.entries.insert(
-            "zod".to_string(),
-            LockEntry {
-                version: "3.23.0".into(),
-                why: "root".into(),
-                converted: vec![],
-            },
-        );
+        lock.roots.insert("zod".to_string(), "3.23.0".to_string());
         let json = serde_json::to_string(&lock).unwrap();
-        assert!(json.contains("\"store\""), "{json}");
+        assert!(json.contains("\"roots\""), "{json}");
         let back: Lock = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, LOCK_VERSION);
         assert_eq!(back.store.as_deref(), Some("/tmp/store sha256=abc123"));
-        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.roots.get("zod").map(String::as_str), Some("3.23.0"));
 
-        // A pre-WS3-3 lock (no "store" key) still parses with store == None.
-        let old = r#"{"entries":{"zod":{"version":"3.23.0","why":"root","converted":[]}}}"#;
-        let parsed: Lock = serde_json::from_str(old).unwrap();
-        assert_eq!(parsed.store, None);
-        assert_eq!(parsed.entries.len(), 1);
+        // A legacy lock (flat `entries`) parses with empty roots.
+        let legacy = r#"{"entries":{"zod":{"version":"3.23.0","why":"root","converted":[]}}}"#;
+        let parsed: Lock = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.version, 0);
+        assert!(parsed.roots.is_empty());
     }
 
     // ---- install: declared-root discovery ---------------------------------

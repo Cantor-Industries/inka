@@ -90,7 +90,7 @@ mkdir -p "$INKA_RUNTIME_HOME"
    ```sh
    mkdir scratch && cd scratch
    inka add ms
-   test -f vendored/ms/index.js            # raw CJS, no esm.js
+   test -f vendored/node_modules/ms/index.js   # raw CJS, no esm.js
    printf 'import { createRequire } from "node:module";\nconst require = createRequire(import.meta.url);\nconsole.log(typeof require("ms"));\n' > r.js
    inka run -A r.js                        # -> function
    ```

@@ -108,8 +108,8 @@ if ! "$INKA" add ms >/dev/null 2>&1; then
     echo "smoke: inka add ms failed" >&2
     exit 1
 fi
-[ -f "$SCRATCH/vendor/vendored/ms/index.js" ] || { echo "smoke: ms was not vendored raw" >&2; exit 1; }
-if [ -f "$SCRATCH/vendor/vendored/ms/esm.js" ]; then
+[ -f "$SCRATCH/vendor/vendored/node_modules/ms/index.js" ] || { echo "smoke: ms was not vendored raw" >&2; exit 1; }
+if [ -f "$SCRATCH/vendor/vendored/node_modules/ms/esm.js" ]; then
     echo "smoke: unexpected esm.js (no conversion should run)" >&2
     exit 1
 fi
