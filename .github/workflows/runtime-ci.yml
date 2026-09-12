@@ -1,8 +1,9 @@
 # Runtime contract matrix on the self-hosted runner.
 #
 # The heavy `inka-runtime` crate builds here (the hosted `ci.yml` rust job only
-# covers the fast crates). Triggered only when runtime-coupled files change, so
-# the shared release runner is not scheduled for unrelated PRs.
+# covers the fast crates). Built in release so the matrix exercises the same
+# optimized runtime that ships. Triggered only when runtime-coupled files
+# change, so the shared release runner is not scheduled for unrelated PRs.
 #
 # Security: never run untrusted fork code on the self-hosted runner. The job is
 # skipped for pull requests whose head repo is not this repository.
@@ -53,11 +54,11 @@ jobs:
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
 
-      - name: Build fast crates + runtime (debug)
+      - name: Build fast crates + runtime (release)
         run: |
           set -euo pipefail
           : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
-          cargo build -p inka -p inka-resolver -p inka-runtime
+          cargo build --release -p inka -p inka-resolver -p inka-runtime
 
       - name: Stage runtime + resolver for the matrix
         run: |
@@ -66,8 +67,8 @@ jobs:
           resolver="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' crates/inka-resolver/Cargo.toml | head -1)"
           home="${RUNNER_TEMP:-/tmp}/inka-runtime"
           mkdir -p "$home"
-          cp "$CARGO_TARGET_DIR/debug/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
-          cp "$CARGO_TARGET_DIR/debug/libinka_resolver.so" "$home/libinka_resolver-$resolver.so"
+          cp "$CARGO_TARGET_DIR/release/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
+          cp "$CARGO_TARGET_DIR/release/libinka_resolver.so" "$home/libinka_resolver-$resolver.so"
           echo "INKA_RUNTIME_HOME=$home" >> "$GITHUB_ENV"
 
       - name: Seed release store
@@ -75,7 +76,7 @@ jobs:
           set -euo pipefail
           store="${RUNNER_TEMP:-/tmp}/inka-store"
           mkdir -p "$store"
-          "$CARGO_TARGET_DIR/debug/inka" internal snapshot-store \
+          "$CARGO_TARGET_DIR/release/inka" internal snapshot-store \
             --seed-manifest seed-manifest.json --out "$store"
           tar -xzf "$store/store.tar.gz" -C "$store"
           echo "INKA_STORE=$store" >> "$GITHUB_ENV"
@@ -83,4 +84,4 @@ jobs:
       - name: Runtime contract matrix
         run: |
           set -euo pipefail
-          bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/debug/inka" "$INKA_STORE"
+          bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/release/inka" "$INKA_STORE"
