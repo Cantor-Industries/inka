@@ -241,9 +241,9 @@ fn apply_category_map(
     for (cat, val) in obj {
         if !CATEGORIES.contains(&cat.as_str()) {
             if cat == "import" {
-                warns.push(format!(
-                    "permission category 'import' has no inka equivalent; ignored"
-                ));
+                warns.push(
+                    "permission category 'import' has no inka equivalent; ignored".to_string(),
+                );
             } else {
                 warns.push(format!("unknown permission category '{cat}'; ignored"));
             }
@@ -432,6 +432,7 @@ fn set_declares_grants(set: &Value) -> bool {
 ///      Deno, which requires `-P` even for compile permissions).
 ///   3. An `inka.permissions` marker (deno.json wins over package.json) whose
 ///      value is a set-name string.
+///
 /// A plain `permissions.default` set with none of the above markers is dev-run
 /// intent and is IGNORED; if such a set would actually grant something, an
 /// informational note is returned so the silent drop is never invisible.
@@ -482,8 +483,8 @@ fn effective_permission_map(
         .as_ref()
         .and_then(|p| p.get("inka"))
         .and_then(|i| i.get("permissions"));
-    match deno_marker.or(pkg_marker) {
-        Some(v) => match v.as_str() {
+    if let Some(v) = deno_marker.or(pkg_marker) {
+        match v.as_str() {
             Some(name) => {
                 return (
                     resolve_named_set(cfg, name, "inka.permissions", &mut notes),
@@ -498,8 +499,7 @@ fn effective_permission_map(
                 );
                 return (None, notes);
             }
-        },
-        None => {}
+        }
     }
 
     // 4. Nothing was selected. A plain `permissions.default` is dev-run intent

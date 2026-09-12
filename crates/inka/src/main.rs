@@ -315,9 +315,12 @@ fn cmd_list(args: &[String]) {
     }
 }
 
+/// Installed runtime/resolver parts from a runtime dir: `(version, path)` pairs.
+pub(crate) type InstalledParts = (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>);
+
 /// Scan a runtime dir for installed `libinka_runtime-*.so` / `libinka_resolver-*.so`
 /// files, sorted by version. Reused by `inka list`, `inka doctor`, and `inka run`.
-pub(crate) fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
+pub(crate) fn installed_parts(dir: &Path) -> InstalledParts {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
     let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
@@ -344,9 +347,7 @@ pub(crate) fn installed_parts(dir: &Path) -> (Vec<(Version, PathBuf)>, Vec<(Vers
 }
 
 /// Merge installed parts across several runtime dirs (sorted by version).
-pub(crate) fn installed_parts_all(
-    dirs: &[PathBuf],
-) -> (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>) {
+pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> InstalledParts {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
     let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     for d in dirs {
@@ -487,7 +488,7 @@ fn cmd_doctor(args: &[String]) {
     let (abi, res_version, res_path) = match resolvers.last() {
         Some((v, p)) => {
             let (a, s) = resolver_abi_etc(p);
-            (Some(a), Some(s), Some((v.clone(), p.clone())))
+            (Some(a), Some(s), Some((*v, p.clone())))
         }
         None => (None, None, None),
     };
@@ -552,12 +553,10 @@ fn cmd_doctor(args: &[String]) {
             }
         );
         match lock_store {
-            Some(recorded) if recorded != current => {
-                if store_present {
-                    warnings.push(format!(
-                        "vendored set was built against a different default store ({recorded}); reseed or vendor the affected deps"
-                    ));
-                }
+            Some(recorded) if recorded != current && store_present => {
+                warnings.push(format!(
+                    "vendored set was built against a different default store ({recorded}); reseed or vendor the affected deps"
+                ));
             }
             _ => {}
         }

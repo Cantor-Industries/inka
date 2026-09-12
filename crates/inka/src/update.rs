@@ -355,7 +355,7 @@ fn plan_actions(
     latest_runtime: Version,
     latest_resolver: Option<Version>,
 ) -> Actions {
-    let runtime = installed_runtime.map_or(true, |i| i < latest_runtime);
+    let runtime = installed_runtime.is_none_or(|i| i < latest_runtime);
     let resolver = match (latest_resolver, installed_resolver) {
         (Some(l), Some(i)) => i < l,
         (Some(_), None) => true,
@@ -615,7 +615,7 @@ fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) -> Re
                     continue;
                 };
                 if let Some(v) = parse_version(vstr) {
-                    if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
+                    if best.as_ref().is_none_or(|(bv, _)| v > *bv) {
                         best = Some((v, n));
                     }
                 }

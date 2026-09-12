@@ -265,7 +265,7 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
         i += 1;
     }
     match runtimes.last() {
-        Some((v, p)) => (p.clone(), Some(v.clone())),
+        Some((v, p)) => (p.clone(), Some(*v)),
         None => {
             let searched = dirs
                 .iter()

@@ -531,9 +531,8 @@ fn scratch_install(target: &str) -> Result<PathBuf, String> {
     let mut cmd = Command::new("npm");
     cmd.current_dir(&work)
         .args(["install", "--no-save", "--omit=dev", target]);
-    pkg::run_ok(&mut cmd, "npm install").map_err(|e| {
+    pkg::run_ok(&mut cmd, "npm install").inspect_err(|_| {
         let _ = fs::remove_dir_all(&work);
-        e
     })?;
     if !work.join("node_modules").is_dir() {
         let _ = fs::remove_dir_all(&work);
@@ -685,8 +684,7 @@ pub(crate) fn cmd_install(args: &[String]) {
 fn parse_add_flags(args: &[String], help: &str) -> (bool, Vec<String>) {
     let mut force = false;
     let mut specs: Vec<String> = Vec::new();
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
+    for a in args {
         match a.as_str() {
             "--force" | "-f" => force = true,
             "--prod" => {} // v1 reads prod deps only; accepted for deno parity

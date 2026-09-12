@@ -661,6 +661,12 @@ pub extern "C" fn inka_resolver_abi() -> c_int {
 /// `inka_resolver_free`. Returns a `KIND_*` code; for KIND_FILE `*a` is the
 /// absolute file path; for KIND_BUILTIN `*a` is a full `node:<name>` specifier;
 /// for KIND_ERROR `*a` is the message.
+///
+/// # Safety
+///
+/// `store`, `vendor`, `referrer`, and `specifier` must each be null or point to
+/// a valid NUL-terminated C string. `a` must be null or point to writable
+/// storage; `_b` is ignored.
 #[no_mangle]
 pub unsafe extern "C" fn inka_resolver_resolve(
     store: *const c_char,
@@ -702,6 +708,12 @@ pub unsafe extern "C" fn inka_resolver_resolve(
     }
 }
 
+/// Release a C string returned by [`inka_resolver_resolve`].
+///
+/// # Safety
+///
+/// `p` must be null or a pointer previously returned by
+/// [`inka_resolver_resolve`] that has not already been freed.
 #[no_mangle]
 pub unsafe extern "C" fn inka_resolver_free(p: *mut c_char) {
     if !p.is_null() {

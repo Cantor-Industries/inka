@@ -152,10 +152,8 @@ pub fn collect_vendored_closure(
         if rel.starts_with("vendored/") {
             files.insert(rel.clone(), bytes.clone());
             if let Some(pj) = package_json_for(cwd, &rel) {
-                if !files.contains_key(&pj) {
-                    if let Ok(b) = fs::read(cwd.join(&pj)) {
-                        files.insert(pj, b);
-                    }
+                if let Ok(b) = fs::read(cwd.join(&pj)) {
+                    files.entry(pj).or_insert(b);
                 }
             }
         }
