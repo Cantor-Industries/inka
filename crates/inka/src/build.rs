@@ -25,7 +25,7 @@ const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n\
+        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor] [--no-node-modules]\n\
          \n\
          packs <source> (and the files it imports) onto the launcher into a single executable.\n\
          The manifest is always derived from package.json / deno.json(.jsonc) permissions\n\
@@ -41,6 +41,7 @@ fn help() -> ! {
          \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
          \x20     --vendor-closure  embed only the vendored modules reachable from the entry's import graph\n\
          \x20     --no-vendor       skip vendored embedding entirely (artifact relies on the machine default store)\n\
+         \x20     --no-node-modules skip embedding the project node_modules closure (artifact relies on the store)\n\
          \x20 -h, --help            show this help\n\
          \n\
          launcher is found at $INKA_LAUNCHER or next to the inka binary."
@@ -63,6 +64,7 @@ pub fn cmd_build(args: &[String]) {
     let mut embed_dir = false;
     let mut vendor_closure = false;
     let mut no_vendor = false;
+    let mut no_node_modules = false;
     let mut positional: Vec<PathBuf> = Vec::new();
 
     let mut it = args.iter();
@@ -83,6 +85,7 @@ pub fn cmd_build(args: &[String]) {
             "--embed-dir" => embed_dir = true,
             "--vendor-closure" => vendor_closure = true,
             "--no-vendor" => no_vendor = true,
+            "--no-node-modules" => no_node_modules = true,
             "-h" | "--help" => help(),
             other if other.starts_with('-') => {
                 eprintln!("error: unknown option '{other}'");
@@ -189,6 +192,19 @@ pub fn cmd_build(args: &[String]) {
     for (rel, bytes) in vendor_files {
         if !files.iter().any(|(r, _)| r == &rel) {
             files.push((rel, bytes));
+        }
+    }
+
+    // Auto-embed the project's node_modules closure (bring-your-own-node_modules)
+    // so an artifact built from a normal Node project carries its dependencies.
+    // `--no-node-modules` opts out (the artifact then resolves from the store).
+    if !no_node_modules {
+        let nm_files = crate::embed::collect_node_modules_closure(&cwd, &entry_rel)
+            .unwrap_or_else(|e| err(&e));
+        for (rel, bytes) in nm_files {
+            if !files.iter().any(|(r, _)| r == &rel) {
+                files.push((rel, bytes));
+            }
         }
     }
 

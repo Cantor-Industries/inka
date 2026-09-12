@@ -360,7 +360,7 @@ fn package_json_for(cwd: &Path, rel: &str) -> Option<String> {
         if cwd.join(d).join("package.json").is_file() {
             return Some(format!("{s}/package.json"));
         }
-        if s == "vendored" {
+        if s == "vendored" || d.file_name().is_some_and(|n| n == "node_modules") {
             break;
         }
         dir = d.parent();
@@ -418,6 +418,155 @@ pub fn collect_vendored_closure(
     }
 
     Ok(files.into_iter().collect())
+}
+
+/// Collect the project's `node_modules` files reachable from the entry graph
+/// (bring-your-own-node_modules). Bare/`npm:`/`jsr:` specifiers resolve against
+/// `<cwd>/node_modules` (nearest `node_modules` first, then the hoisted root);
+/// store/builtin specifiers are left for runtime resolution. Files are embedded
+/// at their `node_modules/…` paths (through symlinks, so Deno's isolated
+/// `.deno/` and pnpm's `.pnpm/` layouts work), and each reached package root's
+/// `package.json` is embedded too.
+pub fn collect_node_modules_closure(
+    cwd: &Path,
+    entry_rel: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let nm = cwd.join("node_modules");
+    if !nm.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut visited: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<String> = vec![entry_rel.to_string()];
+    let mut warned = false;
+
+    while let Some(rel) = queue.pop() {
+        if !visited.insert(rel.clone()) {
+            continue;
+        }
+        let bytes = fs::read(cwd.join(&rel))
+            .map_err(|e| format!("cannot read {}: {e}", cwd.join(&rel).display()))?;
+        let in_nm = rel.starts_with("node_modules/");
+        if in_nm {
+            files.insert(rel.clone(), bytes.clone());
+            if let Some(pj) = package_json_for(cwd, &rel) {
+                if let Ok(b) = fs::read(cwd.join(&pj)) {
+                    files.entry(pj).or_insert(b);
+                }
+            }
+        }
+        for s in scan_specifiers(cwd, &rel, &bytes, &mut warned) {
+            let target = if in_nm {
+                resolve_local_raw(cwd, &rel, &s).or_else(|| node_modules_target(cwd, &nm, &rel, &s))
+            } else {
+                resolve_local(cwd, &rel, &s).or_else(|| node_modules_target(cwd, &nm, &rel, &s))
+            };
+            if let Some(t) = target {
+                if !visited.contains(&t) {
+                    queue.push(t);
+                }
+            }
+        }
+    }
+
+    Ok(files.into_iter().collect())
+}
+
+/// Resolve a bare/`npm:`/`jsr:` specifier to a file under `<cwd>/node_modules`,
+/// walking the nearest `node_modules` from `from_rel` first (nested wins over
+/// hoisted), then the hoisted root. Returns a cwd-relative path (symlinks
+/// preserved).
+fn node_modules_target(cwd: &Path, nm: &Path, from_rel: &str, spec: &str) -> Option<String> {
+    let (name, sub) = vendored_spec(spec)?;
+    let identities = vendored_identities(&name);
+    let from_abs = cwd.join(from_rel);
+    let tree = nm.parent().unwrap_or(nm);
+    let mut dir = from_abs.parent();
+    while let Some(d) = dir {
+        if !d.starts_with(tree) {
+            break;
+        }
+        for ident in &identities {
+            let pkg = d.join("node_modules").join(ident);
+            if pkg.join("package.json").is_file() {
+                if let Ok(file) = resolve_pkg_file(&pkg, sub.as_deref()) {
+                    if let Some(rel) = rel_of(cwd, &file) {
+                        return Some(rel);
+                    }
+                }
+            }
+        }
+        dir = d.parent();
+    }
+    None
+}
+
+/// Like `resolve_local`, but keeps the referrer's path (no canonicalization) so
+/// files reached through a `node_modules/<pkg>` symlink stay at the symlink path
+/// the runtime resolves.
+fn resolve_local_raw(cwd: &Path, from_rel: &str, spec: &str) -> Option<String> {
+    if !(spec.starts_with("./") || spec.starts_with("../")) {
+        return None;
+    }
+    let base_dir = Path::new(from_rel).parent().unwrap_or(Path::new(""));
+    let candidate = normalize_rel(&base_dir.join(spec));
+    if let Some(r) = rel_of(cwd, &candidate) {
+        if cwd.join(&candidate).is_file() {
+            return Some(r);
+        }
+    }
+    for ext in TRY_EXTS {
+        let with_ext = PathBuf::from(format!("{}.{ext}", candidate.to_string_lossy()));
+        if cwd.join(&with_ext).is_file() {
+            if let Some(r) = rel_of(cwd, &with_ext) {
+                return Some(r);
+            }
+        }
+    }
+    for ext in TRY_EXTS {
+        let idx = candidate.join(format!("index.{ext}"));
+        if cwd.join(&idx).is_file() {
+            if let Some(r) = rel_of(cwd, &idx) {
+                return Some(r);
+            }
+        }
+    }
+    None
+}
+
+/// Lexically resolve `.`/`..` segments (no filesystem access).
+fn normalize_rel(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// cwd-relative path string for `p`: an absolute path is stripped against
+/// `cwd`, a relative one is used as-is. None when empty or escaping via `..`.
+fn rel_of(cwd: &Path, p: &Path) -> Option<String> {
+    let rel: PathBuf = if p.is_absolute() {
+        p.strip_prefix(cwd).ok()?.to_path_buf()
+    } else {
+        p.to_path_buf()
+    };
+    let s = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if s.is_empty() || s.starts_with("..") {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Scan one source file for import specifiers: static imports/export-from via
@@ -971,6 +1120,38 @@ mod tests {
                 "vendored/ws/mod.ts",
                 "vendored/ws/package.json",
             ],
+            "{rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn node_modules_closure_follows_relative_require() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/pkg/package.json",
+            r#"{"name":"pkg","version":"1.0.0","main":"index.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/pkg/index.js",
+            "\tmodule.exports = require('./node.js');\n",
+        );
+        mk(&cwd, "node_modules/pkg/node.js", "module.exports = 42;\n");
+        mk(
+            &cwd,
+            "app.js",
+            "const p = require('pkg');\nconsole.log(p);\n",
+        );
+        let files = collect_node_modules_closure(&cwd, "app.js").unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert!(
+            rels.contains(&"node_modules/pkg/index.js".to_string()),
+            "{rels:?}"
+        );
+        assert!(
+            rels.contains(&"node_modules/pkg/node.js".to_string()),
             "{rels:?}"
         );
         let _ = std::fs::remove_dir_all(&cwd);
