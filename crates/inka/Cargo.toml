@@ -23,4 +23,3 @@ url = "2"
 libloading = "0.8"
 libc = "0.2"
 deno_ast = { version = "=0.53.3", features = ["transpiling"], optional = true }
-inka-resolver = { path = "../inka-resolver" }

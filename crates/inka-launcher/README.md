@@ -18,9 +18,9 @@ launcher:
    never degrade to allow-all.
 
 It also sets up the environment the runtime reads: default `INKA_STORE` to a
-`store/` dir next to the runtime, default `INKA_RESOLVER` to the newest
-installed resolver, and `INKA_VENDOR` to the artifact's embedded `vendored/`
-tree (cleared otherwise, so a caller-exported `INKA_VENDOR` never leaks in).
+`store/` dir next to the runtime, and `INKA_VENDOR` to the artifact's embedded
+`vendored/` tree (cleared otherwise, so a caller-exported `INKA_VENDOR` never
+leaks in).
 
 ## Build
 

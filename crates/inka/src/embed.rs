@@ -81,27 +81,273 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
 }
 
 /// Resolve a non-relative specifier to a cwd-relative `vendored/…` file that a
-/// `--vendor-closure` build should embed. Walks the pure resolver with the
-/// project's `vendored/` as the vendor root and no store: only a
-/// `Decision::File` under that root is embeddable; store/builtin/error results
-/// (and everything outside `vendored/`) are left for runtime resolution.
-fn vendored_target(cwd: &Path, vendor_root: &Path, from_rel: &str, spec: &str) -> Option<String> {
-    let referrer = url_from_rel(cwd, from_rel).to_string();
-    let decision = inka_resolver::resolve_v2(None, Some(vendor_root), &referrer, spec);
-    let inka_resolver::Decision::File(p) = decision else {
-        return None;
-    };
-    if !p.starts_with(vendor_root) {
+/// `--vendor-closure` build should embed. Only a vendored package root (with a
+/// `package.json`) under the project's `vendored/` is embeddable; store/builtin
+/// results (and everything outside `vendored/`) are left for runtime resolution.
+fn vendored_target(cwd: &Path, vendor_root: &Path, _from_rel: &str, spec: &str) -> Option<String> {
+    let (name, sub) = vendored_spec(spec)?;
+    for ident in vendored_identities(&name) {
+        let pkg_root = vendor_root.join(&ident);
+        if !pkg_root.join("package.json").is_file() {
+            continue;
+        }
+        let Ok(file) = resolve_pkg_file(&pkg_root, sub.as_deref()) else {
+            continue;
+        };
+        if !file.starts_with(vendor_root) {
+            continue;
+        }
+        let rel = file
+            .strip_prefix(cwd)
+            .ok()?
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if rel.starts_with("vendored/") {
+            return Some(rel);
+        }
+    }
+    None
+}
+
+/// Split a bare/`npm:`/`jsr:` specifier into `(npm identity name, subpath)`.
+/// Schemes (other than npm:/jsr:) and relative/absolute specifiers are not
+/// vendored targets.
+fn vendored_spec(spec: &str) -> Option<(String, Option<String>)> {
+    if spec.starts_with("npm:") || spec.starts_with("jsr:") {
+        let ps = parse_pkg_specifier(spec).ok()?;
+        return Some((ps.name, ps.sub));
+    }
+    if spec.contains(':')
+        || spec.starts_with("./")
+        || spec.starts_with("../")
+        || spec.starts_with('/')
+    {
         return None;
     }
-    let rel = p
-        .strip_prefix(cwd)
-        .ok()?
+    Some(split_bare(spec))
+}
+
+/// One parsed `npm:`/`jsr:` specifier, normalized to its npm identity.
+struct PkgSpec {
+    name: String,
+    sub: Option<String>,
+}
+
+fn parse_pkg_specifier(spec: &str) -> Result<PkgSpec, String> {
+    let body = if let Some(rest) = spec.strip_prefix("npm:") {
+        rest.to_string()
+    } else if let Some(rest) = spec.strip_prefix("jsr:") {
+        let rest = rest.trim();
+        let (scope, after) = rest
+            .split_once('/')
+            .ok_or_else(|| format!("invalid jsr specifier '{spec}'"))?;
+        let scope = scope.strip_prefix('@').unwrap_or(scope);
+        let (name, tail) = split_name_suffix(after);
+        format!("@jsr/{scope}__{name}{tail}")
+    } else {
+        return Err(format!("not a package specifier: '{spec}'"));
+    };
+    parse_npm_body(&body)
+}
+
+fn split_name_suffix(after: &str) -> (&str, &str) {
+    match after.find(['@', '/']) {
+        Some(i) => (&after[..i], &after[i..]),
+        None => (after, ""),
+    }
+}
+
+fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
+    let body = body.trim();
+    let (name, rest) = if body.starts_with('@') {
+        let (scope, after) = body
+            .split_once('/')
+            .ok_or_else(|| format!("malformed scoped package '{body}'"))?;
+        let (nm, rest) = split_name_suffix(after);
+        (format!("{scope}/{nm}"), rest)
+    } else {
+        let (nm, rest) = split_name_suffix(body);
+        (nm.to_string(), rest)
+    };
+    let mut sub = None;
+    if let Some(tail) = rest.strip_prefix('@') {
+        if let Some((_req, s)) = tail.split_once('/') {
+            sub = Some(s.to_string());
+        }
+    } else if let Some(s) = rest.strip_prefix('/') {
+        sub = Some(s.to_string());
+    }
+    Ok(PkgSpec { name, sub })
+}
+
+/// Vendored package identities a bare name may map to (jsr mirror included).
+fn vendored_identities(name: &str) -> Vec<String> {
+    let mut out = vec![name.to_string()];
+    if let Some(body) = name.strip_prefix('@') {
+        if let Some((scope, pkg)) = body.split_once('/') {
+            if scope != "jsr" {
+                out.push(format!("@jsr/{scope}__{pkg}"));
+            }
+        }
+    }
+    out
+}
+
+/// Splits a bare specifier into `(package name, optional subpath)`.
+fn split_bare(spec: &str) -> (String, Option<String>) {
+    if spec.starts_with('@') {
+        if let Some((head, tail)) = spec.split_once('/') {
+            return match tail.split_once('/') {
+                Some((name, rest)) => (format!("{head}/{name}"), Some(rest.to_string())),
+                None => (format!("{head}/{tail}"), None),
+            };
+        }
+        (spec.to_string(), None)
+    } else {
+        match spec.split_once('/') {
+            Some((n, rest)) => (n.to_string(), Some(rest.to_string())),
+            None => (spec.to_string(), None),
+        }
+    }
+}
+
+/// ESM-capable `exports` conditions, in priority order.
+const EXPORT_CONDITIONS: [&str; 3] = ["import", "node", "default"];
+
+/// Resolve a package's entry (or subpath) to a file inside `pkg_root`.
+fn resolve_pkg_file(pkg_root: &Path, subpath: Option<&str>) -> Result<PathBuf, String> {
+    let pkg_json_path = pkg_root.join("package.json");
+    let raw = fs::read_to_string(&pkg_json_path)
+        .map_err(|e| format!("cannot read {}: {e}", pkg_json_path.display()))?;
+    let pkg: serde_json::Value = serde_json::from_str(&raw)
+        .map_err(|e| format!("invalid package.json in {}: {e}", pkg_json_path.display()))?;
+    let sub = subpath.unwrap_or("").trim_start_matches("./");
+
+    let target = match pkg.get("exports") {
+        Some(serde_json::Value::Null) | None => legacy_package_target(pkg_root, &pkg, sub)?,
+        Some(exports) => exports_target(exports, sub)?,
+    };
+    let target = target.trim_start_matches("./");
+    if Path::new(target)
         .components()
-        .map(|c| c.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/");
-    rel.starts_with("vendored/").then_some(rel)
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(format!(
+            "export target '{target}' escapes the package directory"
+        ));
+    }
+    let file = pkg_root.join(target);
+    if !file.is_file() {
+        return Err(format!(
+            "package module not found on disk: {}",
+            file.display()
+        ));
+    }
+    Ok(file)
+}
+
+fn exports_target(exports: &serde_json::Value, subpath: &str) -> Result<String, String> {
+    use serde_json::Value;
+
+    fn pick_conditions(v: &Value) -> Result<String, String> {
+        match v {
+            Value::String(s) => Ok(s.clone()),
+            Value::Array(items) => {
+                for item in items {
+                    if let Ok(x) = pick_conditions(item) {
+                        return Ok(x);
+                    }
+                }
+                Err("no usable export target".to_string())
+            }
+            Value::Object(map) => {
+                for cond in EXPORT_CONDITIONS {
+                    if let Some(val) = map.get(cond) {
+                        return pick_conditions(val);
+                    }
+                }
+                Err("package has no import/default export target".to_string())
+            }
+            _ => Err("malformed exports target".to_string()),
+        }
+    }
+
+    let sub = subpath.trim_start_matches("./");
+    let is_map = match exports {
+        Value::Object(map) => map.keys().any(|k| k == "." || k.starts_with("./")),
+        _ => false,
+    };
+    let target = if is_map {
+        let map = exports.as_object().unwrap();
+        if sub.is_empty() {
+            match map.get(".") {
+                Some(v) => pick_conditions(v)?,
+                None => return Err("package has no '.' export".to_string()),
+            }
+        } else if let Some(v) = map.get(format!("./{sub}").as_str()) {
+            pick_conditions(v)?
+        } else {
+            let mut hit = None;
+            for (k, v) in map {
+                if let Some(star) = k.strip_suffix('*') {
+                    let prefix = star.strip_prefix("./").unwrap_or(star);
+                    if let Some(rem) = sub.strip_prefix(prefix) {
+                        hit = Some(pick_conditions(v)?.replace('*', rem));
+                        break;
+                    }
+                }
+            }
+            match hit {
+                Some(t) => t,
+                None => return Err(format!("no exported subpath './{sub}' for this package")),
+            }
+        }
+    } else if sub.is_empty() {
+        pick_conditions(exports)?
+    } else {
+        return Err(format!("no exported subpath './{sub}' for this package"));
+    };
+    Ok(target)
+}
+
+fn legacy_package_target(
+    pkg_root: &Path,
+    pkg: &serde_json::Value,
+    sub: &str,
+) -> Result<String, String> {
+    let resolve_loose = |rel: &str| -> Option<String> {
+        let rel = rel.trim_start_matches("./");
+        let candidate = pkg_root.join(rel);
+        if candidate.is_file() {
+            return Some(rel.to_string());
+        }
+        const EXTS: [&str; 3] = ["js", "mjs", "json"];
+        for ext in EXTS {
+            let cand = PathBuf::from(format!("{rel}.{ext}"));
+            if pkg_root.join(&cand).is_file() {
+                return Some(format!("{rel}.{ext}"));
+            }
+        }
+        if candidate.is_dir() {
+            for idx in ["index.js", "index.mjs", "index.json"] {
+                if candidate.join(idx).is_file() {
+                    return Some(format!("{rel}/{idx}"));
+                }
+            }
+        }
+        None
+    };
+    if sub.is_empty() {
+        if let Some(main) = pkg.get("main").and_then(|v| v.as_str()) {
+            if let Some(t) = resolve_loose(main) {
+                return Ok(t);
+            }
+        }
+        return resolve_loose("index.js").ok_or_else(|| "package has no main entry".to_string());
+    }
+    resolve_loose(sub).ok_or_else(|| format!("cannot resolve file '{sub}' in package"))
 }
 
 /// Find the cwd-relative `package.json` of the vendored package root that owns

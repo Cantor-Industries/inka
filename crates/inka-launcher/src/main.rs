@@ -234,30 +234,6 @@ fn runtime_dirs() -> Vec<PathBuf> {
     out
 }
 
-/// Pick the newest installed `libinka_resolver-<v>.so` across the runtime dirs.
-fn pick_resolver(dirs: &[PathBuf]) -> Option<PathBuf> {
-    let mut best: Option<(Version, PathBuf)> = None;
-    for dir in dirs {
-        let Ok(rd) = fs::read_dir(dir) else { continue };
-        for ent in rd.flatten() {
-            let name = ent.file_name().to_string_lossy().into_owned();
-            let Some(stripped) = name.strip_prefix("libinka_resolver-") else {
-                continue;
-            };
-            let Some(vstr) = stripped.strip_suffix(".so") else {
-                continue;
-            };
-            let Some(v) = parse_version(vstr) else {
-                continue;
-            };
-            if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
-                best = Some((v, ent.path()));
-            }
-        }
-    }
-    best.map(|(_, p)| p)
-}
-
 fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
     if let Some(p) = env::var_os("INKA_RUNTIME") {
         let p = PathBuf::from(p);
@@ -547,16 +523,6 @@ fn main() {
         }
     }
 
-    // Default the import resolver to the newest installed libinka_resolver.
-    if env::var_os("INKA_RESOLVER").is_none() {
-        if let Some(r) = pick_resolver(&dirs) {
-            env::set_var("INKA_RESOLVER", &r);
-            debug_log!("[inka] inka resolver {}", r.display());
-        } else {
-            debug_log!("[inka] no inka resolver installed (vendored imports disabled)");
-        }
-    }
-
     let code = match trailer {
         Trailer::Single {
             source,
@@ -569,7 +535,7 @@ fn main() {
                 source.len()
             );
             // A single-file artifact embeds no vendored packages; never let a
-            // caller-exported INKA_VENDOR point the resolver at an external tree.
+            // caller-exported INKA_VENDOR point the loader at an external tree.
             env::remove_var("INKA_VENDOR");
             debug_log!("[inka] single-file artifact; INKA_VENDOR cleared");
             load_and_run(&path, &m.module, source, &args, &m.perms)
@@ -593,7 +559,7 @@ fn main() {
                 }
             };
             // Auto-detect embedded vendored package roots: when the artifact
-            // carries a `vendored/` tree, point the resolver at it (vendored
+            // carries a `vendored/` tree, point the loader at it (vendored
             // code resolves vendored-first, then the default store). When it
             // does not, clear any caller-exported INKA_VENDOR so an external
             // path is never consulted.

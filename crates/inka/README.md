@@ -21,9 +21,8 @@ See the [repository README](../../README.md) for the full architecture and
 - `inka install [pkg[@ver]...]` — vendor this project's dependencies
   (`package.json`/`deno.json`) or the given packages into `vendored/`.
 - `inka update [<ver>] [--from <base>]` — self-update the toolchain (for
-  installer-managed installs) and reconcile the shared runtime, resolver, and
-  package store with the newest release (or install a specific tuple),
-  sha256-verified.
+  installer-managed installs) and reconcile the shared runtime and package
+  store with the newest release (or install a specific tuple), sha256-verified.
 - `inka list` / `inka doctor` — show installed tuples / a diagnostic report.
 - `inka add` / `inka remove` — per-project vendoring into `vendored/` (raw
   packages; the engine runs CommonJS natively).

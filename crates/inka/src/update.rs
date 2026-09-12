@@ -1,15 +1,15 @@
-// inka update: reconcile the toolchain, the shared runtime tuple, the resolver,
-// and the package store with the newest published release (or install an
-// explicit runtime tuple).
+// inka update: reconcile the toolchain, the shared runtime tuple, and the
+// package store with the newest published release (or install an explicit
+// runtime tuple).
 //
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
 //                           [--no-toolchain | --toolchain-only]
-//                           [--no-runtime] [--no-resolver] [--no-store]
+//                           [--no-runtime] [--no-store]
 //
 // No <version>: fetch <base>/versions.json, self-update the toolchain when an
 // installer-managed one is present, install only the components that are behind
-// the newest installed runtime/resolver, then sync the store snapshot.
+// the newest installed runtime, then sync the store snapshot.
 // With <version>: install that exact runtime tuple (pinned/offline; CI,
 // containers).
 //
@@ -30,8 +30,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    fetch_text, fetch_with_sidecar, hex, parse_version, Version, DEFAULT_RESOLVER_VERSION,
-    FILENAME_PREFIX, FILENAME_SUFFIX, RESOLVER_PREFIX, RESOLVER_SUFFIX,
+    fetch_text, fetch_with_sidecar, hex, parse_version, Version, FILENAME_PREFIX, FILENAME_SUFFIX,
 };
 
 pub(crate) const DEFAULT_CHANNEL: &str =
@@ -77,7 +76,6 @@ fn ensure_dir(dir: &Path) {
 #[derive(Clone, Copy)]
 struct Components {
     runtime: bool,
-    resolver: bool,
     store: bool,
 }
 
@@ -85,7 +83,6 @@ impl Default for Components {
     fn default() -> Self {
         Self {
             runtime: true,
-            resolver: true,
             store: true,
         }
     }
@@ -123,20 +120,18 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--store-only" => {
                 toolchain = ToolchainMode::Skip;
                 components.runtime = false;
-                components.resolver = false;
                 components.store = true;
             }
             "--no-runtime" => components.runtime = false,
-            "--no-resolver" => components.resolver = false,
             "--no-store" => components.store = false,
             "--help" | "-h" => {
                 eprintln!(
                     "usage: inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]\n\
                      \x20                  [--insecure] [--home <dir>]\n\
                      \x20                  [--no-toolchain | --toolchain-only | --store-only]\n\
-                     \x20                  [--no-runtime] [--no-resolver] [--no-store]\n\
+                     \x20                  [--no-runtime] [--no-store]\n\
                      \x20 no <version>: update the toolchain (if installer-managed) and install the\n\
-                     \x20                newest runtime/resolver/store that are behind\n\
+                     \x20                newest runtime/store that are behind\n\
                      \x20 <version>:     install that exact runtime tuple"
                 );
                 std::process::exit(0);
@@ -343,25 +338,14 @@ fn maybe_update_toolchain_from(v: &Value, base: &str, insecure: bool, mode: Tool
 #[derive(Debug, PartialEq)]
 struct Actions {
     runtime: bool,
-    resolver: bool,
 }
 
-/// Decide which engine components are behind the latest release. A component is
-/// only ever fetched when the installed version is strictly older (never
+/// Decide whether the engine runtime is behind the latest release. A component
+/// is only ever fetched when the installed version is strictly older (never
 /// downgrade); a missing component is always fetched.
-fn plan_actions(
-    installed_runtime: Option<Version>,
-    installed_resolver: Option<Version>,
-    latest_runtime: Version,
-    latest_resolver: Option<Version>,
-) -> Actions {
+fn plan_actions(installed_runtime: Option<Version>, latest_runtime: Version) -> Actions {
     let runtime = installed_runtime.is_none_or(|i| i < latest_runtime);
-    let resolver = match (latest_resolver, installed_resolver) {
-        (Some(l), Some(i)) => i < l,
-        (Some(_), None) => true,
-        (None, _) => false,
-    };
-    Actions { runtime, resolver }
+    Actions { runtime }
 }
 
 fn update_latest(
@@ -393,26 +377,16 @@ fn update_latest(
         .unwrap_or_else(|| fail("versions.json has no runtime"));
     let latest_runtime = parse_version(latest_runtime_s)
         .unwrap_or_else(|| fail(&format!("invalid runtime '{latest_runtime_s}'")));
-    let latest_resolver = v
-        .get("resolver")
-        .and_then(Value::as_str)
-        .and_then(parse_version);
     let runtime_sha = v.get("runtime_sha256").and_then(Value::as_str);
 
     let search = match home {
         Some(_) => vec![target.clone()],
         None => crate::runtime_search_dirs(),
     };
-    let (runtimes, resolvers) = crate::installed_parts_all(&search);
+    let runtimes = crate::installed_parts_all(&search);
     let installed_runtime = runtimes.last().map(|(ver, _)| *ver);
-    let installed_resolver = resolvers.last().map(|(ver, _)| *ver);
 
-    let actions = plan_actions(
-        installed_runtime,
-        installed_resolver,
-        latest_runtime,
-        latest_resolver,
-    );
+    let actions = plan_actions(installed_runtime, latest_runtime);
 
     ensure_dir(&target);
 
@@ -431,19 +405,6 @@ fn update_latest(
             changed = true;
         } else if let Some(i) = installed_runtime {
             println!("[inka] runtime {i} is current (latest {latest_runtime})");
-        }
-    }
-
-    if components.resolver {
-        if actions.resolver {
-            if let Some(res) = latest_resolver {
-                let name = format!("{RESOLVER_PREFIX}{res}{RESOLVER_SUFFIX}");
-                install_file(base, &name, &target, None, insecure, "resolver")
-                    .unwrap_or_else(|e| fail(&e));
-                changed = true;
-            }
-        } else if let Some(i) = installed_resolver {
-            println!("[inka] resolver {i} is current");
         }
     }
 
@@ -584,87 +545,6 @@ fn update_pinned(
     if components.store {
         sync_store(base);
     }
-
-    if components.resolver {
-        install_resolver_payload(base, &target, insecure).unwrap_or_else(|e| fail(&e));
-    }
-}
-
-/// The resolver version named by a release's `versions.json` (used for URL bases).
-fn resolver_version_from_release(base: &str) -> Option<String> {
-    let text = fetch_text(base, "versions.json").ok()?;
-    let v: Value = serde_json::from_str(&text).ok()?;
-    v.get("resolver")
-        .and_then(Value::as_str)
-        .map(str::to_string)
-}
-
-fn install_resolver_payload(base: &str, target_dir: &Path, insecure: bool) -> Result<(), String> {
-    // Pick a resolver from the release: newest libinka_resolver-*.so in a local
-    // dir, else a URL fetch of the current resolver version ($INKA_RESOLVER_VERSION
-    // overrides; DEFAULT_RESOLVER_VERSION fallback).
-    let name = if Path::new(base).is_dir() {
-        let mut best: Option<(Version, String)> = None;
-        if let Ok(rd) = fs::read_dir(base) {
-            for ent in rd.flatten() {
-                let n = ent.file_name().to_string_lossy().into_owned();
-                let Some(stripped) = n.strip_prefix(RESOLVER_PREFIX) else {
-                    continue;
-                };
-                let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) else {
-                    continue;
-                };
-                if let Some(v) = parse_version(vstr) {
-                    if best.as_ref().is_none_or(|(bv, _)| v > *bv) {
-                        best = Some((v, n));
-                    }
-                }
-            }
-        }
-        best.map(|(_, n)| n)
-    } else {
-        let ver = resolver_version_from_release(base)
-            .or_else(|| env::var("INKA_RESOLVER_VERSION").ok())
-            .unwrap_or_else(|| DEFAULT_RESOLVER_VERSION.to_string());
-        Some(format!("{RESOLVER_PREFIX}{ver}{RESOLVER_SUFFIX}"))
-    };
-    let Some(name) = name else {
-        return Ok(()); // release ships no resolver
-    };
-
-    let (bytes, sidecar_sha) = match fetch_with_sidecar(base, &name) {
-        Ok(x) => x,
-        Err(_) => return Ok(()), // not present on this source
-    };
-    let expected = sidecar_sha.and_then(|s| {
-        s.split_whitespace()
-            .next()
-            .map(|x| x.trim().to_ascii_lowercase())
-    });
-    let actual = hex(&Sha256::digest(&bytes));
-    match (&expected, insecure) {
-        (Some(exp), _) if exp != &actual => {
-            return Err(format!(
-                "checksum mismatch for {name}\n  expected {exp}\n  actual   {actual}"
-            ));
-        }
-        (Some(_), _) => {}
-        (None, false) => {
-            return Err(format!(
-                "no checksum available for {name}\n  publish a {name}.sha256 sidecar, or pass \
-                 --insecure to trust it"
-            ));
-        }
-        (None, true) => {}
-    }
-    let target = target_dir.join(&name);
-    install_atomically(&target, &bytes)?;
-    println!(
-        "[inka] installed resolver {} ({})",
-        target.display(),
-        bytes.len()
-    );
-    Ok(())
 }
 
 fn install_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
@@ -689,100 +569,30 @@ mod tests {
 
     #[test]
     fn plan_installs_when_nothing_installed() {
-        let a = plan_actions(None, None, Version(0, 266, 1), Some(Version(1, 0, 0)));
-        assert_eq!(
-            a,
-            Actions {
-                runtime: true,
-                resolver: true
-            }
-        );
+        let a = plan_actions(None, Version(0, 266, 1));
+        assert_eq!(a, Actions { runtime: true });
     }
 
     #[test]
     fn plan_skips_when_current_or_newer() {
-        let a = plan_actions(
-            Some(Version(0, 266, 1)),
-            Some(Version(1, 0, 0)),
-            Version(0, 266, 1),
-            Some(Version(1, 0, 0)),
-        );
-        assert_eq!(
-            a,
-            Actions {
-                runtime: false,
-                resolver: false
-            }
-        );
+        let a = plan_actions(Some(Version(0, 266, 1)), Version(0, 266, 1));
+        assert_eq!(a, Actions { runtime: false });
 
         // Never downgrade: installed newer than the release.
-        let b = plan_actions(
-            Some(Version(0, 270, 0)),
-            Some(Version(2, 0, 0)),
-            Version(0, 266, 1),
-            Some(Version(1, 0, 0)),
-        );
-        assert_eq!(
-            b,
-            Actions {
-                runtime: false,
-                resolver: false
-            }
-        );
+        let b = plan_actions(Some(Version(0, 270, 0)), Version(0, 266, 1));
+        assert_eq!(b, Actions { runtime: false });
     }
 
     #[test]
-    fn plan_installs_only_the_stale_component() {
-        let a = plan_actions(
-            Some(Version(0, 266, 0)),
-            Some(Version(1, 0, 0)),
-            Version(0, 266, 1),
-            Some(Version(1, 0, 0)),
-        );
-        assert_eq!(
-            a,
-            Actions {
-                runtime: true,
-                resolver: false
-            }
-        );
-
-        let b = plan_actions(
-            Some(Version(0, 266, 1)),
-            Some(Version(1, 0, 0)),
-            Version(0, 266, 1),
-            Some(Version(2, 0, 0)),
-        );
-        assert_eq!(
-            b,
-            Actions {
-                runtime: false,
-                resolver: true
-            }
-        );
-    }
-
-    #[test]
-    fn plan_without_resolver_metadata_never_installs_resolver() {
-        let a = plan_actions(Some(Version(0, 266, 1)), None, Version(0, 266, 1), None);
-        assert_eq!(
-            a,
-            Actions {
-                runtime: false,
-                resolver: false
-            }
-        );
+    fn plan_installs_when_stale() {
+        let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
+        assert_eq!(a, Actions { runtime: true });
     }
 
     #[test]
     fn runtime_tuple_revision_is_newer_than_base() {
         // The base tuple (0.266.0) is behind an inka revision (0.266.1).
-        let a = plan_actions(
-            Some(Version(0, 266, 0)),
-            Some(Version(1, 0, 0)),
-            Version(0, 266, 1),
-            Some(Version(1, 0, 0)),
-        );
+        let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
         assert!(a.runtime);
     }
 }

@@ -231,7 +231,7 @@ fn permission_dsl(root: &Path, f: &Flags) -> String {
 /// Only option tokens before the file (or before `--`) are considered.
 fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
     let dirs = crate::runtime_search_dirs();
-    let (runtimes, _) = crate::installed_parts_all(&dirs);
+    let runtimes = crate::installed_parts_all(&dirs);
     let mut i = 0;
     while i < args.len() {
         let a = &args[i];
@@ -342,18 +342,6 @@ fn set_default_env(root: &Path) {
         let candidate = crate::default_store_dir();
         if candidate.is_dir() {
             env::set_var("INKA_STORE", &candidate);
-        }
-    }
-    // INKA_RESOLVER defaults to the newest installed resolver across search dirs.
-    if env::var_os("INKA_RESOLVER").is_none() {
-        let dirs = crate::runtime_search_dirs();
-        let (_, resolvers) = crate::installed_parts_all(&dirs);
-        if let Some((_, p)) = resolvers.last() {
-            env::set_var("INKA_RESOLVER", p);
-        } else {
-            eprintln!(
-                "[inka] warning: no inka resolver installed; vendored/package resolution will fail"
-            );
         }
     }
     // INKA_VENDOR: only a vendored/ dir under the execution root counts.

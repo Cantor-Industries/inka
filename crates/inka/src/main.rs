@@ -25,11 +25,6 @@ use std::process::Command;
 
 pub(crate) const FILENAME_PREFIX: &str = "libinka_runtime-";
 pub(crate) const FILENAME_SUFFIX: &str = ".so";
-pub(crate) const RESOLVER_PREFIX: &str = "libinka_resolver-";
-pub(crate) const RESOLVER_SUFFIX: &str = ".so";
-/// Resolver version used when fetching from a URL base that has no directory
-/// listing (and $INKA_RESOLVER_VERSION is unset).
-pub(crate) const DEFAULT_RESOLVER_VERSION: &str = "1.0.1";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct Version(pub(crate) u64, pub(crate) u64, pub(crate) u64);
@@ -55,7 +50,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, resolver, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
     );
     std::process::exit(2);
 }
@@ -112,7 +107,7 @@ pub(crate) fn default_install_dir() -> PathBuf {
     user_runtime_dir()
 }
 
-/// Directories searched for installed runtime/resolver `.so` files, in order:
+/// Directories searched for installed runtime `.so` files, in order:
 /// `INKA_RUNTIME_HOME`, then the per-user XDG runtime dir.
 pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
@@ -299,8 +294,8 @@ fn cmd_list(args: &[String]) {
         Some(h) => vec![PathBuf::from(h)],
         None => runtime_search_dirs(),
     };
-    let (found, resolvers) = installed_parts_all(&dirs);
-    if found.is_empty() && resolvers.is_empty() {
+    let found = installed_parts_all(&dirs);
+    if found.is_empty() {
         match home.as_deref() {
             Some(h) => println!("(no runtimes installed in {h})"),
             None => println!("(no runtimes installed)"),
@@ -310,19 +305,12 @@ fn cmd_list(args: &[String]) {
     for (v, p) in found {
         println!("inka_runtime {v:<10} {}", p.display());
     }
-    for (v, p) in resolvers {
-        println!("inka_resolver {v:<10} {}", p.display());
-    }
 }
 
-/// Installed runtime/resolver parts from a runtime dir: `(version, path)` pairs.
-pub(crate) type InstalledParts = (Vec<(Version, PathBuf)>, Vec<(Version, PathBuf)>);
-
-/// Scan a runtime dir for installed `libinka_runtime-*.so` / `libinka_resolver-*.so`
-/// files, sorted by version. Reused by `inka list`, `inka doctor`, and `inka run`.
-pub(crate) fn installed_parts(dir: &Path) -> InstalledParts {
+/// Scan a runtime dir for installed `libinka_runtime-*.so` files, sorted by
+/// version. Reused by `inka list`, `inka doctor`, and `inka run`.
+pub(crate) fn installed_parts(dir: &Path) -> Vec<(Version, PathBuf)> {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
-    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
@@ -332,62 +320,24 @@ pub(crate) fn installed_parts(dir: &Path) -> InstalledParts {
                         found.push((v, ent.path()));
                     }
                 }
-            } else if let Some(stripped) = name.strip_prefix(RESOLVER_PREFIX) {
-                if let Some(vstr) = stripped.strip_suffix(RESOLVER_SUFFIX) {
-                    if let Some(v) = parse_version(vstr) {
-                        resolvers.push((v, ent.path()));
-                    }
-                }
             }
         }
     }
     found.sort();
-    resolvers.sort();
-    (found, resolvers)
+    found
 }
 
-/// Merge installed parts across several runtime dirs (sorted by version).
-pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> InstalledParts {
+/// Merge installed runtimes across several runtime dirs (sorted by version).
+pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> Vec<(Version, PathBuf)> {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
-    let mut resolvers: Vec<(Version, PathBuf)> = Vec::new();
     for d in dirs {
-        let (f, r) = installed_parts(d);
-        found.extend(f);
-        resolvers.extend(r);
+        found.extend(installed_parts(d));
     }
     found.sort();
-    resolvers.sort();
-    (found, resolvers)
+    found
 }
 
 // ---- helpers ---------------------------------------------------------------
-
-/// dlopen a resolver .so and read `inka_resolver_abi()` + `inka_resolver_version()`.
-fn resolver_abi_etc(path: &Path) -> (i32, String) {
-    let lib = match unsafe { libloading::Library::new(path) } {
-        Ok(l) => l,
-        Err(e) => return (-1, format!("load failed: {e}")),
-    };
-    let abi = unsafe {
-        lib.get::<unsafe extern "C" fn() -> i32>(b"inka_resolver_abi")
-            .map(|f| f())
-            .unwrap_or(-1)
-    };
-    let version = unsafe {
-        lib.get::<unsafe extern "C" fn() -> *const std::ffi::c_char>(b"inka_resolver_version")
-            .ok()
-            .and_then(|f| {
-                let p = f();
-                if p.is_null() {
-                    None
-                } else {
-                    Some(std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned())
-                }
-            })
-            .unwrap_or_default()
-    };
-    (abi, version)
-}
 
 /// Count package roots (dirs with package.json, one level deep; scope containers
 /// count their children) under a node_modules-style pool root.
@@ -467,7 +417,6 @@ fn cmd_doctor(args: &[String]) {
         eprintln!("usage: inka doctor");
         std::process::exit(0);
     }
-    const EXPECTED_RESOLVER_ABI: i32 = 2;
     let mut warnings: Vec<String> = Vec::new();
 
     println!("[inka] doctor");
@@ -476,41 +425,13 @@ fn cmd_doctor(args: &[String]) {
     for d in &dirs {
         println!("  {}", d.display());
     }
-    let (runtimes, resolvers) = installed_parts_all(&dirs);
+    let runtimes = installed_parts_all(&dirs);
     if runtimes.is_empty() {
         println!("  runtimes: (none installed)");
         warnings.push("no runtimes installed; artifacts cannot run until `inka update`".into());
     }
     for (v, p) in &runtimes {
         println!("  runtime {v}  {}", p.display());
-    }
-
-    let (abi, res_version, res_path) = match resolvers.last() {
-        Some((v, p)) => {
-            let (a, s) = resolver_abi_etc(p);
-            (Some(a), Some(s), Some((*v, p.clone())))
-        }
-        None => (None, None, None),
-    };
-    match &res_path {
-        None => {
-            println!("  resolver: none installed (vendored resolution disabled)");
-            warnings
-                .push("no inka resolver installed; run `inka update` or set INKA_RESOLVER".into());
-        }
-        Some((v, p)) => {
-            let abi = abi.unwrap_or(-1);
-            println!(
-                "  resolver {v}  {}  abi={abi} version={}",
-                p.display(),
-                res_version.as_deref().unwrap_or("?")
-            );
-            if abi != EXPECTED_RESOLVER_ABI {
-                warnings.push(format!(
-                    "resolver abi {abi} != expected {EXPECTED_RESOLVER_ABI}; runtime/resolver mismatch"
-                ));
-            }
-        }
     }
 
     let store = crate::vendor::store_dir();

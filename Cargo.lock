@@ -4358,7 +4358,6 @@ name = "inka"
 version = "0.3.1"
 dependencies = [
  "deno_ast",
- "inka-resolver",
  "libc",
  "libloading 0.8.9",
  "serde",
@@ -4375,15 +4374,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inka-resolver"
-version = "1.0.1"
-dependencies = [
- "deno_semver",
- "serde_json",
- "url",
-]
-
-[[package]]
 name = "inka-runtime"
 version = "0.3.1"
 dependencies = [
@@ -4393,7 +4383,6 @@ dependencies = [
  "deno_error",
  "deno_runtime",
  "deno_semver",
- "libloading 0.8.9",
  "node_resolver",
  "sys_traits",
  "tokio",
