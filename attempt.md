@@ -466,8 +466,9 @@ adopted.
 
 ## 12. Node services (Option B) milestone plan — deno's own node/CJS loader
 
-> **Status: OPEN (deferred)** — Option B was not built; it remains the path for
-> native addons (§13 residual-2, §17).
+> **Status: OPEN (deferred)** — Option B was not built. It was scoped as the path
+> for native addons, but those now load via `RTLD_GLOBAL` + explicit `ffi`
+> (§17 item 3), so Option B is no longer required for that.
 
 Goal: unblock `@effect/platform`/`@effect/platform-node` (env-reading + CommonJS
 packages) by giving the engine real deno node services backed by the shared
@@ -539,7 +540,7 @@ largest single engine change; keep resolver decoupled so either path is replacea
 ## 13. Option C / P0 probe results — rolldown-as-crate + post-pass (ws ESM)
 
 > **Status: DONE** — Option C landed (P0/P1/P2-lite/P3); residual-2
-> (`@parcel/watcher`) is still open (§17).
+> (`@parcel/watcher`) was later closed by the native-addon work (§17 item 3).
 
 Decision context (fresh-session, supersedes the §12 Option-B-as-default stance):
 Option C was chosen (ESM-only store + seed-time patches, clean CJS rejection). The
@@ -614,11 +615,11 @@ app: /tmp/opencode/inkam0/p3http.
   must end in `Effect.never` (returning a normal Response writes HTTP bytes over the
   upgraded socket) and must not require the `Socket` context *service* (the upgraded
   socket is a request value, not a provided service).
-- **Residual-2 parked (documented, no code)**: `@parcel/watcher` is a native `.node`
-  addon, strictly opt-in (only `@effect/platform-node/NodeFileSystem/ParcelWatcher`;
-  default `NodeFileSystem` uses `node:fs`, `NodeContext` never loads it). Native
-  addons are an Option-C hard limit; opting in already fails cleanly (resolver CJS
-  error). Real support would be Option-B/deno-node-services/FFI engine work.
+- **Residual-2 closed — native `.node` addons load** (§17 item 3). `@parcel/watcher`
+  is still strictly opt-in (only `@effect/platform-node/NodeFileSystem/ParcelWatcher`;
+  default `NodeFileSystem` uses `node:fs`, `NodeContext` never loads it), but it now
+  loads and runs: the runtime is dlopened `RTLD_GLOBAL` so the addon resolves
+  `napi_*`/`uv_*`, and `ffi` (+ `sys` for `detect-libc`) is granted explicitly.
 - Full offline regression matrix green after the engine fix (effect/assert/node:vm/
   --transpile/trio/msgpackr/store-ws/p3-http/CJS-clean-error). The only remaining
   native gap is @parcel/watcher (see residual-2 above).
@@ -808,10 +809,14 @@ Linux x86_64 release.
    job for the fast crates (`cargo check`/`test -p inka -p inka-launcher
    -p inka-resolver -p inka-runtime-stub`); exclude the heavy `inka-runtime`.
 
-3. **Native addons (`.node`, e.g. `@parcel/watcher`)** — Low–Medium severity
-   (narrow), High effort. Opt-in only; the default `NodeFileSystem` uses
-   `node:fs` and works. Real support needs deno node services + ABI/FFI
-   (Option B, §12).
+3. **Native addons (`.node`, e.g. `@parcel/watcher`)** — **DONE** (loader-only,
+   no engine rebuild). The runtime is now dlopened `RTLD_GLOBAL` so N-API addons
+   resolve the `napi_*`/`uv_*` symbols the runtime exports (the default
+   `RTLD_LOCAL` made the addon abort with `undefined symbol:
+   napi_module_register`). `@parcel/watcher` loads and runs under explicit
+   `--allow-ffi` (plus `--allow-sys` for `detect-libc`); deny-by-default still
+   applies, and requiring an addon without `ffi` fails cleanly. Covered by
+   `scripts/ci/runtime-matrix.sh`.
 
 4. **Code caches (2b)** — Low severity (perf only), High effort. Parked; startup
    is ~0.2 s dominated by engine boot. Needs V8 module-code-cache internals and
@@ -829,7 +834,7 @@ Linux x86_64 release.
 |---|---|---|---|---|
 | 1 | Release signing/authenticity | Medium | Medium | No |
 | 2 | Rust CI on PRs | Low–Medium | Low | No |
-| 3 | Native addons | Low–Medium (narrow) | High | Native-dep apps only |
+| 3 | Native addons | Low–Medium (narrow) | **Done** | No |
 | 4 | Code caches | Low (perf) | High | No |
 | 5 | Other platforms | Medium (reach) | High | macOS / native Windows |
 | 6 | Stable install domain | Low | Low | No |

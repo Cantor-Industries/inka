@@ -16,6 +16,24 @@ macro_rules! debug_log {
     };
 }
 
+/// Load the runtime with `RTLD_GLOBAL`. Native `.node` addons are `dlopen`ed
+/// later by the runtime's `op_napi_open`; they resolve N-API/uv symbols from the
+/// global scope, which `RTLD_LOCAL` (the `Library::new` default) hides — the
+/// addon then aborts with `undefined symbol: napi_module_register`.
+fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    #[cfg(unix)]
+    {
+        use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_LAZY};
+        unsafe {
+            UnixLibrary::open(Some(path), RTLD_LAZY | RTLD_GLOBAL).map(libloading::Library::from)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        unsafe { libloading::Library::new(path) }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Version(u64, u64, u64);
 
@@ -304,7 +322,7 @@ fn load_and_run(
     args: &[String],
     perms: &str,
 ) -> i32 {
-    let library = match unsafe { libloading::Library::new(lib) } {
+    let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("[inka] failed to load {}: {e}", lib.display());
@@ -403,7 +421,7 @@ fn load_and_run_dir(
     args: &[String],
     perms: &str,
 ) -> i32 {
-    let library = match unsafe { libloading::Library::new(lib) } {
+    let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("[inka] failed to load {}: {e}", lib.display());

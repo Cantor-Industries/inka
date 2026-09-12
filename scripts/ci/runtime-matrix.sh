@@ -35,17 +35,23 @@ printf '%s\n' 'exports.name = "b";' 'const a = require("./a.js");' 'exports.aNam
 
 cd "$SCRATCH"
 
-run() { # <name> <expected-substring> <store> <file> <source>
-    local name="$1" want="$2" store="$3" file="$4" src="$5"
+run_with() { # <flags> <name> <expected-substring> <store> <file> <source>
+    local flags="$1" name="$2" want="$3" store="$4" file="$5" src="$6"
     printf '%s\n' "$src" > "$file"
     local out
-    out="$(INKA_STORE="$store" "$INKA" run -A "$file" 2>&1)" || {
+    # $flags is a deliberate, space-separated flag list.
+    # shellcheck disable=SC2086
+    out="$(INKA_STORE="$store" "$INKA" run $flags "$file" 2>&1)" || {
         echo "FAIL: $name" >&2; printf '%s\n' "$out" >&2; exit 1
     }
     case "$out" in
         *"$want"*) echo "ok: $name" ;;
         *) echo "FAIL: $name (want '$want')" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
     esac
+}
+
+run() { # <name> <expected-substring> <store> <file> <source>
+    run_with "-A" "$@"
 }
 
 echo "== CJS require =="
@@ -133,6 +139,28 @@ const effect = require("effect");
 console.log("require-esm", typeof effect.Effect, typeof effect.Effect.succeed);'
 else
     echo "skip: release-store checks (no store at $PATCHED_STORE)"
+fi
+
+# Native `.node` addons: the runtime must be dlopened RTLD_GLOBAL so the addon
+# can resolve N-API/uv symbols, and `ffi` (plus `sys` for detect-libc) must be
+# granted explicitly — deny-by-default still applies.
+if [ -f "$PATCHED_STORE/node_modules/@parcel/watcher-linux-x64-glibc/watcher.node" ]; then
+    echo "== native addon (.node) =="
+    run_with "--allow-sys" "native addon denied without ffi" "native-denied NotCapable" \
+        "$PATCHED_STORE" p_native_deny.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+try { require("@parcel/watcher"); console.log("native-loaded"); }
+catch (e) { console.log("native-denied", e && e.constructor && e.constructor.name); }'
+
+    run_with "--allow-sys --allow-ffi" "native addon loads with ffi" \
+        "native-ok function function" "$PATCHED_STORE" p_native.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const w = require("@parcel/watcher");
+console.log("native-ok", typeof w.subscribe, typeof w.getEventsSince);'
+else
+    echo "skip: native-addon checks (no @parcel/watcher in $PATCHED_STORE)"
 fi
 
 echo "runtime-matrix: OK"

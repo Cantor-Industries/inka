@@ -49,7 +49,17 @@ The engine runs CommonJS natively, so vendored and store packages are shipped
 exactly as npm resolves them — no conversion step. `require()` works inside CJS
 packages (including nested deps and cycles), and ESM `import` of a CJS package
 is served as an ESM facade with `default` plus statically-detected named
-exports. Native `.node` addons are still unsupported.
+exports.
+
+Native `.node` (N-API) addons load from the store or the vendored tree, but they
+are **opt-in**: deny-by-default still applies, so the artifact or `inka run` must
+grant `ffi` for the addon path (and `sys` for platform detection, e.g.
+`detect-libc`). Without it, requiring an addon fails with a clean `NotCapable`
+rather than crashing. For example:
+
+```sh
+inka run --allow-sys --allow-ffi app.ts   # or bake the same grants at build time
+```
 
 ## Inspecting
 

@@ -107,6 +107,7 @@ inka doctor               # machine state: runtimes, resolver, store, vendored p
 
 - **Permissions** — inka executables are **deny-by-default**; you grant access explicitly at build or run time. Nothing is allowed until you say so.
 - **Packages** — packages come from a machine-wide **store**, or you can **vendor** them into your project so the artifact is self-contained.
+- **Native addons** — `.node` (N-API) packages load, but are opt-in: grant `ffi` (and usually `sys`). See [Packages & the store](docs/packages.md).
 
 ## Learn more
 

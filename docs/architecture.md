@@ -72,6 +72,11 @@ The launcher `dlopen`s the runtime and calls a frozen C ABI:
 - `inka_runtime_run_module_dir(rt, dir, entry, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_destroy(rt)`
 
+The runtime is loaded **`RTLD_GLOBAL`** (not the `RTLD_LOCAL` default) so native
+`.node` addons `dlopen`ed later by the runtime can resolve the N-API/uv symbols
+it exports; with `RTLD_LOCAL` the addon aborts with `undefined symbol:
+napi_module_register`. See [Packages & the store](packages.md#commonjs).
+
 `_perm` and `_dir` are mandatory: a runtime that lacks either is refused
 (exit 4) rather than run with the wrong semantics. There is no permission-less
 entry point, so deny-by-default cannot degrade to allow-all.

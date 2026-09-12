@@ -10,6 +10,11 @@ Categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`. Deno's
 `import` category and the `ignore` sub-key have no inka equivalent (warned and
 skipped).
 
+Native `.node` (N-API) addons are `dlopen`ed at run time, so they need `ffi`
+(scoped to the addon path). Addons that probe the platform also need `sys`
+(e.g. `detect-libc`). Deny-by-default means an addon load without `ffi` fails
+with `NotCapable` — see [Packages](packages.md#commonjs).
+
 ## The permission DSL
 
 The artifact manifest (and the flags passed to `inka run`) use this DSL:
