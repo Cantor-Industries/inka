@@ -19,8 +19,9 @@ INKA="${1:-$ROOT/target/debug/inka}"
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-matrix.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 
-echo "== installing packages into the project node_modules (ms, ws, debug) =="
-(cd "$SCRATCH" && npm install --no-save --omit=dev ms@2.1.3 ws@8.21.3 debug@4.3.7 >/dev/null 2>&1)
+echo "== installing packages into the project node_modules =="
+(cd "$SCRATCH" && npm install --no-save --omit=dev \
+    ms@2.1.3 ws@8.21.3 debug@4.3.7 effect hono @parcel/watcher >/dev/null 2>&1)
 
 # An unpatched CJS fixture with __esModule and a circular pair.
 mkdir -p "$SCRATCH/node_modules/esmflag" "$SCRATCH/node_modules/circ"
@@ -119,7 +120,56 @@ case "$out" in
 esac
 rm -rf "$SECRET_DIR"
 
-# Deferred to C2b (needs the Deno resolver): jsr (`@std/assert`), the
-# release-package ESM matrix, and native `.node` addons.
+echo "== jsr / import map (offline Deno cache) =="
+mkdir -p jsrproj
+printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json
+printf '%s\n' \
+    'import { assertEquals } from "@std/assert";' \
+    'assertEquals(1, 1);' \
+    'console.log("jsr-ok", typeof assertEquals);' > jsrproj/main.ts
+if out="$(cd jsrproj && DENO_DIR="${DENO_DIR:-$HOME/.cache/deno}" "$INKA" run main.ts 2>&1)"; then
+    case "$out" in
+        *jsr-ok*) echo "ok: jsr import map (offline cache)" ;;
+        *) echo "skip: jsr import map ($out)" ;;
+    esac
+else
+    echo "skip: jsr import map (no cached @std/assert in ${DENO_DIR:-$HOME/.cache/deno})"
+fi
+
+echo "== release packages + native addon (project node_modules) =="
+if [ -d "$SCRATCH/node_modules/effect" ] && [ -d "$SCRATCH/node_modules/hono" ]; then
+    run "release esm matrix" "esm-matrix function" p_matrix.js \
+'import { Effect } from "effect";
+import { Hono } from "hono";
+import { WebSocket } from "ws";
+import vm from "node:vm";
+console.log("esm-matrix", typeof Effect.succeed, new Hono().routes.length, typeof WebSocket, typeof vm.Script);'
+
+    run "require(esm) effect" "require-esm object function" p_reqesm.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const effect = require("effect");
+console.log("require-esm", typeof effect.Effect, typeof effect.Effect.succeed);'
+else
+    echo "skip: release-package checks (npm install unavailable)"
+fi
+
+if [ -f "$SCRATCH/node_modules/@parcel/watcher-linux-x64-glibc/watcher.node" ]; then
+    run_with "--allow-sys" "native addon denied without ffi" "native-denied NotCapable" \
+        p_native_deny.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+try { require("@parcel/watcher"); console.log("native-loaded"); }
+catch (e) { console.log("native-denied", e && e.constructor && e.constructor.name); }'
+
+    run_with "--allow-sys --allow-ffi" "native addon loads with ffi" \
+        "native-ok function function" p_native.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const w = require("@parcel/watcher");
+console.log("native-ok", typeof w.subscribe, typeof w.getEventsSince);'
+else
+    echo "skip: native-addon checks (no @parcel/watcher native binary)"
+fi
 
 echo "runtime-matrix: OK"

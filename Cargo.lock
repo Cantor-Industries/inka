@@ -1731,6 +1731,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "deno_graph"
+version = "0.111.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74d39f55639b6bffe4e886d2ea33724606729d3ec9c8e05a48952a56c1cef961"
+dependencies = [
+ "async-trait",
+ "boxed_error",
+ "capacity_builder",
+ "chrono",
+ "data-url",
+ "deno_ast",
+ "deno_error",
+ "deno_media_type",
+ "deno_path_util",
+ "deno_semver",
+ "deno_unsync",
+ "futures",
+ "indexmap",
+ "log",
+ "monch",
+ "once_cell",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sys_traits",
+ "thiserror 2.0.20",
+ "twox-hash 1.6.3",
+ "url",
+ "wasm_dep_analyzer",
+]
+
+[[package]]
 name = "deno_http"
 version = "0.256.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1906,6 +1940,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "debab24ecd9f4fd64aa42fb18a02dff20a97d5830b2b85b98ce70b509f790763"
 dependencies = [
  "data-url",
+ "encoding_rs",
  "serde",
  "url",
 ]
@@ -2316,7 +2351,7 @@ dependencies = [
  "serde_json",
  "sys_traits",
  "thiserror 2.0.20",
- "twox-hash",
+ "twox-hash 2.1.4",
  "url",
  "yaml_parser",
 ]
@@ -2392,7 +2427,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-metrics",
- "twox-hash",
+ "twox-hash 2.1.4",
  "unicode-normalization",
  "uuid",
  "windows-sys 0.59.0",
@@ -2719,7 +2754,7 @@ dependencies = [
  "sys_traits",
  "tempfile",
  "thiserror 2.0.20",
- "twox-hash",
+ "twox-hash 2.1.4",
 ]
 
 [[package]]
@@ -4348,13 +4383,19 @@ version = "0.4.0"
 dependencies = [
  "async-trait",
  "deno_ast",
+ "deno_cache_dir",
  "deno_core",
  "deno_error",
+ "deno_graph",
  "deno_runtime",
  "deno_semver",
+ "futures",
+ "import_map",
  "node_resolver",
+ "serde_json",
  "sys_traits",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -8006,6 +8047,17 @@ name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
+
+[[package]]
+name = "twox-hash"
+version = "1.6.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97fee6b57c6a41524a810daee9286c02d7752c4253064d0b05472833a438f675"
+dependencies = [
+ "cfg-if",
+ "rand 0.8.5",
+ "static_assertions",
+]
 
 [[package]]
 name = "twox-hash"

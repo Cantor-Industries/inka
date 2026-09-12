@@ -37,6 +37,7 @@ mod runtime_snapshot {
 }
 
 mod node_services;
+mod resolver;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -63,6 +64,8 @@ struct PkgLoader {
     precompiled: bool,
     /// CJS/Node services used to serve an ESM facade for CommonJS modules.
     node_services: node_services::NodeServices,
+    /// Offline module-graph/import-map resolution (`inka run`).
+    resolver: Rc<resolver::GraphResolverState>,
 }
 
 fn precompiled_flag() -> bool {
@@ -76,10 +79,50 @@ impl ModuleLoader for PkgLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
-        // All import-resolution policy lives in the node services
-        // (deno's `NodeResolver`), the same seam CJS `require()` uses.
+        let bare = !specifier.contains(':')
+            && !specifier.starts_with("./")
+            && !specifier.starts_with("../")
+            && !specifier.starts_with('/');
+        // A `deno.json` import map may remap a bare specifier (to jsr:/npm:/https).
+        let mapped = if bare {
+            self.resolver.map_specifier(specifier, referrer)
+        } else {
+            None
+        };
+        let spec = mapped.as_deref().unwrap_or(specifier);
+
+        if spec.starts_with("npm:") {
+            return self
+                .node_services
+                .resolve_specifier(spec, referrer)
+                .map_err(JsErrorBox::generic);
+        }
+        if spec.starts_with("jsr:") {
+            return self
+                .resolver
+                .resolve_in_graph(spec, referrer)
+                .ok_or_else(|| {
+                    JsErrorBox::generic(format!(
+                        "jsr module not resolved from the Deno cache: {spec}"
+                    ))
+                });
+        }
+        if bare || mapped.is_some() {
+            if let Some(u) = self.resolver.resolve_in_graph(spec, referrer) {
+                return Ok(u);
+            }
+            return self
+                .node_services
+                .resolve_specifier(spec, referrer)
+                .map_err(JsErrorBox::generic);
+        }
+        // Schemes, relative, and absolute specifiers. Network (`https:`) is
+        // allowed as a specifier but served only from the cache by `load`.
+        if spec.starts_with("http://") || spec.starts_with("https://") {
+            return url::Url::parse(spec).map_err(|e| JsErrorBox::generic(e.to_string()));
+        }
         self.node_services
-            .resolve_specifier(specifier, referrer)
+            .resolve_specifier(spec, referrer)
             .map_err(JsErrorBox::generic)
     }
 
@@ -93,7 +136,12 @@ impl ModuleLoader for PkgLoader {
         let artifact_root = self.artifact_root.clone();
         let precompiled = self.precompiled;
         let node_services = self.node_services.clone();
+        let deno_dir = self.resolver.deno_dir().to_path_buf();
         let fut = async move {
+            // Remote modules (jsr) are served from the Deno cache only.
+            if specifier.scheme() == "https" || specifier.scheme() == "http" {
+                return load_cached_remote(&specifier, &deno_dir).await;
+            }
             let mut path = module_url_to_path(&specifier)?;
             if !path.starts_with(&artifact_root) {
                 return Err(JsErrorBox::generic(format!(
@@ -228,6 +276,55 @@ fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox
     specifier
         .to_file_path()
         .map_err(|_| JsErrorBox::type_error(format!("not a file URL module: {specifier}")))
+}
+
+/// Serve an `https:`/`http:` module from the Deno remote cache (offline). TS
+/// modules (jsr) are transpiled on load.
+async fn load_cached_remote(
+    specifier: &ModuleSpecifier,
+    deno_dir: &Path,
+) -> Result<ModuleSource, JsErrorBox> {
+    use deno_cache_dir::{GlobalHttpCache, HttpCache};
+
+    let cache = GlobalHttpCache::new(RealSys, deno_dir.join("remote"));
+    let key = cache
+        .cache_item_key(specifier)
+        .map_err(JsErrorBox::from_err)?;
+    let entry = cache
+        .get(&key, None)
+        .map_err(JsErrorBox::from_err)?
+        .ok_or_else(|| {
+            JsErrorBox::generic(format!(
+                "module not in the Deno cache (offline): {specifier}"
+            ))
+        })?;
+    let bytes = entry.content.into_owned();
+
+    let ext = specifier
+        .path()
+        .rsplit('.')
+        .next()
+        .map(|s| s.to_ascii_lowercase());
+    let is_ts = matches!(ext.as_deref(), Some("ts" | "mts" | "cts"));
+    let code: ModuleSourceCode = if is_ts {
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let name = ModuleName::from(specifier.as_str().to_string());
+        let (js, _map) =
+            maybe_transpile_source(name, ModuleCodeString::from(text)).map_err(|e| {
+                JsErrorBox::generic(format!(
+                    "failed to transpile TypeScript module {specifier}: {e}"
+                ))
+            })?;
+        ModuleSourceCode::String(js)
+    } else {
+        ModuleSourceCode::Bytes(bytes.into_boxed_slice().into())
+    };
+    Ok(ModuleSource::new(
+        ModuleType::JavaScript,
+        code,
+        specifier,
+        None,
+    ))
 }
 
 // ---- npm/node services -----------------------------------------------------
@@ -524,10 +621,12 @@ fn run_tree(
             root: Some(root.clone()),
         };
         let (node_services, ext_services) = node_services::NodeServices::new(roots);
+        let resolver_state = resolver::build(&root, &file).await;
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
             precompiled: precompiled_flag(),
             node_services,
+            resolver: Rc::new(resolver_state),
         });
         run_module_async(&url, args, permissions, loader, ext_services).await
     })
