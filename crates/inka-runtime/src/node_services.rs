@@ -66,13 +66,81 @@ impl StoreRoots {
             .any(|root| path.starts_with(root))
     }
 
-    /// Under the store or the vendored package roots (node_modules-like, where
-    /// a `.js` without an explicit `"type"` defaults to CommonJS).
+    /// The `node_modules` directory of the vendored tree
+    /// (`<INKA_VENDOR>/node_modules`), if a vendor root is configured.
+    fn vendor_node_modules(&self) -> Option<PathBuf> {
+        self.vendor.as_ref().map(|v| v.join("node_modules"))
+    }
+
+    /// The project's own `node_modules` (`<artifact-root>/node_modules`): for
+    /// `inka run` this is the project directory, for a built artifact the
+    /// extracted tree. This is the bring-your-own-node_modules (BYONM) tier.
+    fn project_node_modules(&self) -> Option<PathBuf> {
+        self.artifact.as_ref().map(|a| a.join("node_modules"))
+    }
+
+    /// The default store's `node_modules` pool.
+    fn store_node_modules(&self) -> Option<PathBuf> {
+        self.store.as_ref().map(|s| s.join("node_modules"))
+    }
+
+    /// Under a `node_modules` directory of a trusted root (store/vendored/
+    /// project), or anywhere in the vendored tree. Used to default a `.js`
+    /// without an explicit `"type"` to CommonJS.
     fn in_package_root(&self, path: &Path) -> bool {
-        [&self.store, &self.vendor]
-            .into_iter()
-            .flatten()
-            .any(|root| path.starts_with(root))
+        [
+            self.vendor_node_modules(),
+            self.project_node_modules(),
+            self.store_node_modules(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|nm| path.starts_with(nm))
+            || self.vendor.as_ref().is_some_and(|v| path.starts_with(v))
+    }
+}
+
+/// A `node_modules` root plus the tree it belongs to (the boundary the
+/// nearest-`node_modules` walk may climb to).
+struct NodeModulesRoot {
+    nm: PathBuf,
+    tree: PathBuf,
+}
+
+impl NodeModulesRoot {
+    fn new(nm: PathBuf) -> Self {
+        let tree = nm
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| nm.clone());
+        Self { nm, tree }
+    }
+
+    /// A package's folder if `nm/<name>/package.json` exists (hoisted).
+    fn hoisted(&self, name: &str) -> Option<PathBuf> {
+        let candidate = self.nm.join(name);
+        candidate
+            .join("package.json")
+            .is_file()
+            .then_some(candidate)
+    }
+
+    /// Node-style nearest-`node_modules` lookup: walk up from `referrer`,
+    /// checking `<dir>/node_modules/<name>`, stopping at this root's tree
+    /// boundary (so nested packages beat hoisted ones).
+    fn nearest(&self, referrer: &Path, name: &str) -> Option<PathBuf> {
+        let mut dir = referrer.parent();
+        while let Some(d) = dir {
+            if !d.starts_with(&self.tree) {
+                break;
+            }
+            let candidate = d.join("node_modules").join(name);
+            if candidate.join("package.json").is_file() {
+                return Some(candidate);
+            }
+            dir = d.parent();
+        }
+        None
     }
 }
 
@@ -227,37 +295,49 @@ impl NpmPackageFolderResolver for StoreFolderResolver {
         referrer: &UrlOrPathRef,
     ) -> Result<PathBuf, PackageFolderResolveError> {
         let candidates = package_candidates(specifier);
+        let ref_path = referrer.path().ok();
 
-        for name in &candidates {
-            // Vendored package roots shadow the store (name-keyed, no node_modules).
-            if let Some(vendor) = &self.roots.vendor {
-                let candidate = vendor.join(name);
-                if candidate.join("package.json").is_file() {
-                    return Ok(candidate);
-                }
+        // Resolution roots in precedence order, each with whether the referrer
+        // lives inside that tree (so it resolves via the nearest-`node_modules`
+        // walk) or only contributes its hoisted `node_modules/<name>`.
+        //
+        //   vendored  -> project node_modules (BYONM) -> default store
+        //
+        // A referrer inside the default store never consults vendored/project
+        // trees (store packages are machine-wide and self-contained).
+        let in_store =
+            ref_path.is_some_and(|p| self.roots.store.as_ref().is_some_and(|s| p.starts_with(s)));
+        let mut order: Vec<(PathBuf, bool)> = Vec::new();
+        if in_store {
+            if let Some(nm) = self.roots.store_node_modules() {
+                order.push((nm, true));
             }
-
-            // Shared hoisted store pool.
-            if let Some(store) = &self.roots.store {
-                let candidate = store.join("node_modules").join(name);
-                if candidate.join("package.json").is_file() {
-                    return Ok(candidate);
-                }
+        } else {
+            let in_vendor = ref_path
+                .is_some_and(|p| self.roots.vendor.as_ref().is_some_and(|v| p.starts_with(v)));
+            if let Some(nm) = self.roots.vendor_node_modules() {
+                order.push((nm, in_vendor));
             }
+            if let Some(nm) = self.roots.project_node_modules() {
+                order.push((nm, !in_vendor && ref_path.is_some()));
+            }
+            if let Some(nm) = self.roots.store_node_modules() {
+                order.push((nm, false));
+            }
+        }
 
-            // Node-style walk up from the referrer, confined to the trusted roots
-            // (covers nested node_modules inside the store/vendor trees).
-            if let Ok(ref_path) = referrer.path() {
-                let mut dir = ref_path.parent();
-                while let Some(d) = dir {
-                    if !self.roots.contains(d) {
-                        break;
-                    }
-                    let candidate = d.join("node_modules").join(name);
-                    if candidate.join("package.json").is_file() {
-                        return Ok(candidate);
-                    }
-                    dir = d.parent();
+        for (nm, use_nearest) in &order {
+            let root = NodeModulesRoot::new(nm.clone());
+            for name in &candidates {
+                let found = if *use_nearest {
+                    ref_path
+                        .and_then(|p| root.nearest(p, name))
+                        .or_else(|| root.hoisted(name))
+                } else {
+                    root.hoisted(name)
+                };
+                if let Some(f) = found {
+                    return Ok(f);
                 }
             }
         }
