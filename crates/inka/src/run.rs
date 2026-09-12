@@ -2,8 +2,8 @@
 // without building an artifact. Mirrors the launcher's multi-file execution:
 // dlopen the chosen runtime and call inka_runtime_run_module_dir with dir =
 // the execution root and entry = the file's path relative to it, so relative
-// imports, vendored packages, the default store, and node built-ins all resolve
-// the way a built artifact would.
+// imports, project node_modules, and node built-ins all resolve the way a
+// built artifact would.
 //
 // Permissions mirror `deno run --no-prompt`: deny-by-default, with explicit
 // grants only:
@@ -280,9 +280,7 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
 }
 
 fn is_project_root(dir: &Path) -> bool {
-    dir.join("vendored").is_dir()
-        || dir.join("package.json").is_file()
-        || dir.join("deno.json").is_file()
+    dir.join("package.json").is_file() || dir.join("deno.json").is_file()
 }
 
 fn join_components(rel: &Path) -> String {
@@ -294,8 +292,8 @@ fn join_components(rel: &Path) -> String {
 
 /// Determine the execution root and the entry's path relative to it. A file
 /// under the cwd uses the cwd as root (today's behavior). An outside-cwd file
-/// roots at the nearest ancestor project (vendored/ | package.json | deno.json),
-/// falling back to the file's own directory.
+/// roots at the nearest ancestor project (package.json | deno.json), falling
+/// back to the file's own directory.
 fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> {
     let canon =
         fs::canonicalize(file).map_err(|e| format!("cannot resolve {}: {e}", file.display()))?;
@@ -334,23 +332,6 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
         .map_err(|_| format!("cannot relate {} to {}", file.display(), root.display()))?;
     let entry = join_components(rel);
     Ok((root, entry))
-}
-
-fn set_default_env(root: &Path) {
-    // INKA_STORE defaults to the per-user XDG store when present.
-    if env::var_os("INKA_STORE").is_none() {
-        let candidate = crate::default_store_dir();
-        if candidate.is_dir() {
-            env::set_var("INKA_STORE", &candidate);
-        }
-    }
-    // INKA_VENDOR: only a vendored/ dir under the execution root counts.
-    let vroot = root.join("vendored");
-    if vroot.is_dir() {
-        env::set_var("INKA_VENDOR", &vroot);
-    } else {
-        env::remove_var("INKA_VENDOR");
-    }
 }
 
 fn validate_flags(f: &Flags) {
@@ -419,7 +400,6 @@ pub(crate) fn cmd_run(args: &[String]) {
             chosen.map(|v| v.to_string()).unwrap_or_default()
         );
     }
-    set_default_env(&root);
 
     let library = match load_runtime_library(&lib) {
         Ok(l) => l,

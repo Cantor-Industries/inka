@@ -3,10 +3,10 @@
 #
 # Downloads the inka toolchain (CLI + launcher),
 # installs it under <prefix>/lib/inka with a symlink in <prefix>/bin, then
-# provisions the shared runtime and package store via `inka update`.
+# provisions the shared runtime via `inka update`.
 # Like rustup, it installs per-user (no root). A pre-0.4.0 install is reset
 # first (0.4.0 is a clean break: the resolver was retired and the runtime tuple
-# moved), then the runtime and store are provisioned fresh. Later 0.4.x
+# moved), then the runtime is provisioned fresh. Later 0.4.x
 # installs are ordinary upgrades.
 #
 # usage:
@@ -19,9 +19,8 @@
 #       --from <dir-or-url> release base override (mirrors, local staging)
 #       --prefix <dir>     toolchain prefix (default: $HOME/.local)
 #       --no-modify-path   do not edit shell rc files
-#       --no-engine        skip the runtime (the store still seeds)
+#       --no-engine        skip the runtime
 #       --no-runtime       skip the runtime .so
-#       --no-store         skip the package store snapshot
 #       --force            reinstall the toolchain even if current
 #       --uninstall        remove the toolchain (and engine) and exit
 #   -h, --help             show this help
@@ -48,10 +47,8 @@ options:
       --from <dir-or-url> release base override (mirrors, local staging)
       --prefix <dir>      toolchain prefix (default: $HOME/.local)
       --no-modify-path    do not edit shell rc files
-      --no-engine         skip the runtime (the store still seeds unless
-                          --no-store)
+      --no-engine         skip the runtime
       --no-runtime        skip the runtime .so
-      --no-store          skip the package store snapshot
       --force             reinstall the toolchain even if current
       --uninstall         remove the toolchain (and engine) and exit
   -h, --help              show this help
@@ -155,7 +152,6 @@ FROM=""
 PREFIX="${INKA_PREFIX:-$HOME/.local}"
 MODIFY_PATH=1
 NO_RUNTIME=0
-NO_STORE=0
 FORCE=0
 UNINSTALL=0
 
@@ -168,7 +164,6 @@ while [ $# -gt 0 ]; do
         --no-modify-path) MODIFY_PATH=0 ;;
         --no-engine) NO_RUNTIME=1 ;;
         --no-runtime) NO_RUNTIME=1 ;;
-        --no-store) NO_STORE=1 ;;
         --force) FORCE=1 ;;
         --uninstall) UNINSTALL=1 ;;
         -h|--help) usage; exit 0 ;;
@@ -238,10 +233,9 @@ CURRENT=""
 # ---- previous-generation reset ----------------------------------------------
 # 0.4.0 is a clean break: the resolver was retired and the runtime tuple moved.
 # Detect a pre-0.4.0 install (toolchain VERSION not 0.4.x, or the retired
-# resolver .so present) and remove the old toolchain + engine (+ store) so the
-# new release installs fresh. Fresh machines and later 0.4.x upgrades skip this.
+# resolver .so present) and remove the old toolchain + engine so the new
+# release installs fresh. Fresh machines and later 0.4.x upgrades skip this.
 engine_dir="${INKA_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/runtime}"
-store_dir="${INKA_STORE:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/store}"
 reset=0
 case "$CURRENT" in
     ""|0.4.*) ;;
@@ -256,9 +250,6 @@ if [ "$reset" = 1 ]; then
     CURRENT=""
     if [ "$NO_RUNTIME" = 0 ]; then
         rm -f "$engine_dir"/libinka_runtime-*.so "$engine_dir"/libinka_resolver-*.so
-    fi
-    if [ "$NO_STORE" = 0 ]; then
-        rm -rf "$store_dir"
     fi
 fi
 
@@ -291,16 +282,9 @@ if [ "$MODIFY_PATH" = 1 ]; then
 fi
 
 # ---- provision engine -------------------------------------------------------
-# Runtime first, then the package store as its own step (so the store seeds
-# independently and is visible in the install output).
 if [ "$NO_RUNTIME" = 0 ]; then
     info "installing runtime from $BASE"
-    "$PREFIX/lib/inka/inka" update --from "$BASE" --no-toolchain --no-store
-fi
-
-if [ "$NO_STORE" = 0 ]; then
-    info "seeding package store from $BASE"
-    "$PREFIX/lib/inka/inka" update --from "$BASE" --store-only
+    "$PREFIX/lib/inka/inka" update --from "$BASE" --no-toolchain
 fi
 
 info "inka $TC_VER installed at $PREFIX/bin/inka"

@@ -1,15 +1,13 @@
-// inka update: reconcile the toolchain, the shared runtime tuple, and the
-// package store with the newest published release (or install an explicit
-// runtime tuple).
+// inka update: reconcile the toolchain and the shared runtime tuple with the
+// newest published release (or install an explicit runtime tuple).
 //
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
 //                           [--no-toolchain | --toolchain-only]
-//                           [--no-runtime] [--no-store]
+//                           [--no-runtime]
 //
 // No <version>: fetch <base>/versions.json, self-update the toolchain when an
-// installer-managed one is present, install only the components that are behind
-// the newest installed runtime, then sync the store snapshot.
+// installer-managed one is present, install the runtime when it is behind.
 // With <version>: install that exact runtime tuple (pinned/offline; CI,
 // containers).
 //
@@ -76,15 +74,11 @@ fn ensure_dir(dir: &Path) {
 #[derive(Clone, Copy)]
 struct Components {
     runtime: bool,
-    store: bool,
 }
 
 impl Default for Components {
     fn default() -> Self {
-        Self {
-            runtime: true,
-            store: true,
-        }
+        Self { runtime: true }
     }
 }
 
@@ -117,21 +111,15 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--insecure" => insecure = true,
             "--no-toolchain" => toolchain = ToolchainMode::Skip,
             "--toolchain-only" => toolchain = ToolchainMode::Only,
-            "--store-only" => {
-                toolchain = ToolchainMode::Skip;
-                components.runtime = false;
-                components.store = true;
-            }
             "--no-runtime" => components.runtime = false,
-            "--no-store" => components.store = false,
             "--help" | "-h" => {
                 eprintln!(
                     "usage: inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]\n\
                      \x20                  [--insecure] [--home <dir>]\n\
-                     \x20                  [--no-toolchain | --toolchain-only | --store-only]\n\
-                     \x20                  [--no-runtime] [--no-store]\n\
+                     \x20                  [--no-toolchain | --toolchain-only]\n\
+                     \x20                  [--no-runtime]\n\
                      \x20 no <version>: update the toolchain (if installer-managed) and install the\n\
-                     \x20                newest runtime/store that are behind\n\
+                     \x20                newest runtime that is behind\n\
                      \x20 <version>:     install that exact runtime tuple"
                 );
                 std::process::exit(0);
@@ -258,7 +246,7 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
         .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
     let mut cmd = Command::new("tar");
     cmd.args(["-xzf"]).arg(&archive_path).arg("-C").arg(&tmp.0);
-    crate::pkg::run_ok(&mut cmd, "tar extract")?;
+    run_ok(&mut cmd, "tar extract")?;
     replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
@@ -408,10 +396,6 @@ fn update_latest(
         }
     }
 
-    if components.store {
-        changed |= sync_store(base);
-    }
-
     if !changed {
         println!("[inka] up to date");
     }
@@ -470,49 +454,6 @@ fn install_file(
     Ok(())
 }
 
-/// Best-effort store sync: fetch the release's store record; if its snapshot
-/// identity differs from the local store, replace `node_modules` and record.
-/// Returns whether the store changed.
-fn sync_store(base: &str) -> bool {
-    let store = match env::var_os("INKA_STORE") {
-        Some(s) => PathBuf::from(s),
-        None => crate::default_store_dir(),
-    };
-    let record = match crate::pkg::fetch_store_record(base) {
-        Ok(r) => r,
-        Err(_) => {
-            println!("[inka] no package store snapshot at {base}; skipping store");
-            return false;
-        }
-    };
-    let remote = crate::pkg::record_sha(&record);
-    let local = crate::pkg::store_record_sha(&store);
-    if !remote.is_empty() && remote == local {
-        println!("[inka] store is current");
-        return false;
-    }
-    let tbytes = match crate::pkg::fetch_store_tar(base, &record) {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("[inka] warning: store snapshot not applied: {e}");
-            return false;
-        }
-    };
-    match crate::pkg::apply_store_record(&store, &record, &tbytes) {
-        Ok(n) => {
-            println!(
-                "[inka] store updated ({n} package(s)) into {}",
-                store.display()
-            );
-            true
-        }
-        Err(e) => {
-            eprintln!("[inka] warning: store snapshot not applied: {e}");
-            false
-        }
-    }
-}
-
 // ---- pinned -----------------------------------------------------------------
 
 fn update_pinned(
@@ -540,11 +481,17 @@ fn update_pinned(
         install_file(base, &name, &target, sha256, insecure, "inka_runtime")
             .unwrap_or_else(|e| fail(&e));
     }
+}
 
-    // Seed the store from the release snapshot (flat assets or a `store/` subdir).
-    if components.store {
-        sync_store(base);
+/// Run a child process to completion, mapping a spawn/exit failure to a message.
+fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
+    let status = cmd
+        .status()
+        .map_err(|e| format!("failed to spawn {what}: {e}"))?;
+    if !status.success() {
+        return Err(format!("{what} exited with {status}"));
     }
+    Ok(())
 }
 
 fn install_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {

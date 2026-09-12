@@ -19,7 +19,6 @@ pub enum Mode {
 }
 
 const IGNORE_DIRS: [&str; 5] = [".git", "target", "node_modules", ".inka", "dist"];
-const LOCK_FILE: &str = "vendored.lock";
 
 pub fn rel_from_cwd(cwd: &Path, p: &Path) -> Result<String, String> {
     let abs = if p.is_absolute() {
@@ -64,7 +63,7 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
                 }
             }
             // non-local specifiers (bare / npm: / jsr: / node:) are left for the
-            // runtime to resolve against the package store or built-ins — silence.
+            // runtime to resolve against node_modules or built-ins — silence.
         }
     }
 
@@ -82,8 +81,8 @@ pub fn collect(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, St
 
 /// Split a bare/`npm:`/`jsr:` specifier into `(npm identity name, subpath)`.
 /// Schemes (other than npm:/jsr:) and relative/absolute specifiers are not
-/// vendored targets.
-fn vendored_spec(spec: &str) -> Option<(String, Option<String>)> {
+/// node_modules targets.
+fn package_spec(spec: &str) -> Option<(String, Option<String>)> {
     if spec.starts_with("npm:") || spec.starts_with("jsr:") {
         let ps = parse_pkg_specifier(spec).ok()?;
         return Some((ps.name, ps.sub));
@@ -151,8 +150,8 @@ fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
     Ok(PkgSpec { name, sub })
 }
 
-/// Vendored package identities a bare name may map to (jsr mirror included).
-fn vendored_identities(name: &str) -> Vec<String> {
+/// Package identities a bare name may map to (jsr mirror included).
+fn package_identities(name: &str) -> Vec<String> {
     let mut out = vec![name.to_string()];
     if let Some(body) = name.strip_prefix('@') {
         if let Some((scope, pkg)) = body.split_once('/') {
@@ -337,33 +336,10 @@ fn package_json_for(cwd: &Path, rel: &str) -> Option<String> {
     None
 }
 
-/// Collect only the vendored modules reachable from the entry's import graph
-/// (`--vendor-closure`). App files are walked (and returned only when they live
-/// under `vendored/`) so relative imports inside vendored packages and further
-/// bare imports are followed through the resolver. Store/builtin-only packages
-/// are not embedded — they are resolved from the machine default store at run
-/// time. Each reached package root's `package.json` is embedded too (the
-/// runtime resolver reads it). Entries are cwd-relative `vendored/…` paths, as
-/// in `collect_vendored`.
-/// Collect only the vendored `node_modules` modules reachable from the entry
-/// graph (`--vendor-closure`). The vendored tree is a real npm layout under
-/// `vendored/node_modules/`; nearest-`node_modules` wins, and store/builtin
-/// specifiers are left for runtime resolution.
-pub fn collect_vendored_closure(
-    cwd: &Path,
-    entry_rel: &str,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let nm = cwd.join("vendored").join("node_modules");
-    if !nm.is_dir() {
-        return Ok(Vec::new());
-    }
-    collect_closure(cwd, entry_rel, &nm, "vendored/node_modules/")
-}
-
 /// Collect the project's `node_modules` files reachable from the entry graph
 /// (bring-your-own-node_modules). Bare/`npm:`/`jsr:` specifiers resolve against
 /// `<cwd>/node_modules` (nearest `node_modules` first, then the hoisted root);
-/// store/builtin specifiers are left for runtime resolution. Files are embedded
+/// builtin specifiers are left for runtime resolution. Files are embedded
 /// at their `node_modules/…` paths (through symlinks, so Deno's isolated
 /// `.deno/` and pnpm's `.pnpm/` layouts work), and each reached package root's
 /// `package.json` is embedded too.
@@ -428,8 +404,8 @@ fn collect_closure(
 /// hoisted), then the hoisted root. Returns a cwd-relative path (symlinks
 /// preserved).
 fn node_modules_target(cwd: &Path, nm: &Path, from_rel: &str, spec: &str) -> Option<String> {
-    let (name, sub) = vendored_spec(spec)?;
-    let identities = vendored_identities(&name);
+    let (name, sub) = package_spec(spec)?;
+    let identities = package_identities(&name);
     let from_abs = cwd.join(from_rel);
     let tree = nm.parent().unwrap_or(nm);
     let mut dir = from_abs.parent();
@@ -824,160 +800,6 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
     Ok(())
 }
 
-/// Collect the per-project vendored package roots (`vendored/<name>/…`) as
-/// cwd-relative entries, ready to embed into an artifact (whole-pool mode).
-/// The vendored lock/conversion bookkeeping files are not runtime modules.
-///
-/// Only genuine package roots are embedded. The pool is name-keyed flat:
-///   vendored/<name>/package.json                    (bare packages)
-///   vendored/@scope/<name>/package.json             (scoped packages)
-/// A top-level `vendored/` entry that is not a package root (a stray dir or
-/// file, `Go`-style vendor leftovers, etc.) is skipped so it never becomes
-/// artifact payload.
-pub fn collect_vendored(cwd: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let vendored = cwd.join("vendored");
-    if !vendored.is_dir() {
-        return Ok(Vec::new());
-    }
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
-    let nm = vendored.join("node_modules");
-    if nm.is_dir() {
-        walk_node_modules(cwd, &nm, &mut files)?;
-    } else {
-        // Legacy flat layout: name-keyed package roots directly under vendored/.
-        walk_flat_packages(cwd, &vendored, &mut files)?;
-    }
-    Ok(files.into_iter().collect())
-}
-
-/// Walk every package under a `node_modules` dir, recursing into each package's
-/// nested `node_modules` (via `walk_vendored`).
-fn walk_node_modules(
-    cwd: &Path,
-    nm: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), String> {
-    for ent in fs::read_dir(nm)
-        .map_err(|e| format!("cannot read dir {}: {e}", nm.display()))?
-        .flatten()
-    {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue; // .bin / .deno / .pnpm and dotfiles are not packages
-        }
-        let p = ent.path();
-        if !p.is_dir() {
-            continue;
-        }
-        if p.join("package.json").is_file() {
-            walk_vendored(cwd, &p, files)?;
-        } else if name.starts_with('@') {
-            for sub in fs::read_dir(&p)
-                .map_err(|e| format!("cannot read dir {}: {e}", p.display()))?
-                .flatten()
-            {
-                if sub.path().is_dir() && sub.path().join("package.json").is_file() {
-                    walk_vendored(cwd, &sub.path(), files)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Legacy flat pool: package roots directly under `vendored/`.
-fn walk_flat_packages(
-    cwd: &Path,
-    vendored: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), String> {
-    for ent in fs::read_dir(vendored)
-        .map_err(|e| format!("cannot read dir {}: {e}", vendored.display()))?
-        .flatten()
-    {
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') || !ent.path().is_dir() {
-            continue;
-        }
-        let root = ent.path();
-        if root.join("package.json").is_file() {
-            walk_vendored(cwd, &root, files)?;
-        } else if name.starts_with('@') {
-            for sub in fs::read_dir(&root)
-                .map_err(|e| format!("cannot read dir {}: {e}", root.display()))?
-                .flatten()
-            {
-                if sub.path().is_dir() && sub.path().join("package.json").is_file() {
-                    walk_vendored(cwd, &sub.path(), files)?;
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Files that never run and bloat whole-pool artifacts. Vendored packages ship
-/// tests/specs, source maps, and type declarations (only tooling uses .d.ts);
-/// the app's own files are never filtered (this is only consulted by
-/// `walk_vendored`).
-fn is_vendor_noise(name: &str) -> bool {
-    let l = name.to_ascii_lowercase();
-    l.ends_with("_test.ts")
-        || l.ends_with(".test.ts")
-        || l.ends_with(".test.js")
-        || l.contains(".spec.")
-        || l.ends_with(".map")
-        || l.ends_with(".d.ts")
-        || l.ends_with(".d.mts")
-        || l.ends_with(".d.cts")
-}
-
-fn walk_vendored(
-    cwd: &Path,
-    dir: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
-) -> Result<(), String> {
-    let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
-    for ent in rd.flatten() {
-        let ft = ent.file_type().map_err(|e| e.to_string())?;
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if name.starts_with('.') {
-            continue;
-        }
-        // bookkeeping files are not runtime modules
-        if name == LOCK_FILE || name == "vendor.json" {
-            continue;
-        }
-        if ft.is_dir() {
-            if name == ".git" {
-                continue;
-            }
-            if name == "node_modules" {
-                walk_node_modules(cwd, &ent.path(), files)?;
-                continue;
-            }
-            walk_vendored(cwd, &ent.path(), files)?;
-        } else if ft.is_file() {
-            // WS3-1: skip vendored tests/specs, source maps, and type
-            // declarations — never imported at run time.
-            if is_vendor_noise(&name) {
-                continue;
-            }
-            if let Ok(bytes) = fs::read(ent.path()) {
-                if let Ok(rel) = ent.path().strip_prefix(cwd) {
-                    let rel = rel
-                        .components()
-                        .map(|c| c.as_os_str().to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join("/");
-                    files.insert(rel, bytes);
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -997,151 +819,6 @@ mod tests {
         let p = cwd.join(rel);
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(p, body).unwrap();
-    }
-
-    #[test]
-    fn collect_vendored_skips_non_package_entries() {
-        let cwd = scratch();
-        mk(
-            &cwd,
-            "vendored/ws/package.json",
-            r#"{"name":"ws","version":"1.0.0"}"#,
-        );
-        mk(&cwd, "vendored/ws/index.js", "export const x = 1;\n");
-        // stray dir and stray top-level file: not package roots -> not embedded
-        mk(&cwd, "vendored/junk/file.txt", "stray\n");
-        mk(&cwd, "vendored/stray.txt", "top-level stray file\n");
-        let files = collect_vendored(&cwd).unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
-        assert_eq!(
-            rels,
-            vec!["vendored/ws/index.js", "vendored/ws/package.json"],
-            "{rels:?}"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn collect_vendored_keeps_scoped_packages() {
-        let cwd = scratch();
-        mk(
-            &cwd,
-            "vendored/@effect/platform/package.json",
-            r#"{"name":"@effect/platform","version":"1.0.0"}"#,
-        );
-        mk(
-            &cwd,
-            "vendored/@effect/platform/lib/mod.ts",
-            "export const p = 1;\n",
-        );
-        // a stray file directly inside a scope container is not a package
-        mk(&cwd, "vendored/@junk/note.txt", "not a package\n");
-        let files = collect_vendored(&cwd).unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
-        assert_eq!(
-            rels,
-            vec![
-                "vendored/@effect/platform/lib/mod.ts",
-                "vendored/@effect/platform/package.json",
-            ],
-            "{rels:?}"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    // --vendor-closure: only the vendored modules reachable from the entry are
-    // embedded (walking through vendored relative imports); unrelated vendored
-    // packages and the app's own files are excluded.
-    #[test]
-    fn collect_vendored_closure_embeds_only_reachable_vendored() {
-        let cwd = scratch();
-        mk(
-            &cwd,
-            "app.js",
-            "import { once } from \"onetime\";\nimport \"./util.js\";\nconsole.log(once);\n",
-        );
-        mk(&cwd, "util.js", "export const u = 1;\n");
-        mk(
-            &cwd,
-            "vendored/node_modules/onetime/package.json",
-            r#"{"name":"onetime","version":"7.2.0","type":"module","exports":{".":"./index.js"}}"#,
-        );
-        mk(
-            &cwd,
-            "vendored/node_modules/onetime/index.js",
-            "import { x } from \"./lib/x.js\";\nexport function once() { return x; }\n",
-        );
-        mk(
-            &cwd,
-            "vendored/node_modules/onetime/lib/x.js",
-            "export const x = 1;\n",
-        );
-        // unrelated vendored package nothing imports
-        mk(
-            &cwd,
-            "vendored/node_modules/extra/package.json",
-            r#"{"name":"extra","version":"1.0.0","type":"module","main":"index.js"}"#,
-        );
-        mk(
-            &cwd,
-            "vendored/node_modules/extra/index.js",
-            "export const e = 2;\n",
-        );
-
-        let files = collect_vendored_closure(&cwd, "app.js").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
-        for want in [
-            "vendored/node_modules/onetime/index.js",
-            "vendored/node_modules/onetime/lib/x.js",
-            "vendored/node_modules/onetime/package.json",
-        ] {
-            assert!(rels.contains(&want.to_string()), "missing {want}: {rels:?}");
-        }
-        assert!(
-            rels.iter()
-                .all(|r| !r.starts_with("vendored/node_modules/extra")),
-            "{rels:?}"
-        );
-        assert!(
-            rels.iter().all(|r| r != "app.js" && r != "util.js"),
-            "app files must not be returned: {rels:?}"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
-    }
-
-    // WS3-1: whole-pool vendored embed skips tests/specs, source maps, and type
-    // declarations, but keeps real source (including .ts) modules.
-    #[test]
-    fn collect_vendored_skips_noise_files() {
-        let cwd = scratch();
-        mk(
-            &cwd,
-            "vendored/ws/package.json",
-            r#"{"name":"ws","version":"1.0.0"}"#,
-        );
-        mk(&cwd, "vendored/ws/index.js", "export const i = 1;\n");
-        mk(&cwd, "vendored/ws/mod.ts", "export const t = 1;\n"); // real .ts source kept
-        mk(&cwd, "vendored/ws/lib_test.ts", "export const t = 1;\n");
-        mk(&cwd, "vendored/ws/spec.test.js", "export const t = 1;\n");
-        mk(&cwd, "vendored/ws/y.spec.ts", "export const t = 1;\n");
-        mk(&cwd, "vendored/ws/index.js.map", "{}");
-        mk(
-            &cwd,
-            "vendored/ws/index.d.ts",
-            "export declare const i: number;\n",
-        );
-        let files = collect_vendored(&cwd).unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
-        assert_eq!(
-            rels,
-            vec![
-                "vendored/ws/index.js",
-                "vendored/ws/mod.ts",
-                "vendored/ws/package.json",
-            ],
-            "{rels:?}"
-        );
-        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]

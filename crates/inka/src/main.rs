@@ -2,20 +2,17 @@
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>]
 //               [--runtime <spec>] [--tested-against <ver>] [-P <name>]
-//               [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
+//               [--transpile] [--embed-dir]
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
-//   inka install [pkg[@ver]...]   vendor this project's dependencies
 //   inka list [--home <dir>]
 
 mod build;
 mod config;
 mod embed;
-mod pkg;
 mod run;
 mod transpile;
 mod update;
-mod vendor;
 
 use std::env;
 use std::fmt;
@@ -50,7 +47,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka install [pkg[@ver]...]  vendor this project's dependencies (or `inka add`)\n  inka list [--home <dir>]\n  inka add <pkg[@ver]>        vendor a package not in the default store\n  inka remove <pkg>           un-vendor a package (+ prune orphaned vendored deps)\n  inka vendor list|status|release|ignore\n  inka doctor                 print a diagnostic report (runtimes, store, vendored)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
     );
     std::process::exit(2);
 }
@@ -89,11 +86,6 @@ pub(crate) fn inka_data_dir() -> PathBuf {
 /// Per-user runtime dir: `<data>/inka/runtime`.
 pub(crate) fn user_runtime_dir() -> PathBuf {
     inka_data_dir().join("runtime")
-}
-
-/// Per-user default package store: `<data>/inka/store`.
-pub(crate) fn default_store_dir() -> PathBuf {
-    inka_data_dir().join("store")
 }
 
 /// Where a runtime install/update writes when `--home` is not given:
@@ -139,25 +131,9 @@ fn main() {
         "build" => build::cmd_build(&args[1..]),
         "update" => update::cmd_update(&args[1..]),
         "list" => cmd_list(&args[1..]),
-        "install" => vendor::cmd_install(&args[1..]),
-        "add" => vendor::cmd_add(&args[1..]),
-        "remove" => vendor::cmd_remove(&args[1..]),
-        "vendor" => vendor::cmd_vendor(&args[1..]),
         "doctor" => cmd_doctor(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
-        "internal" => cmd_internal(&args[1..]),
         _ => usage(),
-    }
-}
-
-/// Hidden release-time tooling (not advertised in `usage`).
-fn cmd_internal(args: &[String]) {
-    match args.first().map(String::as_str) {
-        Some("snapshot-store") => pkg::cmd_snapshot_store(&args[1..]),
-        _ => {
-            eprintln!("error: unknown internal command");
-            std::process::exit(2);
-        }
     }
 }
 
@@ -337,81 +313,6 @@ pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> Vec<(Version, PathBuf)> {
     found
 }
 
-// ---- helpers ---------------------------------------------------------------
-
-/// Count package roots (dirs with package.json, one level deep; scope containers
-/// count their children) under a node_modules-style pool root.
-fn pool_package_count(pool: &Path) -> usize {
-    let nm = pool.join("node_modules");
-    let root = if nm.is_dir() { &nm } else { pool };
-    let Ok(rd) = fs::read_dir(root) else {
-        return 0;
-    };
-    let mut n = 0usize;
-    for ent in rd.flatten() {
-        let p = ent.path();
-        let name = ent.file_name().to_string_lossy().into_owned();
-        if p.join("package.json").is_file() {
-            n += 1;
-        } else if name.starts_with('@') {
-            if let Ok(sub) = fs::read_dir(&p) {
-                n += sub
-                    .flatten()
-                    .filter(|s| s.path().join("package.json").is_file())
-                    .count();
-            }
-        }
-    }
-    n
-}
-
-fn seed_sha(store: &Path) -> String {
-    fs::read(store.join("seed-manifest.json"))
-        .ok()
-        .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-        .and_then(|v| {
-            v.get("sha256")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-        })
-        .unwrap_or_default()
-}
-
-/// Generic read of a vendored.lock (never fails the report).
-fn lock_summary(lock_path: &Path) -> (usize, Option<String>) {
-    let Ok(raw) = fs::read_to_string(lock_path) else {
-        return (0, None);
-    };
-    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return (0, None);
-    };
-    let entries = v
-        .get("entries")
-        .and_then(serde_json::Value::as_object)
-        .map(|o| o.len())
-        .unwrap_or(0);
-    let store = v
-        .get("store")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    (entries, store)
-}
-
-fn git_posture(vendored: &Path) -> String {
-    let gi = vendored.parent().unwrap_or(vendored).join(".gitignore");
-    match fs::read_to_string(&gi) {
-        Ok(text)
-            if text
-                .lines()
-                .any(|l| l.trim().trim_end_matches('/') == "vendored") =>
-        {
-            "ignore (dev)".to_string()
-        }
-        Ok(_) => "commit (release)".to_string(),
-        Err(_) => "no .gitignore".to_string(),
-    }
-}
-
 fn cmd_doctor(args: &[String]) {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("usage: inka doctor");
@@ -432,58 +333,6 @@ fn cmd_doctor(args: &[String]) {
     }
     for (v, p) in &runtimes {
         println!("  runtime {v}  {}", p.display());
-    }
-
-    let store = crate::vendor::store_dir();
-    let store_present = store.join("node_modules").is_dir();
-    let sha = seed_sha(&store);
-    println!(
-        "default store: {} ({}) packages={} sha={}",
-        store.display(),
-        if store_present { "present" } else { "absent" },
-        pool_package_count(&store),
-        if sha.is_empty() { "(none)" } else { &sha },
-    );
-
-    let vendored = crate::vendor::vendor_root();
-    let vendored_count = pool_package_count(&vendored);
-    println!("vendored pool (cwd): {vendored_count} package root(s)");
-    if vendored_count > 0 {
-        let posture = git_posture(&vendored);
-        let ignored = posture == "ignore (dev)";
-        println!(
-            "git posture: {} (vendored/ {})",
-            posture,
-            if ignored { "ignored" } else { "not ignored" }
-        );
-    }
-
-    let (lock_entries, lock_store) = lock_summary(&vendored.join("vendored.lock"));
-    if lock_entries > 0 {
-        println!(
-            "vendored.lock: {lock_entries} entr{}",
-            if lock_entries == 1 { "y" } else { "ies" }
-        );
-        let current = format!(
-            "{} sha256={}",
-            store.display(),
-            if sha.is_empty() {
-                "no-sha-record"
-            } else {
-                &sha
-            }
-        );
-        match lock_store {
-            Some(recorded) if recorded != current && store_present => {
-                warnings.push(format!(
-                    "vendored set was built against a different default store ({recorded}); reseed or vendor the affected deps"
-                ));
-            }
-            _ => {}
-        }
-        if !store_present {
-            warnings.push("default store is missing but vendored.lock records deps it would provide; reseed or vendor the affected deps".into());
-        }
     }
 
     if warnings.is_empty() {
@@ -544,13 +393,9 @@ mod tests {
     }
 
     #[test]
-    fn xdg_store_and_runtime_are_siblings_under_inka() {
+    fn xdg_runtime_is_under_inka() {
         // Derived from data_root; assert the shape without touching the env.
         let root = data_root(Some(os("/home/u")), None);
-        assert_eq!(
-            root.join("inka/store"),
-            PathBuf::from("/home/u/.local/share/inka/store")
-        );
         assert_eq!(
             root.join("inka/runtime"),
             PathBuf::from("/home/u/.local/share/inka/runtime")
