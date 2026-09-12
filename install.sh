@@ -250,6 +250,11 @@ else
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi
 
+# 0.3.0+ no longer ships the CJS patcher or curated patches. Remove any left
+# behind by an older toolchain (tar extraction never deletes extra files).
+rm -f "$PREFIX/lib/inka/inka-patcher"
+rm -rf "$PREFIX/lib/inka/patches"
+
 mkdir -p "$PREFIX/bin"
 ln -sf ../lib/inka/inka "$PREFIX/bin/inka"
 

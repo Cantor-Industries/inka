@@ -90,6 +90,12 @@ inka update               # toolchain + runtime + resolver + store, newest
 inka update <ver> --from <base>   # a specific runtime tuple (offline/pinned)
 ```
 
+> **Coming from 0.2.2?** `inka update` can't self-update the 0.2.2 toolchain to
+> 0.3.0 — the 0.2.2 updater expects an `inka-patcher` binary that 0.3.0 dropped,
+> so it warns and leaves the old CLI. Re-run `install.sh` once to replace the
+> toolchain (the runtime, resolver, and store are already updated). From 0.3.0
+> on, `inka update` self-updates normally.
+
 `inka update` reconciles every component against `<base>/versions.json`:
 
 - **toolchain** — self-updates when a newer release exists (only for

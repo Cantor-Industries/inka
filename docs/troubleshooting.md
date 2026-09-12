@@ -43,3 +43,9 @@ identity (`inka doctor`).
 **`inka update` can't reach the channel.** Set `INKA_RELEASE_BASE` (or pass
 `--from`) to a reachable release base; `inka update <ver> --from <dir>` works
 fully offline against a local directory.
+
+**`inka update` didn't upgrade the toolchain from 0.2.2 to 0.3.0.** The 0.2.2
+self-updater expects an `inka-patcher` binary that 0.3.0 no longer ships, so it
+warns and leaves the old CLI in place. Re-run `install.sh` (the same command you
+installed with) to replace the toolchain; the runtime, resolver, and store were
+already updated. From 0.3.0 on, `inka update` self-updates normally.
