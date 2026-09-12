@@ -132,18 +132,51 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
 
-            ## Highlights
+            0.4.0 is a **breaking release**. The standalone import resolver was
+            retired and ESM/CommonJS resolution is now unified on Deno's
+            store-backed `NodeResolver`. Runtime tuple `${{ env.RUNTIME }}` is
+            required.
 
-            - **Clean break from 0.3.x.** The import resolver was retired and the
-              runtime tuple moved to ${{ env.RUNTIME }}. Re-run `install.sh`
-              once: it detects a pre-0.4.0 install and resets the old toolchain,
-              runtime, and store before provisioning 0.4.0 fresh. `inka update`
-              alone will not cross this boundary.
-            - **One resolution policy.** ESM `import` and CJS `require()` now
-              share Deno's store-backed `NodeResolver`; `libinka_resolver-*.so`
-              is no longer built, shipped, or installed.
-            - **Native `.node` addons** load (opt-in via `ffi`/`sys`), and
-              `--vendor-closure` now follows CommonJS `require()` too.
+            ## Breaking changes
+
+            - **The `libinka_resolver-*.so` component is gone.** There is no
+              resolver asset, no `INKA_RESOLVER`, and no resolver step in
+              `install.sh`/`inka update`. `import` and `require()` now share one
+              resolution policy (project `vendored/` → default store →
+              builtins), including the jsr npm-mirror (`@std/assert` →
+              `@jsr/std__assert`) and `npm:`/`jsr:` version pins.
+            - **Runtime floor raised to `>=0.266.4`.** Artifacts built with 0.4.0
+              will not run on older tuples, which still expect the retired
+              resolver.
+            - **`inka update` will not cross the 0.3.x → 0.4.0 boundary.** Re-run
+              `install.sh`; it detects a pre-0.4.0 install and resets the old
+              toolchain, runtime, and store before provisioning 0.4.0 fresh.
+
+            ## Upgrade from 0.3.x
+
+            ```sh
+            curl --proto '=https' --tlsv1.2 -fsSL \
+              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
+            ```
+
+            From 0.4.0 onward, `inka update` self-updates normally.
+
+            ## What's new
+
+            - **One resolution path.** ESM `import` and CJS `require()` both go
+              through the store-backed `NodeResolver`; the vendored-first
+              precedence and jsr mirror live in the resolver adapters.
+            - **`inka build --vendor-closure` follows CommonJS `require()`**, so
+              vendored CJS packages and their CJS dependencies are embedded
+              correctly (previously only ESM imports were walked).
+            - **Native `.node` (N-API) addons** load — opt-in via `ffi` (plus
+              `sys` for platform detection such as `detect-libc`).
+            - **Cleaner installs.** The installer performs a one-time reset of
+              pre-0.4.0 state (toolchain, runtime, store) so the break is a clean
+              slate; later 0.4.x installs are ordinary upgrades.
+            - **CI hardening.** `rustfmt` + `clippy -D warnings` run on the fast
+              crates, and the runtime contract matrix now runs on the
+              self-hosted runner for runtime-affecting PRs.
 
             ## Install
 
