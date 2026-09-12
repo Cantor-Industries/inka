@@ -28,7 +28,9 @@ on:
       - 'crates/inka/**'
       - 'crates/inka-resolver/**'
       - 'scripts/ci/runtime-matrix.sh'
+      - 'scripts/ci/deno-pins.sh'
       - 'seed-manifest.json'
+      - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/runtime-ci.yml'
 
