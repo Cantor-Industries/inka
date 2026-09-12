@@ -20,7 +20,7 @@ CRATE="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' "$ROOT/crates/inka/Cargo
 [ -n "$CRATE" ] || { echo "error: could not parse the inka crate version" >&2; exit 1; }
 [ "$CRATE" = "$REL" ] || { echo "error: tag '$TAG' does not match inka crate version '$CRATE'" >&2; exit 1; }
 
-# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.2.
+# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.4.
 RUNTIME="$(tr -d '[:space:]' < "$ROOT/crates/inka-runtime/runtime-version" 2>/dev/null || true)"
 [ -n "$RUNTIME" ] || { echo "error: could not read crates/inka-runtime/runtime-version" >&2; exit 1; }
 

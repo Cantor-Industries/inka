@@ -10,7 +10,7 @@ RUNTIME_VERSION_FILE="$ROOT/crates/inka-runtime/runtime-version"
 [ -f "$CARGO_TOML" ] || { echo "error: missing $CARGO_TOML" >&2; exit 1; }
 [ -f "$RUNTIME_VERSION_FILE" ] || { echo "error: missing $RUNTIME_VERSION_FILE" >&2; exit 1; }
 
-# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.2.
+# The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.4.
 RUNTIME="$(tr -d '[:space:]' < "$RUNTIME_VERSION_FILE")"
 [ -n "$RUNTIME" ] || { echo "error: $RUNTIME_VERSION_FILE is empty" >&2; exit 1; }
 

@@ -34,7 +34,7 @@ fn help() -> ! {
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-         \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.3' or '==0.266.3' (overrides config)\n\
+         \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.4' or '==0.266.4' (overrides config)\n\
          \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
          \x20 -P, --permission-set <name>  use this named permission set from the config\n\
          \x20     --transpile       compile TypeScript to JavaScript now (single- and multi-file; default: the runtime transpiles at load)\n\
@@ -443,7 +443,7 @@ fn manifest_set_key(bytes: &mut Vec<u8>, key: &str, value: &str) {
     *bytes = joined.into_bytes();
 }
 
-/// Turn a runtime spec like `>=0.266.3` / `==0.266.3` / `0.266.3` into a
+/// Turn a runtime spec like `>=0.266.4` / `==0.266.4` / `0.266.4` into a
 /// `runtime=inka_runtime…` value.
 fn runtime_value(spec: &str) -> String {
     let spec = spec.trim();
@@ -466,7 +466,7 @@ fn resolve_manifest(
 ) -> (Vec<u8>, Vec<String>) {
     // Must track `crates/inka-runtime/runtime-version`: an older runtime needs
     // the retired resolver, which this toolchain no longer installs.
-    const DEFAULT_RUNTIME: &str = ">=0.266.3";
+    const DEFAULT_RUNTIME: &str = ">=0.266.4";
 
     let syn = crate::config::synthesize_manifest(cwd, perm_set);
     let mut bytes = syn.bytes;
@@ -542,7 +542,7 @@ mod tests {
     fn default_runtime_floor_always_embedded() {
         let cwd = scratch();
         let m = manifest(&cwd, None, None, None);
-        assert!(m.contains("runtime=inka_runtime>=0.266.3"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.4"), "{m}");
         assert!(!m.contains("allow-"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }

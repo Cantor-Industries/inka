@@ -4355,7 +4355,7 @@ dependencies = [
 
 [[package]]
 name = "inka"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "deno_ast",
  "libc",
@@ -4368,14 +4368,14 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "libloading 0.8.9",
 ]
 
 [[package]]
 name = "inka-runtime"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4390,7 +4390,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.3.1"
+version = "0.4.0"
 
 [[package]]
 name = "inotify"
