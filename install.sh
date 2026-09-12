@@ -3,7 +3,7 @@
 #
 # Downloads the inka toolchain (CLI + launcher),
 # installs it under <prefix>/lib/inka with a symlink in <prefix>/bin, then
-# provisions the shared runtime, resolver, and package store via `inka update`.
+# provisions the shared runtime and package store via `inka update`.
 # Like rustup, it installs per-user (no root) and never touches the engine
 # copies already present unless a newer version is published.
 #
@@ -17,9 +17,8 @@
 #       --from <dir-or-url> release base override (mirrors, local staging)
 #       --prefix <dir>     toolchain prefix (default: $HOME/.local)
 #       --no-modify-path   do not edit shell rc files
-#       --no-engine        skip runtime + resolver (the store still seeds)
+#       --no-engine        skip the runtime (the store still seeds)
 #       --no-runtime       skip the runtime .so
-#       --no-resolver      skip the resolver .so
 #       --no-store         skip the package store snapshot
 #       --force            reinstall the toolchain even if current
 #       --uninstall        remove the toolchain (and engine) and exit
@@ -47,10 +46,9 @@ options:
       --from <dir-or-url> release base override (mirrors, local staging)
       --prefix <dir>      toolchain prefix (default: $HOME/.local)
       --no-modify-path    do not edit shell rc files
-      --no-engine         skip runtime + resolver (the store still seeds unless
+      --no-engine         skip the runtime (the store still seeds unless
                           --no-store)
       --no-runtime        skip the runtime .so
-      --no-resolver       skip the resolver .so
       --no-store          skip the package store snapshot
       --force             reinstall the toolchain even if current
       --uninstall         remove the toolchain (and engine) and exit
@@ -155,7 +153,6 @@ FROM=""
 PREFIX="${INKA_PREFIX:-$HOME/.local}"
 MODIFY_PATH=1
 NO_RUNTIME=0
-NO_RESOLVER=0
 NO_STORE=0
 FORCE=0
 UNINSTALL=0
@@ -167,9 +164,8 @@ while [ $# -gt 0 ]; do
         --from) FROM="${2:?--from needs a value}"; shift ;;
         --prefix) PREFIX="${2:?--prefix needs a dir}"; shift ;;
         --no-modify-path) MODIFY_PATH=0 ;;
-        --no-engine) NO_RUNTIME=1; NO_RESOLVER=1 ;;
+        --no-engine) NO_RUNTIME=1 ;;
         --no-runtime) NO_RUNTIME=1 ;;
-        --no-resolver) NO_RESOLVER=1 ;;
         --no-store) NO_STORE=1 ;;
         --force) FORCE=1 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -266,14 +262,11 @@ if [ "$MODIFY_PATH" = 1 ]; then
 fi
 
 # ---- provision engine -------------------------------------------------------
-# Runtime + resolver first, then the package store as its own step (so the store
-# seeds independently and is visible in the install output).
-if [ "$NO_RUNTIME" = 0 ] || [ "$NO_RESOLVER" = 0 ]; then
-    info "installing runtime and resolver from $BASE"
-    set -- update --from "$BASE" --no-toolchain --no-store
-    [ "$NO_RUNTIME" = 1 ] && set -- "$@" --no-runtime
-    [ "$NO_RESOLVER" = 1 ] && set -- "$@" --no-resolver
-    "$PREFIX/lib/inka/inka" "$@"
+# Runtime first, then the package store as its own step (so the store seeds
+# independently and is visible in the install output).
+if [ "$NO_RUNTIME" = 0 ]; then
+    info "installing runtime from $BASE"
+    "$PREFIX/lib/inka/inka" update --from "$BASE" --no-toolchain --no-store
 fi
 
 if [ "$NO_STORE" = 0 ]; then

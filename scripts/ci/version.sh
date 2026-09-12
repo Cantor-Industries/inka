@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Release version discovery for the tag-triggered CI.
 # Prints: release=<tag minus v>  runtime=<runtime tuple version>
-#         deno=<deno_runtime base pin>  resolver=<resolver crate version>
+#         deno=<deno_runtime base pin>
 #
 # usage: version.sh <tag>
 set -euo pipefail
@@ -29,11 +29,6 @@ DENO="$(sed -n 's/.*deno_runtime = { version = "=\([0-9][0-9.]*\)".*/\1/p' \
     "$ROOT/crates/inka-runtime/Cargo.toml" | head -1 || true)"
 [ -n "$DENO" ] || { echo "error: could not parse deno_runtime version" >&2; exit 1; }
 
-RES="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' \
-    "$ROOT/crates/inka-resolver/Cargo.toml" | head -1 || true)"
-[ -n "$RES" ] || RES="1.0.0"
-
 echo "release=$REL"
 echo "runtime=$RUNTIME"
 echo "deno=$DENO"
-echo "resolver=$RES"

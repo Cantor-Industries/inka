@@ -5,7 +5,6 @@
 #   install.sh, versions.json
 #   inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz  (+ .sha256)
 #   libinka_runtime-<runtime>.so                          (+ .sha256)
-#   libinka_resolver-<resolver>.so                        (+ .sha256)
 #   store.tar.gz, store.tar.gz.sha256, seed-manifest.json
 #
 # Installs through install.sh into a throwaway prefix/store so the host's own

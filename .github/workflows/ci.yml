@@ -58,11 +58,10 @@ jobs:
       - name: Clippy (fast crates, deny warnings)
         run: |
           set -euo pipefail
-          cargo clippy -p inka --bin inka -p inka-launcher -p inka-resolver -p inka-runtime-stub -- -D warnings
+          cargo clippy -p inka --bin inka -p inka-launcher -p inka-runtime-stub -- -D warnings
 
       - name: Fast-crate tests
         run: |
           set -euo pipefail
           cargo test -p inka --bin inka
-          cargo test -p inka-resolver
           cargo build -p inka-launcher -p inka-runtime-stub

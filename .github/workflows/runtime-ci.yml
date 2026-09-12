@@ -15,7 +15,6 @@ on:
     paths:
       - 'crates/inka-runtime/**'
       - 'crates/inka/**'
-      - 'crates/inka-resolver/**'
       - 'scripts/ci/runtime-matrix.sh'
       - 'scripts/ci/deno-pins.sh'
       - 'seed-manifest.json'
@@ -27,7 +26,6 @@ on:
     paths:
       - 'crates/inka-runtime/**'
       - 'crates/inka/**'
-      - 'crates/inka-resolver/**'
       - 'scripts/ci/runtime-matrix.sh'
       - 'scripts/ci/deno-pins.sh'
       - 'seed-manifest.json'
@@ -58,17 +56,15 @@ jobs:
         run: |
           set -euo pipefail
           : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
-          cargo build --release -p inka -p inka-resolver -p inka-runtime
+          cargo build --release -p inka -p inka-runtime
 
-      - name: Stage runtime + resolver for the matrix
+      - name: Stage runtime for the matrix
         run: |
           set -euo pipefail
           runtime="$(tr -d '[:space:]' < crates/inka-runtime/runtime-version)"
-          resolver="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' crates/inka-resolver/Cargo.toml | head -1)"
           home="${RUNNER_TEMP:-/tmp}/inka-runtime"
           mkdir -p "$home"
           cp "$CARGO_TARGET_DIR/release/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
-          cp "$CARGO_TARGET_DIR/release/libinka_resolver.so" "$home/libinka_resolver-$resolver.so"
           echo "INKA_RUNTIME_HOME=$home" >> "$GITHUB_ENV"
 
       - name: Seed release store

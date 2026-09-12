@@ -58,13 +58,12 @@ jobs:
           echo "REL=$release" >> "$GITHUB_ENV"
           echo "RUNTIME=$runtime" >> "$GITHUB_ENV"
           echo "DENO=$deno" >> "$GITHUB_ENV"
-          echo "RES=$resolver" >> "$GITHUB_ENV"
-          echo "release=$release runtime=$runtime deno=$deno resolver=$resolver"
+          echo "release=$release runtime=$runtime deno=$deno"
 
       - name: Build toolchain
         run: |
           set -euo pipefail
-          cargo build --release -p inka -p inka-launcher -p inka-resolver
+          cargo build --release -p inka -p inka-launcher
 
       - name: Build runtime (always; tuple = runtime-version)
         run: |
@@ -92,15 +91,14 @@ jobs:
           chmod +x "$STAGE/inka" "$STAGE/inka-launcher"
           tar -czf "$STAGE/$TC" -C "$STAGE" inka inka-launcher
 
-          # Engine assets (always published; consumers keep only newer tuples).
-          cp "$BIN/libinka_resolver.so" "$STAGE/libinka_resolver-$RES.so"
+          # Engine asset (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$RUNTIME.so"
 
           # The bootstrap script itself.
           cp install.sh "$STAGE/install.sh"
 
           # sha256 sidecars (bare hex, as the installer/update expect).
-          for f in "$TC" "libinka_runtime-$RUNTIME.so" "libinka_resolver-$RES.so" store.tar.gz; do
+          for f in "$TC" "libinka_runtime-$RUNTIME.so" store.tar.gz; do
             (cd "$STAGE" && sha256sum "$f" | awk '{print $1}' > "$f.sha256")
           done
 
@@ -118,7 +116,6 @@ jobs:
             },
             "runtime": "$RUNTIME",
             "deno_runtime": "$DENO",
-            "resolver": "$RES",
             "runtime_sha256": "$RT_SHA"
           }
           EOF
@@ -133,19 +130,17 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: inka ${{ env.REL }}
           body: |
-            inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}), resolver ${{ env.RES }}.
+            inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
 
             ## Highlights
 
-            - **Native `.node` addons load.** The runtime is now dlopened
-              `RTLD_GLOBAL`, so N-API addons (e.g. `@parcel/watcher`) resolve the
-              `napi_*`/`uv_*` symbols they need instead of aborting with
-              `undefined symbol: napi_module_register`. Addons stay opt-in:
-              grant `ffi` (and `sys` for platform detection like `detect-libc`).
-            - **Cleaner 0.2.2 → 0.3.x upgrades.** `install.sh` now removes the
-              retired `inka-patcher` and `patches/` left behind by an older
-              install. If `inka update` won't move you off 0.2.2, re-run the
-              installer once.
+            - **The resolver is gone.** ESM import resolution is now unified on
+              Deno's store-backed `NodeResolver` — the same policy CJS
+              `require()` already used — so there is one resolution path for
+              `import` and `require`. `libinka_resolver-*.so` is no longer built,
+              shipped, or installed. Runtime tuple ${{ env.RUNTIME }} is required
+              (older runtimes still expect the resolver); `install.sh` /
+              `inka update` fetch it automatically.
 
             ## Install
 
@@ -154,19 +149,18 @@ jobs:
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
 
-            Then keep the toolchain, runtime, resolver, and store current with
+            Then keep the toolchain, runtime, and store current with
             `inka update`.
 
             ## Assets
 
             - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher
             - `libinka_runtime-${{ env.RUNTIME }}.so` — shared runtime tuple
-            - `libinka_resolver-${{ env.RES }}.so` — resolution engine
             - `store.tar.gz` + `seed-manifest.json` — default-store snapshot
             - `install.sh` + `versions.json` — bootstrap installer + version record
 
-            `.sha256` sidecars are published for the toolchain, runtime, resolver,
-            and store archives.
+            `.sha256` sidecars are published for the toolchain, runtime, and store
+            archives.
           generate_release_notes: true
           draft: false
           files: |
@@ -174,8 +168,6 @@ jobs:
             ${{ env.STAGE }}/inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz.sha256
             ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so
             ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so.sha256
-            ${{ env.STAGE }}/libinka_resolver-${{ env.RES }}.so
-            ${{ env.STAGE }}/libinka_resolver-${{ env.RES }}.so.sha256
             ${{ env.STAGE }}/store.tar.gz
             ${{ env.STAGE }}/store.tar.gz.sha256
             ${{ env.STAGE }}/seed-manifest.json
