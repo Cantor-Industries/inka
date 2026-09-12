@@ -13,9 +13,9 @@
 //   - `CjsCodeAnalyzer` / `CjsModuleExportAnalyzer` / `NodeCodeTranslator`,
 //   - the `deno_node` re-export path (`deno_runtime::deno_node`).
 //
-// This module is now the single resolution policy too: ESM `import` and CJS
-// `require()` both go through the store-backed `NodeResolver` here (vendored ->
-// store -> builtins precedence, jsr-mirror identities, `npm:`/`jsr:` pins).
+// This module is the single resolution policy too: ESM `import` and CJS
+// `require()` both go through the `NodeResolver` here, rooted at the execution
+// tree's `node_modules` (jsr-mirror identities, `npm:`/`jsr:` pins, builtins).
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -48,55 +48,30 @@ use sys_traits::impls::RealSys;
 
 use deno_semver::{Version, VersionReq};
 
-/// Filesystem roots a `require()` is allowed to reach without an explicit read
-/// grant: the shared store, the artifact's embedded `vendored/` tree, and the
-/// artifact tree itself. Reads outside these roots stay deny-by-default.
+/// Filesystem root a `require()` may reach without an explicit read grant: the
+/// execution tree (the project directory for `inka run`, the extracted tree for
+/// a built artifact). Reads outside it stay deny-by-default.
 #[derive(Clone, Default)]
-pub(crate) struct StoreRoots {
-    pub store: Option<PathBuf>,
-    pub vendor: Option<PathBuf>,
-    pub artifact: Option<PathBuf>,
+pub(crate) struct ExecutionRoots {
+    pub root: Option<PathBuf>,
 }
 
-impl StoreRoots {
+impl ExecutionRoots {
     fn contains(&self, path: &Path) -> bool {
-        [&self.store, &self.vendor, &self.artifact]
-            .into_iter()
-            .flatten()
-            .any(|root| path.starts_with(root))
+        self.root
+            .as_ref()
+            .is_some_and(|root| path.starts_with(root))
     }
 
-    /// The `node_modules` directory of the vendored tree
-    /// (`<INKA_VENDOR>/node_modules`), if a vendor root is configured.
-    fn vendor_node_modules(&self) -> Option<PathBuf> {
-        self.vendor.as_ref().map(|v| v.join("node_modules"))
+    /// The execution tree's `node_modules` (bring-your-own-node_modules).
+    fn node_modules(&self) -> Option<PathBuf> {
+        self.root.as_ref().map(|r| r.join("node_modules"))
     }
 
-    /// The project's own `node_modules` (`<artifact-root>/node_modules`): for
-    /// `inka run` this is the project directory, for a built artifact the
-    /// extracted tree. This is the bring-your-own-node_modules (BYONM) tier.
-    fn project_node_modules(&self) -> Option<PathBuf> {
-        self.artifact.as_ref().map(|a| a.join("node_modules"))
-    }
-
-    /// The default store's `node_modules` pool.
-    fn store_node_modules(&self) -> Option<PathBuf> {
-        self.store.as_ref().map(|s| s.join("node_modules"))
-    }
-
-    /// Under a `node_modules` directory of a trusted root (store/vendored/
-    /// project), or anywhere in the vendored tree. Used to default a `.js`
+    /// Under the execution tree's `node_modules`. Used to default a `.js`
     /// without an explicit `"type"` to CommonJS.
     fn in_package_root(&self, path: &Path) -> bool {
-        [
-            self.vendor_node_modules(),
-            self.project_node_modules(),
-            self.store_node_modules(),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|nm| path.starts_with(nm))
-            || self.vendor.as_ref().is_some_and(|v| path.starts_with(v))
+        self.node_modules().is_some_and(|nm| path.starts_with(nm))
     }
 }
 
@@ -159,9 +134,9 @@ fn package_name(spec: &str) -> String {
     }
 }
 
-/// Store/vendored identities a bare name may map to. A scoped `@scope/name`
-/// also tries the jsr npm-mirror identity `@jsr/scope__name` (jsr's convention),
-/// matching how the store ships `@std/assert` as `@jsr/std__assert`.
+/// Package identities a bare name may map to. A scoped `@scope/name` also
+/// tries the jsr npm-mirror identity `@jsr/scope__name` (jsr's convention,
+/// e.g. `@std/assert` as `@jsr/std__assert`).
 fn package_candidates(spec: &str) -> Vec<String> {
     let name = package_name(spec);
     let mut out = vec![name.clone()];
@@ -270,11 +245,11 @@ fn require_is_maybe_cjs(pkg_json: &PackageJsonResolver<RealSys>, path: &Path) ->
 }
 
 #[derive(Clone)]
-pub(crate) struct StoreNpmChecker {
-    roots: StoreRoots,
+pub(crate) struct ExecutionNpmChecker {
+    roots: ExecutionRoots,
 }
 
-impl InNpmPackageChecker for StoreNpmChecker {
+impl InNpmPackageChecker for ExecutionNpmChecker {
     fn in_npm_package(&self, specifier: &Url) -> bool {
         specifier
             .to_file_path()
@@ -284,11 +259,11 @@ impl InNpmPackageChecker for StoreNpmChecker {
 }
 
 #[derive(Clone)]
-pub(crate) struct StoreFolderResolver {
-    roots: StoreRoots,
+pub(crate) struct ExecutionFolderResolver {
+    roots: ExecutionRoots,
 }
 
-impl NpmPackageFolderResolver for StoreFolderResolver {
+impl NpmPackageFolderResolver for ExecutionFolderResolver {
     fn resolve_package_folder_from_package(
         &self,
         specifier: &str,
@@ -297,44 +272,16 @@ impl NpmPackageFolderResolver for StoreFolderResolver {
         let candidates = package_candidates(specifier);
         let ref_path = referrer.path().ok();
 
-        // Resolution roots in precedence order, each with whether the referrer
-        // lives inside that tree (so it resolves via the nearest-`node_modules`
-        // walk) or only contributes its hoisted `node_modules/<name>`.
-        //
-        //   vendored  -> project node_modules (BYONM) -> default store
-        //
-        // A referrer inside the default store never consults vendored/project
-        // trees (store packages are machine-wide and self-contained).
-        let in_store =
-            ref_path.is_some_and(|p| self.roots.store.as_ref().is_some_and(|s| p.starts_with(s)));
-        let mut order: Vec<(PathBuf, bool)> = Vec::new();
-        if in_store {
-            if let Some(nm) = self.roots.store_node_modules() {
-                order.push((nm, true));
-            }
-        } else {
-            let in_vendor = ref_path
-                .is_some_and(|p| self.roots.vendor.as_ref().is_some_and(|v| p.starts_with(v)));
-            if let Some(nm) = self.roots.vendor_node_modules() {
-                order.push((nm, in_vendor));
-            }
-            if let Some(nm) = self.roots.project_node_modules() {
-                order.push((nm, !in_vendor && ref_path.is_some()));
-            }
-            if let Some(nm) = self.roots.store_node_modules() {
-                order.push((nm, false));
-            }
-        }
-
-        for (nm, use_nearest) in &order {
-            let root = NodeModulesRoot::new(nm.clone());
+        // A single root: the execution tree's `node_modules`. A referrer inside
+        // the tree resolves via the nearest-`node_modules` walk (nested beats
+        // hoisted); a referrer outside it only reaches the hoisted
+        // `node_modules/<name>`.
+        if let Some(nm) = self.roots.node_modules() {
+            let root = NodeModulesRoot::new(nm);
             for name in &candidates {
-                let found = if *use_nearest {
-                    ref_path
-                        .and_then(|p| root.nearest(p, name))
-                        .or_else(|| root.hoisted(name))
-                } else {
-                    root.hoisted(name)
+                let found = match ref_path {
+                    Some(p) => root.nearest(p, name).or_else(|| root.hoisted(name)),
+                    None => root.hoisted(name),
                 };
                 if let Some(f) = found {
                     return Ok(f);
@@ -364,21 +311,20 @@ impl NpmPackageFolderResolver for StoreFolderResolver {
     }
 }
 
-struct StoreRequireLoader {
-    roots: StoreRoots,
+struct ExecutionRequireLoader {
+    roots: ExecutionRoots,
     pkg_json: PackageJsonResolverRc<RealSys>,
 }
 
-impl NodeRequireLoader for StoreRequireLoader {
+impl NodeRequireLoader for ExecutionRequireLoader {
     fn ensure_read_permission<'a>(
         &self,
         permissions: &mut PermissionsContainer,
         path: Cow<'a, Path>,
     ) -> Result<Cow<'a, Path>, JsErrorBox> {
-        // Reads inside the store/vendored/artifact roots are implicit (the
-        // packages are trusted and the ESM loader already confines module
-        // reads). Anything else is deny-by-default unless `--allow-read`
-        // grants it (Deno semantics).
+        // Reads inside the execution tree are implicit (the ESM loader already
+        // confines module reads). Anything else is deny-by-default unless
+        // `--allow-read` grants it (Deno semantics).
         if self.roots.contains(path.as_ref()) {
             return Ok(path);
         }
@@ -411,7 +357,7 @@ impl NodeRequireLoader for StoreRequireLoader {
 /// `cjs-module-lexer`-equivalent (`ParsedSource::analyze_cjs`). Parses the
 /// source so an ESM file in a package root is passed through untouched.
 struct InkaCjsCodeAnalyzer {
-    roots: StoreRoots,
+    roots: ExecutionRoots,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -427,7 +373,7 @@ impl CjsCodeAnalyzer for InkaCjsCodeAnalyzer {
             .map_err(|_| JsErrorBox::generic(format!("not a file URL: {specifier}")))?;
         if !self.roots.contains(&path) {
             return Err(JsErrorBox::generic(format!(
-                "refusing to analyze a CJS module outside the store/vendored tree: {specifier}"
+                "refusing to analyze a CJS module outside the execution tree: {specifier}"
             )));
         }
         let source = match maybe_source {
@@ -468,47 +414,47 @@ impl CjsCodeAnalyzer for InkaCjsCodeAnalyzer {
 
 type InkaAnalyzer = CjsModuleExportAnalyzerRc<
     InkaCjsCodeAnalyzer,
-    StoreNpmChecker,
+    ExecutionNpmChecker,
     DenoIsBuiltInNodeModuleChecker,
-    StoreFolderResolver,
+    ExecutionFolderResolver,
     RealSys,
 >;
 
 type InkaTranslator = NodeCodeTranslatorRc<
     InkaCjsCodeAnalyzer,
-    StoreNpmChecker,
+    ExecutionNpmChecker,
     DenoIsBuiltInNodeModuleChecker,
-    StoreFolderResolver,
+    ExecutionFolderResolver,
     RealSys,
 >;
 
 /// Node/CJS services the engine needs. `NodeServices::new` also returns the
 /// `NodeExtInitServices` value to hand to `WorkerServiceOptions`.
 pub(crate) type InkaNodeServices =
-    NodeExtInitServices<StoreNpmChecker, StoreFolderResolver, RealSys>;
+    NodeExtInitServices<ExecutionNpmChecker, ExecutionFolderResolver, RealSys>;
 
 #[derive(Clone)]
 pub(crate) struct NodeServices {
-    roots: StoreRoots,
+    roots: ExecutionRoots,
     pkg_json: PackageJsonResolverRc<RealSys>,
-    node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys>,
-    folder: StoreFolderResolver,
+    node_resolver: NodeResolverRc<ExecutionNpmChecker, ExecutionFolderResolver, RealSys>,
+    folder: ExecutionFolderResolver,
     analyzer: InkaAnalyzer,
     translator: InkaTranslator,
 }
 
 impl NodeServices {
-    pub(crate) fn new(roots: StoreRoots) -> (Self, InkaNodeServices) {
+    pub(crate) fn new(roots: ExecutionRoots) -> (Self, InkaNodeServices) {
         let sys = RealSys;
         let pkg_json: PackageJsonResolverRc<RealSys> =
             new_rc(PackageJsonResolver::new(sys.clone(), None));
-        let checker = StoreNpmChecker {
+        let checker = ExecutionNpmChecker {
             roots: roots.clone(),
         };
-        let folder = StoreFolderResolver {
+        let folder = ExecutionFolderResolver {
             roots: roots.clone(),
         };
-        let node_resolver: NodeResolverRc<StoreNpmChecker, StoreFolderResolver, RealSys> =
+        let node_resolver: NodeResolverRc<ExecutionNpmChecker, ExecutionFolderResolver, RealSys> =
             new_rc(NodeResolver::new(
                 checker.clone(),
                 DenoIsBuiltInNodeModuleChecker,
@@ -536,7 +482,7 @@ impl NodeServices {
             analyzer.clone(),
             NodeCodeTranslatorMode::ModuleLoader,
         ));
-        let node_require_loader: NodeRequireLoaderRc = Rc::new(StoreRequireLoader {
+        let node_require_loader: NodeRequireLoaderRc = Rc::new(ExecutionRequireLoader {
             roots: roots.clone(),
             pkg_json: pkg_json.clone(),
         });
@@ -559,15 +505,14 @@ impl NodeServices {
         )
     }
 
-    /// Resolve an ESM import specifier through deno's store-backed `NodeResolver`
-    /// (the same policy CJS `require()` uses): bare packages, `npm:`/`jsr:` pins
+    /// Resolve an ESM import specifier through deno's `NodeResolver` (the same
+    /// policy CJS `require()` uses): bare packages, `npm:`/`jsr:` pins
     /// (normalized to their npm identity), builtins, and relative/`file:`/`data:`
     /// specifiers. Network imports are rejected.
     pub(crate) fn resolve_specifier(&self, specifier: &str, referrer: &str) -> Result<Url, String> {
         if specifier.starts_with("http://") || specifier.starts_with("https://") {
             return Err(format!(
-                "network module imports are disabled ('{specifier}'); \
-                 vendor the package with `inka add` instead"
+                "network module imports are disabled ('{specifier}')"
             ));
         }
         if specifier.starts_with("npm:") || specifier.starts_with("jsr:") {
@@ -609,8 +554,7 @@ impl NodeServices {
             .map_err(|e| e.to_string())
     }
 
-    /// Enforce an `npm:`/`jsr:` version pin against the installed (vendored or
-    /// store) package, mirroring the retired resolver's check.
+    /// Enforce an `npm:`/`jsr:` version pin against the installed package.
     fn check_pin(&self, name: &str, req: &str, referrer: &Url) -> Result<(), String> {
         let referrer_ref = UrlOrPathRef::from_url(referrer);
         let Ok(pkg_root) = self
@@ -623,7 +567,7 @@ impl NodeServices {
             if !version_satisfies(&installed, req) {
                 return Err(format!(
                     "package '{name}' is installed at {installed}, which does not satisfy \
-                     '{req}'; run `inka update` to install the requested version"
+                     '{req}'"
                 ));
             }
         }

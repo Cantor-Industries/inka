@@ -49,31 +49,20 @@ deno_core::extension!(
     }
 );
 
-/// Store-backed module loader. Serves:
+/// Module loader rooted at the execution tree. Serves:
 ///   - the artifact tree (or the staged single-entry tree) — local files,
-///   - vendored `npm:`/`jsr:` packages from a global self-contained store,
-///   - `node:`/`data:`/`file:` built-ins (as before),
-/// and rejects network imports outright. Reading is confined to the artifact
-/// tree and the store; nothing outside those roots is ever served.
+///   - `node:`/`data:`/`file:` built-ins,
+/// and rejects network imports outright. Reading is confined to the execution
+/// tree; nothing outside it is ever served.
 struct PkgLoader {
-    /// Root of the artifact tree (or the staged temp tree for single-file runs).
+    /// Root of the execution tree (the artifact tree, or the staged temp tree
+    /// for single-file runs).
     artifact_root: PathBuf,
-    /// Root of the global package store (`<store>/node_modules/<name>/…`, one
-    /// hoisted pool).
-    store_root: Option<PathBuf>,
     /// True when the artifact's `.ts/.mts/.cts` payloads were transpiled at
     /// build time (`--transpile`); such files are served as plain JS.
     precompiled: bool,
     /// CJS/Node services used to serve an ESM facade for CommonJS modules.
     node_services: node_services::NodeServices,
-}
-
-fn store_root_env() -> Option<PathBuf> {
-    std::env::var_os("INKA_STORE").map(PathBuf::from)
-}
-
-fn vendor_root_env() -> Option<PathBuf> {
-    std::env::var_os("INKA_VENDOR").map(PathBuf::from)
 }
 
 fn precompiled_flag() -> bool {
@@ -87,7 +76,7 @@ impl ModuleLoader for PkgLoader {
         referrer: &str,
         _kind: deno_core::ResolutionKind,
     ) -> ModuleResolveResponse {
-        // All import-resolution policy lives in the store-backed node services
+        // All import-resolution policy lives in the node services
         // (deno's `NodeResolver`), the same seam CJS `require()` uses.
         self.node_services
             .resolve_specifier(specifier, referrer)
@@ -102,16 +91,13 @@ impl ModuleLoader for PkgLoader {
     ) -> ModuleLoadResponse {
         let specifier = module_specifier.clone();
         let artifact_root = self.artifact_root.clone();
-        let store_root = self.store_root.clone();
         let precompiled = self.precompiled;
         let node_services = self.node_services.clone();
         let fut = async move {
             let mut path = module_url_to_path(&specifier)?;
-            let in_artifact = path.starts_with(&artifact_root);
-            let in_store = store_root.as_ref().is_some_and(|s| path.starts_with(s));
-            if !in_artifact && !in_store {
+            if !path.starts_with(&artifact_root) {
                 return Err(JsErrorBox::generic(format!(
-                    "refusing to load module outside the artifact tree and package store: {specifier}"
+                    "refusing to load module outside the execution tree: {specifier}"
                 )));
             }
             // Deno-style resolution: an extensionless specifier like "./math"
@@ -130,11 +116,9 @@ impl ModuleLoader for PkgLoader {
                     path = p;
                 }
             }
-            let in_artifact = path.starts_with(&artifact_root);
-            let in_store = store_root.as_ref().is_some_and(|s| path.starts_with(s));
-            if !in_artifact && !in_store {
+            if !path.starts_with(&artifact_root) {
                 return Err(JsErrorBox::generic(format!(
-                    "refusing to load module outside the artifact tree and package store: {specifier}"
+                    "refusing to load module outside the execution tree: {specifier}"
                 )));
             }
             let bytes = std::fs::read(&path).map_err(|source| {
@@ -247,14 +231,14 @@ fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox
 }
 
 // ---- npm/node services -----------------------------------------------------
-// The store-backed node services live in `node_services` (the single seam over
+// The node services live in `node_services` (the single seam over
 // Deno's `deno_node`/`node_resolver` API). `WorkerServiceOptions` still needs
 // the checker/resolver generic parameters even though the concrete values are
 // built inside that module.
 
 type DrtServices = WorkerServiceOptions<
-    node_services::StoreNpmChecker,
-    node_services::StoreFolderResolver,
+    node_services::ExecutionNpmChecker,
+    node_services::ExecutionFolderResolver,
     RealSys,
 >;
 
@@ -506,9 +490,9 @@ fn transpile_ts_source(
     Ok(js.as_bytes().to_vec())
 }
 
-/// Runs an entry module from a tree (`dir`/`entry`) through the store-aware
-/// `PkgLoader`. Used by both multi-file artifacts and the staged single-entry
-/// trees that `run_inner` builds.
+/// Runs an entry module from a tree (`dir`/`entry`) through the `PkgLoader`.
+/// Used by both multi-file artifacts and the staged single-entry trees that
+/// `run_inner` builds.
 fn run_tree(
     dir: &str,
     entry: &str,
@@ -536,17 +520,12 @@ fn run_tree(
     rt.block_on(async {
         let url = ModuleSpecifier::from_file_path(&file)
             .map_err(|_| format!("failed to derive file url for {entry}"))?;
-        let store_root = store_root_env();
-        let vendor_root = vendor_root_env();
-        let roots = node_services::StoreRoots {
-            store: store_root.clone(),
-            vendor: vendor_root.clone(),
-            artifact: Some(root.clone()),
+        let roots = node_services::ExecutionRoots {
+            root: Some(root.clone()),
         };
         let (node_services, ext_services) = node_services::NodeServices::new(roots);
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root,
-            store_root,
             precompiled: precompiled_flag(),
             node_services,
         });
@@ -563,8 +542,8 @@ fn run_inner(
     let nonce = format!("{}-{}", std::process::id(), args.len());
 
     // Stage the single entry as its own one-file tree so it goes through the
-    // same store-aware loader path as multi-file artifacts (so npm:/jsr:
-    // imports work identically in both). TS entries are transpiled to JS first.
+    // same loader path as multi-file artifacts. TS entries are transpiled to JS
+    // first.
     let dir = std::env::temp_dir().join(format!("inka-{nonce}"));
     std::fs::create_dir_all(&dir).map_err(|e| format!("failed to stage module tree: {e}"))?;
 
@@ -589,7 +568,7 @@ fn run_inner(
 }
 
 /// Runs an entry module from a staged multi-file artifact tree (`dir`/`entry`),
-/// resolving relative imports and vendored packages via `PkgLoader`.
+/// resolving relative imports and packages via `PkgLoader`.
 fn run_dir_inner(
     dir: &str,
     entry: &str,
