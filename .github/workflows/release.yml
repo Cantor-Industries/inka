@@ -134,13 +134,16 @@ jobs:
 
             ## Highlights
 
-            - **The resolver is gone.** ESM import resolution is now unified on
-              Deno's store-backed `NodeResolver` — the same policy CJS
-              `require()` already used — so there is one resolution path for
-              `import` and `require`. `libinka_resolver-*.so` is no longer built,
-              shipped, or installed. Runtime tuple ${{ env.RUNTIME }} is required
-              (older runtimes still expect the resolver); `install.sh` /
-              `inka update` fetch it automatically.
+            - **Clean break from 0.3.x.** The import resolver was retired and the
+              runtime tuple moved to ${{ env.RUNTIME }}. Re-run `install.sh`
+              once: it detects a pre-0.4.0 install and resets the old toolchain,
+              runtime, and store before provisioning 0.4.0 fresh. `inka update`
+              alone will not cross this boundary.
+            - **One resolution policy.** ESM `import` and CJS `require()` now
+              share Deno's store-backed `NodeResolver`; `libinka_resolver-*.so`
+              is no longer built, shipped, or installed.
+            - **Native `.node` addons** load (opt-in via `ffi`/`sys`), and
+              `--vendor-closure` now follows CommonJS `require()` too.
 
             ## Install
 

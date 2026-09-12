@@ -51,7 +51,7 @@ than `latest`:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/Cantor-Industries/inka/releases/download/v0.3.1/install.sh | sh
+  https://github.com/Cantor-Industries/inka/releases/download/v0.4.0/install.sh | sh
 ```
 
 `install.sh --help` lists everything.
@@ -90,10 +90,11 @@ inka update               # toolchain + runtime + store, newest
 inka update <ver> --from <base>   # a specific runtime tuple (offline/pinned)
 ```
 
-> **Coming from 0.2.2?** `inka update` can't self-update the 0.2.2 toolchain to
-> 0.3.0 — the 0.2.2 updater expects an `inka-patcher` binary that 0.3.0 dropped,
-> so it warns and leaves the old CLI. Re-run `install.sh` once to replace the
-> toolchain (the runtime and store are already updated). From 0.3.0
+> **Coming from 0.3.x?** 0.4.0 is a clean break: the resolver was retired
+> (resolution is now unified on Deno's `NodeResolver`) and the runtime tuple
+> moved to `0.266.4`. Just re-run `install.sh` once — it detects a pre-0.4.0
+> install and resets the old toolchain, runtime, and store before provisioning
+> the new release. `inka update` alone will not cross this boundary. From 0.4.0
 > on, `inka update` self-updates normally.
 
 `inka update` reconciles every component against `<base>/versions.json`:
@@ -154,9 +155,9 @@ This removes the toolchain, the `PATH` block, and `~/.local/share/inka`
 
 Two independent version lines:
 
-- **Toolchain** — the release tag (`v0.3.1`); the `inka` crate version tracks it.
+- **Toolchain** — the release tag (`v0.4.0`); the `inka` crate version tracks it.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
-  revision: `0.266.0` → `0.266.1`, `0.266.2`, …; when the base moves to
+  revision: `0.266.0` → `0.266.1`, …, `0.266.4`; when the base moves to
   `0.267.0`, revisions restart at `0.267.1`. See
   `crates/inka-runtime/runtime-version`.
 

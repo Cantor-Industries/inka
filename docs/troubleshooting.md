@@ -40,8 +40,12 @@ identity (`inka doctor`).
 `--from`) to a reachable release base; `inka update <ver> --from <dir>` works
 fully offline against a local directory.
 
-**`inka update` didn't upgrade the toolchain from 0.2.2 to 0.3.0.** The 0.2.2
-self-updater expects an `inka-patcher` binary that 0.3.0 no longer ships, so it
-warns and leaves the old CLI in place. Re-run `install.sh` (the same command you
-installed with) to replace the toolchain; the runtime and store were
-already updated. From 0.3.0 on, `inka update` self-updates normally.
+**Coming from 0.3.x (or older) to 0.4.0.** 0.4.0 is a clean break: the resolver
+was retired and the runtime tuple moved to `0.266.4`. `inka update` will not
+cross this boundary — re-run `install.sh` (the same command you installed with).
+It detects the pre-0.4.0 install and resets the old toolchain, runtime, and store
+before provisioning 0.4.0. From 0.4.0 on, `inka update` self-updates normally.
+
+**Leftover `libinka_resolver-*.so` or old `libinka_runtime-*.so`.** These are
+pre-0.4.0 engine files. The 0.4.0 `install.sh` removes them during its reset;
+`inka doctor` no longer reports a resolver.
