@@ -28,8 +28,8 @@ fi
 
 # Every Deno-project dependency must be an exact (=) pin.
 for dep in deno_core deno_runtime deno_semver deno_error node_resolver sys_traits deno_ast; do
-    if grep -qE "^[[:space:]]*$dep[[:space:]]*=" "$CARGO_TOML"; then
-        if ! grep -qE "^[[:space:]]*$dep[[:space:]]*=.*\"=" "$CARGO_TOML"; then
+    if grep -qE "^[[:space:]]*${dep}[[:space:]]*=" "$CARGO_TOML"; then
+        if ! grep -qE "^[[:space:]]*${dep}[[:space:]]*=.*\"=" "$CARGO_TOML"; then
             echo "error: $dep is not pinned exactly (expected \"=<version>\")" >&2
             exit 1
         fi
