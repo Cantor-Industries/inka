@@ -7,8 +7,8 @@
 #
 # usage: runtime-matrix.sh [path-to-inka]
 #
-# jsr (`@std/assert`), release-package, and native-addon checks are deferred
-# until the runtime gains the Deno resolver (C2b).
+# Includes jsr import-map (offline Deno cache), release-package, and
+# native-addon checks; those skip when their inputs are unavailable.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

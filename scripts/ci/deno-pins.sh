@@ -26,14 +26,18 @@ if [ "$runtime_base" != "$deno_base" ]; then
     exit 1
 fi
 
-# Every Deno-project dependency must be an exact (=) pin.
-for dep in deno_core deno_runtime deno_semver deno_error node_resolver sys_traits deno_ast; do
-    if grep -qE "^[[:space:]]*${dep}[[:space:]]*=" "$CARGO_TOML"; then
-        if ! grep -qE "^[[:space:]]*${dep}[[:space:]]*=.*\"=" "$CARGO_TOML"; then
-            echo "error: $dep is not pinned exactly (expected \"=<version>\")" >&2
-            exit 1
+# Every Deno-project dependency must be an exact (=) pin, in every crate that
+# names one (the runtime engine and the bundler).
+for toml in "$ROOT/crates/inka-runtime/Cargo.toml" "$ROOT/crates/inka-bundler/Cargo.toml"; do
+    [ -f "$toml" ] || continue
+    for dep in deno_core deno_runtime deno_semver deno_error node_resolver sys_traits deno_ast deno_graph deno_cache_dir deno_lockfile deno_npm import_map; do
+        if grep -qE "^[[:space:]]*${dep}[[:space:]]*=" "$toml"; then
+            if ! grep -qE "^[[:space:]]*${dep}[[:space:]]*=.*\"=" "$toml"; then
+                echo "error: $dep in $toml is not pinned exactly (expected \"=<version>\")" >&2
+                exit 1
+            fi
         fi
-    fi
+    done
 done
 
 echo "deno pins OK (runtime $RUNTIME, deno_runtime $DENO)"

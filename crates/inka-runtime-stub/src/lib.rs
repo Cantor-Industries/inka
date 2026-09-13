@@ -19,6 +19,11 @@ pub extern "C" fn inka_runtime_create() -> *mut c_void {
     Box::into_raw(Box::new(())) as *mut c_void
 }
 
+/// Destroy a runtime handle created by [`inka_runtime_create`].
+///
+/// # Safety
+/// `rt` must be a handle returned by `inka_runtime_create` (or null) and must
+/// not be used again afterwards.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_destroy(rt: *mut c_void) {
     if !rt.is_null() {
@@ -62,6 +67,12 @@ unsafe fn init(exit_code: *mut c_int, err_msg: *mut *mut c_char) -> bool {
     true
 }
 
+/// Run an in-memory module (ABI-compatible stub; echoes when enabled).
+///
+/// # Safety
+/// Pointer arguments must be valid for the duration of the call: `specifier`
+/// and `perms` NUL-terminated C strings, `source` at least `source_len` bytes,
+/// and `exit_code`/`err_msg` writable.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_run_module_perm(
     _rt: *mut c_void,
@@ -101,6 +112,13 @@ pub unsafe extern "C" fn inka_runtime_run_module_perm(
     0
 }
 
+/// Run an entry module from a directory (ABI-compatible stub; echoes when
+/// enabled).
+///
+/// # Safety
+/// Pointer arguments must be valid for the duration of the call: `dir`,
+/// `entry`, and `perms` NUL-terminated C strings, and `exit_code`/`err_msg`
+/// writable.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_run_module_dir(
     _rt: *mut c_void,

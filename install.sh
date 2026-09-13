@@ -4,10 +4,10 @@
 # Downloads the inka toolchain (CLI + launcher),
 # installs it under <prefix>/lib/inka with a symlink in <prefix>/bin, then
 # provisions the shared runtime via `inka update`.
-# Like rustup, it installs per-user (no root). A pre-0.4.0 install is reset
-# first (0.4.0 is a clean break: the resolver was retired and the runtime tuple
-# moved), then the runtime is provisioned fresh. Later 0.4.x
-# installs are ordinary upgrades.
+# Like rustup, it installs per-user (no root). A pre-0.5.0 install is reset
+# first (0.5.0 is a clean break: the package store and vendoring were removed
+# and the runtime tuple moved), then the runtime is provisioned fresh. Later
+# 0.5.x installs are ordinary upgrades.
 #
 # usage:
 #   curl --proto '=https' --tlsv1.2 -fsSL \
@@ -238,18 +238,15 @@ CURRENT=""
 engine_dir="${INKA_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/runtime}"
 reset=0
 case "$CURRENT" in
-    ""|0.4.*) ;;
+    ""|0.5.*) ;;
     *) reset=1 ;;
 esac
-if [ "$reset" = 0 ] && ls "$engine_dir"/libinka_resolver-*.so >/dev/null 2>&1; then
-    reset=1
-fi
 if [ "$reset" = 1 ]; then
-    info "resetting previous inka install (pre-0.4.0)"
+    info "resetting previous inka install (pre-0.5.0)"
     rm -rf "$PREFIX/lib/inka"
     CURRENT=""
     if [ "$NO_RUNTIME" = 0 ]; then
-        rm -f "$engine_dir"/libinka_runtime-*.so "$engine_dir"/libinka_resolver-*.so
+        rm -f "$engine_dir"/libinka_runtime-*.so
     fi
 fi
 
@@ -265,11 +262,6 @@ else
     chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher"
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi
-
-# 0.3.0+ no longer ships the CJS patcher or curated patches. Remove any left
-# behind by an older toolchain (tar extraction never deletes extra files).
-rm -f "$PREFIX/lib/inka/inka-patcher"
-rm -rf "$PREFIX/lib/inka/patches"
 
 mkdir -p "$PREFIX/bin"
 ln -sf ../lib/inka/inka "$PREFIX/bin/inka"

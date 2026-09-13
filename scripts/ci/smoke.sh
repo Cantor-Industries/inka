@@ -5,10 +5,9 @@
 #   install.sh, versions.json
 #   inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz  (+ .sha256)
 #   libinka_runtime-<runtime>.so                          (+ .sha256)
-#   store.tar.gz, store.tar.gz.sha256, seed-manifest.json
 #
-# Installs through install.sh into a throwaway prefix/store so the host's own
-# runtime/store are never touched. Exits non-zero on any failure.
+# Installs through install.sh into a throwaway prefix/runtime-home so the host's
+# own state is never touched. Exits non-zero on any failure.
 #
 # usage: smoke.sh <staging-dir>
 set -euo pipefail
@@ -28,8 +27,7 @@ SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-smoke.XXXXXX")"
 trap 'rm -rf "$SCRATCH"' EXIT
 PREFIX="$SCRATCH/prefix"
 export INKA_RUNTIME_HOME="$SCRATCH/runtime"
-export INKA_STORE="$SCRATCH/runtime/store"
-export HOME="$SCRATCH/home"   # keep the launcher's fallback away from the host
+export HOME="$SCRATCH/home"   # keep any fallback away from the host
 mkdir -p "$INKA_RUNTIME_HOME" "$HOME"
 
 INKA="$PREFIX/lib/inka/inka"
@@ -45,8 +43,6 @@ fi
 
 echo "== re-run is a no-op =="
 sh "$STAGE/install.sh" --from "$STAGE" --yes --no-modify-path --prefix "$PREFIX"
-# Capture the output instead of piping into `grep -q`: grep would exit on the
-# first match and close the pipe, making inka abort on EPIPE under `pipefail`.
 update_out="$("$INKA" update --from "$STAGE")"
 case "$update_out" in
     *"is current"*) ;;
@@ -60,29 +56,15 @@ esac
 echo "== doctor =="
 "$INKA" doctor
 
-echo "== store-mode imports: effect, hono, ws =="
+echo "== run + build a simple artifact =="
 mkdir -p "$SCRATCH/apps" && cd "$SCRATCH/apps"
-for pair in \
-    'eff|import { Effect } from "effect"; console.log("smoke-effect", typeof Effect.succeed);' \
-    'hono|import { Hono } from "hono"; const a = new Hono(); console.log("smoke-hono", a.routes.length);' \
-    'ws|import { WebSocket } from "ws"; console.log("smoke-ws", typeof WebSocket);' ; do
-    name="${pair%%|*}"; code="${pair#*|}"
-    printf '%s\n' "$code" > "$name.js"
-    out="$("$INKA" run -A "$name.js")"
-    case "$out" in
-        *smoke-*) ;;
-        *) echo "smoke: no expected output from $name" >&2; exit 1 ;;
-    esac
-done
-
-echo "== build + run an artifact =="
+printf 'console.log("smoke-run");\n' > simple.js
+out="$("$INKA" run simple.js)"
+case "$out" in *smoke-run*) ;; *) echo "smoke: run output missing ($out)" >&2; exit 1 ;; esac
 printf 'console.log("smoke-artifact");\n' > artifact.js
 "$INKA" build artifact.js -o artifact
 out="$("$SCRATCH/apps/artifact")"
-case "$out" in
-    *smoke-artifact*) ;;
-    *) echo "smoke: artifact output missing" >&2; exit 1 ;;
-esac
+case "$out" in *smoke-artifact*) ;; *) echo "smoke: artifact output missing ($out)" >&2; exit 1 ;; esac
 
 echo "== permissions: deny-by-default + baked compile.permissions =="
 mkdir -p "$SCRATCH/perms" && cd "$SCRATCH/perms"
@@ -102,25 +84,43 @@ case "$out" in
     *) echo "smoke: baked read permission did not allow ($out)" >&2; exit 1 ;;
 esac
 
-echo "== vendored raw CommonJS + native require =="
-mkdir -p "$SCRATCH/vendor" && cd "$SCRATCH/vendor"
-if ! "$INKA" add ms >/dev/null 2>&1; then
-    echo "smoke: inka add ms failed" >&2
-    exit 1
-fi
-[ -f "$SCRATCH/vendor/vendored/node_modules/ms/index.js" ] || { echo "smoke: ms was not vendored raw" >&2; exit 1; }
-if [ -f "$SCRATCH/vendor/vendored/node_modules/ms/esm.js" ]; then
-    echo "smoke: unexpected esm.js (no conversion should run)" >&2
-    exit 1
-fi
-printf '%s\n' 'import { createRequire } from "node:module";' 'const require = createRequire(import.meta.url);' 'console.log("smoke-cjs", typeof require("ms"));' > cjs.js
-out="$("$INKA" run -A cjs.js)"
+echo "== build with --external (embedded from node_modules) =="
+mkdir -p "$SCRATCH/npm" && cd "$SCRATCH/npm"
+npm install --no-save --omit=dev ms@2.1.3 >/dev/null 2>&1
+printf 'import ms from "ms";\nconsole.log("smoke-external", ms(60000));\n' > main.js
+"$INKA" build main.js -o app --external ms
+mv node_modules node_modules.hidden
+out="$("$SCRATCH/npm/app")"
+mv node_modules.hidden node_modules
 case "$out" in
-    *smoke-cjs*) ;;
-    *) echo "smoke: native require of vendored CJS failed ($out)" >&2; exit 1 ;;
+    *smoke-external*) ;;
+    *) echo "smoke: --external artifact failed ($out)" >&2; exit 1 ;;
 esac
 
+echo "== build with an import map -> jsr (offline at run time) =="
+if command -v deno >/dev/null 2>&1; then
+    mkdir -p "$SCRATCH/jsr" && cd "$SCRATCH/jsr"
+    export DENO_DIR="$SCRATCH/deno"
+    printf '{ "imports": { "@std/assert": "jsr:@std/assert@1" } }\n' > deno.json
+    printf 'import { assertEquals } from "@std/assert";\nassertEquals(1, 1);\nconsole.log("smoke-jsr");\n' > main.ts
+    if deno cache main.ts >/dev/null 2>&1; then
+        "$INKA" build main.ts -o app
+        # The bundle must be self-contained: run without the Deno cache.
+        out="$(env -u DENO_DIR "$SCRATCH/jsr/app")"
+        case "$out" in
+            *smoke-jsr*) ;;
+            *) echo "smoke: jsr artifact failed ($out)" >&2; exit 1 ;;
+        esac
+    else
+        echo "skip: deno cache failed (no network?)"
+    fi
+else
+    echo "skip: deno not installed"
+fi
+
 echo "== runtime CJS/ESM contract matrix =="
-bash "$SCRIPT_DIR/runtime-matrix.sh" "$INKA" "$INKA_STORE"
+# Reuse the populated Deno cache (if any) so the matrix's jsr case can run.
+if [ -d "$SCRATCH/deno" ]; then export DENO_DIR="$SCRATCH/deno"; fi
+bash "$SCRIPT_DIR/runtime-matrix.sh" "$INKA"
 
 echo "smoke: OK"

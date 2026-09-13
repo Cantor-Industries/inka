@@ -1,9 +1,10 @@
 # Runtime contract matrix on the self-hosted runner.
 #
-# The heavy `inka-runtime` crate builds here (the hosted `ci.yml` rust job only
-# covers the fast crates). Built in release so the matrix exercises the same
-# optimized runtime that ships. Triggered only when runtime-coupled files
-# change, so the shared release runner is not scheduled for unrelated PRs.
+# The heavy crates (`inka-runtime`, `inka-bundler`/rolldown) build here; the
+# hosted `ci.yml` rust job only covers the fast crates. Built in release so the
+# matrix exercises the same optimized runtime that ships. Triggered only when
+# runtime/bundler-coupled files change, so the shared release runner is not
+# scheduled for unrelated PRs.
 #
 # Security: never run untrusted fork code on the self-hosted runner. The job is
 # skipped for pull requests whose head repo is not this repository.
@@ -14,10 +15,10 @@ on:
   pull_request:
     paths:
       - 'crates/inka-runtime/**'
+      - 'crates/inka-bundler/**'
       - 'crates/inka/**'
-      - 'scripts/ci/runtime-matrix.sh'
-      - 'scripts/ci/deno-pins.sh'
-      - 'seed-manifest.json'
+      - 'crates/inka-launcher/**'
+      - 'scripts/ci/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/runtime-ci.yml'
@@ -25,10 +26,10 @@ on:
     branches: [master]
     paths:
       - 'crates/inka-runtime/**'
+      - 'crates/inka-bundler/**'
       - 'crates/inka/**'
-      - 'scripts/ci/runtime-matrix.sh'
-      - 'scripts/ci/deno-pins.sh'
-      - 'seed-manifest.json'
+      - 'crates/inka-launcher/**'
+      - 'scripts/ci/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/runtime-ci.yml'
@@ -43,7 +44,7 @@ concurrency:
 jobs:
   matrix:
     runs-on: self-hosted
-    timeout-minutes: 45
+    timeout-minutes: 60
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - name: Checkout
@@ -56,7 +57,8 @@ jobs:
         run: |
           set -euo pipefail
           : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
-          cargo build --release -p inka -p inka-runtime
+          cargo build --release -p inka --features bundle
+          cargo build --release -p inka-runtime
 
       - name: Stage runtime for the matrix
         run: |
@@ -67,17 +69,25 @@ jobs:
           cp "$CARGO_TARGET_DIR/release/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
           echo "INKA_RUNTIME_HOME=$home" >> "$GITHUB_ENV"
 
-      - name: Seed release store
-        run: |
-          set -euo pipefail
-          store="${RUNNER_TEMP:-/tmp}/inka-store"
-          mkdir -p "$store"
-          "$CARGO_TARGET_DIR/release/inka" internal snapshot-store \
-            --seed-manifest seed-manifest.json --out "$store"
-          tar -xzf "$store/store.tar.gz" -C "$store"
-          echo "INKA_STORE=$store" >> "$GITHUB_ENV"
-
       - name: Runtime contract matrix
         run: |
           set -euo pipefail
-          bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/release/inka" "$INKA_STORE"
+          bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/release/inka"
+
+      - name: Build E2E (bundle -> self-contained artifact)
+        run: |
+          set -euo pipefail
+          INKA="$CARGO_TARGET_DIR/release/inka"
+          proj="${RUNNER_TEMP:-/tmp}/inka-build-e2e"
+          rm -rf "$proj"; mkdir -p "$proj"
+          (cd "$proj" && npm install --no-save --omit=dev ms@2.1.3 >/dev/null 2>&1)
+          printf 'import ms from "ms";\nconsole.log("e2e-ok", ms(60000));\n' > "$proj/main.js"
+          (cd "$proj" && "$INKA" build main.js -o app --external ms)
+          # Run with the project's node_modules hidden: the artifact must carry it.
+          mv "$proj/node_modules" "$proj/node_modules.hidden"
+          out="$("$proj/app")"
+          mv "$proj/node_modules.hidden" "$proj/node_modules"
+          case "$out" in
+            *e2e-ok*) ;;
+            *) echo "e2e: unexpected artifact output: $out" >&2; exit 1 ;;
+          esac

@@ -3,7 +3,6 @@
 # Triggered by every `v*` tag. On a self-hosted runner:
 #   - builds the toolchain (inka, inka-launcher),
 #   - builds the heavy runtime,
-#   - builds a store snapshot,
 #   - stages a toolchain tarball + engine assets + versions.json,
 #   - smoke-tests the whole release through install.sh,
 #   - publishes the assets as GitHub Release assets for the tag.
@@ -12,7 +11,7 @@
 #   - runs-on: self-hosted
 #   - the runner's own environment provides CARGO_HOME and CARGO_TARGET_DIR
 #     (a big disk; the Deno runtime build is ~10-15 min and needs several GB).
-#   - network (npm install for the store snapshot).
+#   - network (npm/deno for the smoke test).
 
 name: release
 
@@ -63,21 +62,14 @@ jobs:
       - name: Build toolchain
         run: |
           set -euo pipefail
-          cargo build --release -p inka -p inka-launcher
+          cargo build --release -p inka --features bundle
+          cargo build --release -p inka-launcher
 
       - name: Build runtime (always; tuple = runtime-version)
         run: |
           set -euo pipefail
           cargo build --release -p inka-runtime
           test -f "$CARGO_TARGET_DIR/release/libinka_runtime.so"
-
-      - name: Build store snapshot
-        run: |
-          set -euo pipefail
-          "$CARGO_TARGET_DIR/release/inka" internal snapshot-store \
-            --seed-manifest seed-manifest.json \
-            --out "$STAGE"
-          test -f "$STAGE/store.tar.gz"
 
       - name: Stage release assets
         run: |
@@ -98,7 +90,7 @@ jobs:
           cp install.sh "$STAGE/install.sh"
 
           # sha256 sidecars (bare hex, as the installer/update expect).
-          for f in "$TC" "libinka_runtime-$RUNTIME.so" store.tar.gz; do
+          for f in "$TC" "libinka_runtime-$RUNTIME.so"; do
             (cd "$STAGE" && sha256sum "$f" | awk '{print $1}' > "$f.sha256")
           done
 
@@ -132,51 +124,42 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
 
-            0.4.0 is a **breaking release**. The standalone import resolver was
-            retired and ESM/CommonJS resolution is now unified on Deno's
-            store-backed `NodeResolver`. Runtime tuple `${{ env.RUNTIME }}` is
-            required.
+            0.5.0 is a **breaking release**. inka is now a build-only tool: it
+            bundles a JS/TS project into one self-contained executable. The
+            package store, per-project vendoring, and the standalone import
+            resolver are gone; all package management is external.
 
             ## Breaking changes
 
-            - **The `libinka_resolver-*.so` component is gone.** There is no
-              resolver asset, no `INKA_RESOLVER`, and no resolver step in
-              `install.sh`/`inka update`. `import` and `require()` now share one
-              resolution policy (project `vendored/` → default store →
-              builtins), including the jsr npm-mirror (`@std/assert` →
-              `@jsr/std__assert`) and `npm:`/`jsr:` version pins.
-            - **Runtime floor raised to `>=0.266.4`.** Artifacts built with 0.4.0
-              will not run on older tuples, which still expect the retired
-              resolver.
-            - **`inka update` will not cross the 0.3.x → 0.4.0 boundary.** Re-run
-              `install.sh`; it detects a pre-0.4.0 install and resets the old
-              toolchain, runtime, and store before provisioning 0.4.0 fresh.
+            - **No package store, vendoring, or resolver.** `store`,
+              `vendored/`, `inka add`/`install`/`remove`/`vendor`, and the
+              `libinka_resolver` component are removed. Dependencies resolve
+              from your project's `node_modules` and the Deno cache (`DENO_DIR`).
+            - **`inka build` bundles.** Imports (import maps, `npm:`, `jsr:`,
+              `node_modules`) are resolved and bundled with rolldown into one
+              module; the artifact is self-contained. `--external <pkg>` leaves
+              a package unbundled but embeds it from `node_modules`.
+            - **Runtime floor raised to `>=0.266.5`.**
+            - **`inka update` will not cross the 0.4.x → 0.5.0 boundary.** Re-run
+              `install.sh`; it detects a pre-0.5.0 install and resets the old
+              toolchain and runtime before provisioning fresh.
 
-            ## Upgrade from 0.3.x
+            ## Upgrade
 
             ```sh
             curl --proto '=https' --tlsv1.2 -fsSL \
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
 
-            From 0.4.0 onward, `inka update` self-updates normally.
-
             ## What's new
 
-            - **One resolution path.** ESM `import` and CJS `require()` both go
-              through the store-backed `NodeResolver`; the vendored-first
-              precedence and jsr mirror live in the resolver adapters.
-            - **`inka build --vendor-closure` follows CommonJS `require()`**, so
-              vendored CJS packages and their CJS dependencies are embedded
-              correctly (previously only ESM imports were walked).
-            - **Native `.node` (N-API) addons** load — opt-in via `ffi` (plus
-              `sys` for platform detection such as `detect-libc`).
-            - **Cleaner installs.** The installer performs a one-time reset of
-              pre-0.4.0 state (toolchain, runtime, store) so the break is a clean
-              slate; later 0.4.x installs are ordinary upgrades.
-            - **CI hardening.** `rustfmt` + `clippy -D warnings` run on the fast
-              crates, and the runtime contract matrix now runs on the
-              self-hosted runner for runtime-affecting PRs.
+            - **`inka build`** — bundles an entry (import maps + `npm:`/`jsr:` +
+              `node_modules`) into a self-contained `INKFOOT5` executable, with
+              `--minify`, `--sourcemap`, and `--external <pkg>`.
+            - **`inka run`** — executes a project directly, resolving import
+              maps, `npm:` (via `node_modules`), and `jsr:` (Deno cache, offline).
+            - **Offline by default.** `jsr:`/`npm:` resolution reads the local
+              Deno cache; no network at build or run time.
 
             ## Install
 
@@ -185,18 +168,15 @@ jobs:
               https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
             ```
 
-            Then keep the toolchain, runtime, and store current with
-            `inka update`.
+            Then keep the toolchain and runtime current with `inka update`.
 
             ## Assets
 
             - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher
             - `libinka_runtime-${{ env.RUNTIME }}.so` — shared runtime tuple
-            - `store.tar.gz` + `seed-manifest.json` — default-store snapshot
             - `install.sh` + `versions.json` — bootstrap installer + version record
 
-            `.sha256` sidecars are published for the toolchain, runtime, and store
-            archives.
+            `.sha256` sidecars are published for the toolchain and runtime.
           generate_release_notes: true
           draft: false
           files: |
@@ -204,8 +184,5 @@ jobs:
             ${{ env.STAGE }}/inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz.sha256
             ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so
             ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so.sha256
-            ${{ env.STAGE }}/store.tar.gz
-            ${{ env.STAGE }}/store.tar.gz.sha256
-            ${{ env.STAGE }}/seed-manifest.json
             ${{ env.STAGE }}/versions.json
             ${{ env.STAGE }}/install.sh
