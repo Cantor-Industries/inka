@@ -11,7 +11,6 @@ mod build;
 mod config;
 mod embed;
 mod run;
-mod transpile;
 mod update;
 
 use std::env;

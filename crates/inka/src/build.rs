@@ -1,8 +1,9 @@
-// inka build: pack one or more source files + an embedded manifest onto the launcher.
+// inka build: bundle an entry (and its dependencies) into one self-contained
+// module, then pack it onto the launcher with an embedded manifest.
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>]
 //             [--runtime <spec>] [--tested-against <ver>] [-P <set>]
-//             [--transpile] [--embed-dir]
+//             [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 //
 // Defaults:
 //   source    first positional argument (or -s/--source)
@@ -10,26 +11,30 @@
 //   manifest  always derived from package.json / deno.json(.jsonc) and embedded;
 //             there is no on-disk manifest input
 //   launcher  $INKA_LAUNCHER, else <dir of inka binary>/inka-launcher
-//   embed     import closure by default; --embed-dir embeds the whole cwd tree
+//   embed     the bundle; --embed-dir also embeds the whole cwd tree (assets)
 
 use std::env;
+#[cfg(feature = "bundle")]
 use std::fs;
+#[cfg(feature = "bundle")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "bundle")]
 const FOOTER_LEN: usize = 24;
-const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
-const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
-const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS already transpiled
+#[cfg(feature = "bundle")]
+const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
+#[cfg(feature = "bundle")]
 const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir]\n\
+        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
          \n\
-         packs <source> (and the files it imports) onto the launcher into a single executable.\n\
-         The manifest is always derived from package.json / deno.json(.jsonc) permissions\n\
-         and embedded; there is no on-disk manifest input.\n\
+         bundles <source> (import maps + npm:/jsr:/node_modules) into one self-contained\n\
+         module and packs it onto the launcher. The manifest is always derived from\n\
+         package.json / deno.json(.jsonc) permissions and embedded; there is no on-disk\n\
+         manifest input.\n\
          \n\
          options:\n\
          \x20 -s, --source <file>   source file (default: the positional argument)\n\
@@ -37,8 +42,10 @@ fn help() -> ! {
          \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.5' or '==0.266.5' (overrides config)\n\
          \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
          \x20 -P, --permission-set <name>  use this named permission set from the config\n\
-         \x20     --transpile       compile TypeScript to JavaScript now (single- and multi-file; default: the runtime transpiles at load)\n\
-         \x20     --embed-dir       embed the whole current-directory tree (for dynamic imports) instead of just the import closure\n\
+         \x20     --minify          minify the bundle\n\
+         \x20     --sourcemap       embed an inline source map\n\
+         \x20     --external <pkg>  leave a package unbundled and embed it from node_modules (repeatable)\n\
+         \x20     --embed-dir       also embed the whole current-directory tree (for assets)\n\
          \x20 -h, --help            show this help\n\
          \n\
          launcher is found at $INKA_LAUNCHER or next to the inka binary."
@@ -57,7 +64,9 @@ pub fn cmd_build(args: &[String]) {
     let mut runtime_flag: Option<String> = None;
     let mut tested_flag: Option<String> = None;
     let mut perm_set: Option<String> = None;
-    let mut transpile = false;
+    let mut minify = false;
+    let mut sourcemap = false;
+    let mut external: Vec<String> = Vec::new();
     let mut embed_dir = false;
     let mut positional: Vec<PathBuf> = Vec::new();
 
@@ -75,7 +84,12 @@ pub fn cmd_build(args: &[String]) {
             _ if a.starts_with("--permission-set=") => {
                 perm_set = Some(a["--permission-set=".len()..].to_string())
             }
-            "--transpile" => transpile = true,
+            "--minify" => minify = true,
+            "--sourcemap" => sourcemap = true,
+            "--external" => external.push(next_str(&mut it, a)),
+            _ if a.starts_with("--external=") => {
+                external.push(a["--external=".len()..].to_string())
+            }
             "--embed-dir" => embed_dir = true,
             "-h" | "--help" => help(),
             other if other.starts_with('-') => {
@@ -142,171 +156,129 @@ pub fn cmd_build(args: &[String]) {
     for w in &manifest_warnings {
         eprintln!("warning: {w}");
     }
-    let manifest_label = "config (package.json/deno.json)";
 
     let entry_rel = match crate::embed::rel_from_cwd(&cwd, &source) {
         Ok(r) => r,
         Err(e) => err(&e),
     };
 
-    let mode = if embed_dir {
-        crate::embed::Mode::Directory
-    } else {
-        crate::embed::Mode::Closure
-    };
-    let mut files = match mode {
-        crate::embed::Mode::Directory => crate::embed::collect_directory(&cwd, &entry_rel),
-        crate::embed::Mode::Closure => crate::embed::collect(&cwd, &entry_rel),
+    pack(
+        &cwd,
+        &entry_rel,
+        &output,
+        manifest_bytes,
+        &external,
+        minify,
+        sourcemap,
+        embed_dir,
+    );
+}
+
+/// Bundle `entry_rel` and pack it (plus any embedded files) into an INKFOOT5
+/// artifact at `output`.
+#[allow(clippy::too_many_arguments)]
+fn pack(
+    cwd: &Path,
+    entry_rel: &str,
+    output: &Path,
+    manifest_bytes: Vec<u8>,
+    external: &[String],
+    minify: bool,
+    sourcemap: bool,
+    embed_dir: bool,
+) {
+    #[cfg(not(feature = "bundle"))]
+    {
+        let _ = (
+            cwd,
+            entry_rel,
+            output,
+            manifest_bytes,
+            external,
+            minify,
+            sourcemap,
+            embed_dir,
+        );
+        err("inka was built without bundling support (rebuild with `--features bundle`)");
     }
-    .unwrap_or_else(|e| err(&e));
 
-    // Auto-embed the project's node_modules closure (bring-your-own-node_modules)
-    // so an artifact built from a normal Node project carries its dependencies.
-    let nm_files =
-        crate::embed::collect_node_modules_closure(&cwd, &entry_rel).unwrap_or_else(|e| err(&e));
-    for (rel, bytes) in nm_files {
-        if !files.iter().any(|(r, _)| r == &rel) {
-            files.push((rel, bytes));
+    #[cfg(feature = "bundle")]
+    {
+        let bundle = inka_bundler::bundle(inka_bundler::BundleOptions {
+            cwd,
+            entry: entry_rel,
+            external,
+            minify,
+            sourcemap,
+        })
+        .unwrap_or_else(|e| err(&e));
+
+        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
+        files.push(("main.js".to_string(), bundle.code.into_bytes()));
+        for (rel, bytes) in bundle.embedded {
+            push_unique(&mut files, rel, bytes);
         }
-    }
-
-    let is_multi = files.len() > 1;
-
-    let launcher = find_launcher();
-    let launcher_bytes = fs::read(&launcher)
-        .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
-
-    let mut out = Vec::new();
-
-    if is_multi {
-        if transpile && jsx_family(&entry_rel) {
-            err(&format!(
-                "--transpile does not support '{entry_rel}' yet (only .ts/.mts/.cts)"
-            ));
-        }
-
-        // Build-time transpile: replace each .ts/.mts/.cts module's bytes with
-        // its transpiled JS while keeping the original archive path (Deno-style).
-        // The archive then carries INKFOOT4 so the runtime serves those modules
-        // as plain JavaScript without re-transpiling.
-        let (files, n_transpiled, precompiled) = if transpile {
-            let mut n = 0usize;
-            let mut out: Vec<(String, Vec<u8>)> = Vec::with_capacity(files.len());
-            for (rel, bytes) in &files {
-                if ts_family(rel) {
-                    let text = String::from_utf8_lossy(bytes).into_owned();
-                    let js = crate::transpile::ts_to_js(&text, rel).unwrap_or_else(|e| err(&e));
-                    n += 1;
-                    out.push((rel.clone(), js.into_bytes()));
-                } else {
-                    out.push((rel.clone(), bytes.clone()));
-                }
+        for pkg in external {
+            for (rel, bytes) in crate::embed::collect_package(cwd, pkg).unwrap_or_else(|e| err(&e))
+            {
+                push_unique(&mut files, rel, bytes);
             }
-            (out, n, n > 0)
-        } else {
-            (files, 0, false)
-        };
-        let magic = if precompiled { MAGIC_V3 } else { MAGIC_V2 };
+        }
+        if embed_dir {
+            for (rel, bytes) in
+                crate::embed::collect_directory(cwd, entry_rel).unwrap_or_else(|e| err(&e))
+            {
+                push_unique(&mut files, rel, bytes);
+            }
+        }
 
+        let module = "main.js";
+        let bundle_len = files[0].1.len();
         let archive = encode_archive(&files);
-        let manifest_payload = set_module_line(&manifest_bytes, &entry_rel);
-        out.reserve(launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN);
+        let manifest_payload = set_module_line(&manifest_bytes, module);
+        let launcher = find_launcher();
+        let launcher_bytes = fs::read(&launcher)
+            .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
+
+        let mut out = Vec::with_capacity(
+            launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN,
+        );
         out.extend_from_slice(&launcher_bytes);
         out.extend_from_slice(&archive);
         out.extend_from_slice(&manifest_payload);
-        out.extend_from_slice(magic);
+        out.extend_from_slice(MAGIC_V4);
         out.extend_from_slice(&(archive.len() as u64).to_le_bytes());
         out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
-        fs::write(&output, &out)
+
+        fs::write(output, &out)
             .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
-        fs::set_permissions(&output, fs::Permissions::from_mode(0o755))
+        fs::set_permissions(output, fs::Permissions::from_mode(0o755))
             .unwrap_or_else(|e| err(&format!("cannot chmod {}: {e}", output.display())));
+
         println!(
-            "packed {} ({}) <- launcher {} ({}) + {} file(s) archive ({}) + manifest {} ({})",
+            "packed {} ({}) <- launcher {} ({}) + bundle ({}) + {} embedded file(s) ({}) + manifest ({})",
             output.display(),
             out.len(),
             launcher.display(),
             launcher_bytes.len(),
-            files.len(),
+            bundle_len,
+            files.len() - 1,
             archive.len(),
-            manifest_label,
             manifest_payload.len(),
         );
-        if precompiled {
-            println!(
-                "  entry: {entry_rel}  ({} files embedded, {n_transpiled} transpiled to JS)",
-                files.len()
-            );
-        } else {
-            println!("  entry: {entry_rel}  ({} files embedded)", files.len());
-        }
-        return;
+        println!("  entry: {entry_rel}  (module {module})");
     }
+}
 
-    // ---- single-file build (back-compatible v1 trailer) --------------------
-    let entry_bytes = files.first().map(|(_, b)| b.clone()).unwrap_or_default();
-    let source_name = Path::new(&entry_rel)
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "main.js".into());
-    let ts_source = ts_family(&source_name);
-
-    let mut payload = entry_bytes;
-    let mut transpiled = false;
-    if transpile {
-        if ts_source {
-            let text = String::from_utf8_lossy(&payload).into_owned();
-            let js = match crate::transpile::ts_to_js(&text, &source_name) {
-                Ok(s) => s,
-                Err(e) => err(&e),
-            };
-            payload = js.into_bytes();
-            transpiled = true;
-        } else if jsx_family(&source_name) {
-            err(&format!(
-                "--transpile does not support '{source_name}' yet (only .ts/.mts/.cts)"
-            ));
-        }
+#[cfg(feature = "bundle")]
+fn push_unique(files: &mut Vec<(String, Vec<u8>)>, rel: String, bytes: Vec<u8>) {
+    if !files.iter().any(|(r, _)| r == &rel) {
+        files.push((rel, bytes));
     }
-
-    let module_name = if transpiled {
-        Path::new(&source_name)
-            .with_extension("js")
-            .to_string_lossy()
-            .into_owned()
-    } else {
-        source_name.clone()
-    };
-    let manifest_payload = set_module_line(&manifest_bytes, &module_name);
-
-    out.reserve(launcher_bytes.len() + payload.len() + manifest_payload.len() + FOOTER_LEN);
-    out.extend_from_slice(&launcher_bytes);
-    out.extend_from_slice(&payload);
-    out.extend_from_slice(&manifest_payload);
-    out.extend_from_slice(MAGIC_V1);
-    out.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
-
-    fs::write(&output, &out)
-        .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
-    fs::set_permissions(&output, fs::Permissions::from_mode(0o755))
-        .unwrap_or_else(|e| err(&format!("cannot chmod {}: {e}", output.display())));
-
-    println!(
-        "packed {} ({}) <- launcher {} ({}) + source {} ({}{}) + manifest {} ({})",
-        output.display(),
-        out.len(),
-        launcher.display(),
-        launcher_bytes.len(),
-        source.display(),
-        payload.len(),
-        if transpiled { ", transpiled to JS" } else { "" },
-        manifest_label,
-        manifest_payload.len(),
-    );
 }
 
 /// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
+#[cfg(feature = "bundle")]
 fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (path, data) in files {
@@ -321,6 +293,7 @@ fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
 /// Force the `module=` line to the packed entry path. The manifest is always
 /// derived from config (which never emits `module=`), so this replaces a stale
 /// line if present and appends otherwise.
+#[cfg(feature = "bundle")]
 fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
     let text = String::from_utf8_lossy(manifest);
     let mut found = false;
@@ -343,18 +316,6 @@ fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
         joined.push('\n');
     }
     joined.into_bytes()
-}
-
-fn ext_of(name: &str) -> Option<String> {
-    name.rsplit('.').next().map(|e| e.to_ascii_lowercase())
-}
-
-fn ts_family(name: &str) -> bool {
-    matches!(ext_of(name).as_deref(), Some("ts" | "mts" | "cts"))
-}
-
-fn jsx_family(name: &str) -> bool {
-    matches!(ext_of(name).as_deref(), Some("tsx" | "jsx"))
 }
 
 fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
@@ -463,6 +424,7 @@ fn resolve_manifest(
     (bytes, syn.warnings)
 }
 
+#[cfg(feature = "bundle")]
 fn find_launcher() -> PathBuf {
     if let Ok(p) = env::var("INKA_LAUNCHER") {
         let p = PathBuf::from(p);
@@ -491,6 +453,7 @@ fn find_launcher() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn scratch() -> PathBuf {
@@ -563,6 +526,7 @@ mod tests {
         let _ = fs::remove_dir_all(&cwd);
     }
 
+    #[cfg(feature = "bundle")]
     #[test]
     fn module_line_appended_and_replaced() {
         let appended = set_module_line(b"runtime=x\n", "app.js");

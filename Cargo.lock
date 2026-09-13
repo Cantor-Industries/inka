@@ -4594,7 +4594,6 @@ checksum = "f4200d433cbd5178df7797c9c2e75b348b728e39631cf14520d1e2fc424201f4"
 name = "inka"
 version = "0.4.0"
 dependencies = [
- "deno_ast",
  "inka-bundler",
  "libc",
  "libloading 0.8.9",

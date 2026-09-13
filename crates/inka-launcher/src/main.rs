@@ -7,6 +7,7 @@ const FOOTER_LEN: usize = 24;
 const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
 const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
 const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS pre-transpiled to JS
+const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
 
 macro_rules! debug_log {
     ($($arg:tt)*) => {
@@ -87,7 +88,7 @@ fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
             source: &bytes[pstart..mstart],
             manifest,
         }),
-        MAGIC_V2 | MAGIC_V3 => {
+        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 => {
             let files = parse_archive(&bytes[pstart..mstart])?;
             Ok(Trailer::Archive {
                 files,
@@ -273,7 +274,7 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
                     continue;
                 }
             }
-            if best.as_ref().map_or(true, |(bv, _)| v > *bv) {
+            if best.as_ref().is_none_or(|(bv, _)| v > *bv) {
                 best = Some((v, ent.path()));
             }
         }
@@ -510,19 +511,6 @@ fn main() {
         std::process::exit(3);
     };
 
-    // Default the vendored-package store to the per-user XDG store
-    // (~/.local/share/inka/store) when present, unless the caller already
-    // pointed INKA_STORE somewhere.
-    if env::var_os("INKA_STORE").is_none() {
-        if let Some(d) = xdg_data_root() {
-            let candidate = d.join("inka/store");
-            if candidate.is_dir() {
-                env::set_var("INKA_STORE", &candidate);
-                debug_log!("[inka] package store {}", candidate.display());
-            }
-        }
-    }
-
     let code = match trailer {
         Trailer::Single {
             source,
@@ -534,10 +522,6 @@ fn main() {
                 m.module,
                 source.len()
             );
-            // A single-file artifact embeds no vendored packages; never let a
-            // caller-exported INKA_VENDOR point the loader at an external tree.
-            env::remove_var("INKA_VENDOR");
-            debug_log!("[inka] single-file artifact; INKA_VENDOR cleared");
             load_and_run(&path, &m.module, source, &args, &m.perms)
         }
         Trailer::Archive {
@@ -558,22 +542,6 @@ fn main() {
                     std::process::exit(1);
                 }
             };
-            // Auto-detect embedded vendored package roots: when the artifact
-            // carries a `vendored/` tree, point the loader at it (vendored
-            // code resolves vendored-first, then the default store). When it
-            // does not, clear any caller-exported INKA_VENDOR so an external
-            // path is never consulted.
-            let vendor_dir = root.join("vendored");
-            if vendor_dir.is_dir() {
-                env::set_var("INKA_VENDOR", &vendor_dir);
-                debug_log!(
-                    "[inka] embedded vendored packages at {}",
-                    vendor_dir.display()
-                );
-            } else {
-                env::remove_var("INKA_VENDOR");
-                debug_log!("[inka] no embedded vendored packages; INKA_VENDOR cleared");
-            }
             let code = load_and_run_dir(&path, &root.to_string_lossy(), &m.module, &args, &m.perms);
             let _ = fs::remove_dir_all(&root);
             code

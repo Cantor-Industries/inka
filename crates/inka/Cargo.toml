@@ -10,10 +10,6 @@ name = "inka"
 path = "src/main.rs"
 
 [features]
-default = ["transpile"]
-# Build-time TypeScript -> JavaScript compilation (deno_ast). Disable with
-# --no-default-features to keep `inka` small; `--transpile` then errors.
-transpile = ["dep:deno_ast"]
 # Bundling (rolldown). Not default so the fast CLI build stays lean; release
 # builds enable it. Without it, `inka build` cannot bundle.
 bundle = ["dep:inka-bundler"]
@@ -24,5 +20,4 @@ sha2 = "0.10"
 url = "2"
 libloading = "0.8"
 libc = "0.2"
-deno_ast = { version = "=0.53.3", features = ["transpiling"], optional = true }
 inka-bundler = { path = "../inka-bundler", optional = true }
