@@ -12,8 +12,8 @@ use rolldown::plugin::{
     HookResolveIdReturn, HookUsage, Plugin, PluginContext, Pluginable, SharedLoadPluginContext,
 };
 use rolldown::{
-    BundlerBuilder, BundlerOptions, InputItem, IsExternal, OutputFormat, Platform,
-    RawMinifyOptions, SourceMapType, TreeshakeOptions,
+    BundlerBuilder, BundlerOptions, CodeSplittingMode, InputItem, IsExternal, OutputFormat,
+    Platform, RawMinifyOptions, SourceMapType, TreeshakeOptions,
 };
 use rolldown_common::{ModuleType, Output};
 use sys_traits::impls::RealSys;
@@ -81,6 +81,9 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         format: Some(OutputFormat::Esm),
         external: Some(IsExternal::from(opts.external.to_vec())),
         treeshake: TreeshakeOptions::default(),
+        // A single self-contained chunk: dynamic imports are inlined rather
+        // than split into sibling files the artifact would not carry.
+        code_splitting: Some(CodeSplittingMode::Bool(false)),
         minify: opts.minify.then_some(RawMinifyOptions::Bool(true)),
         sourcemap: opts.sourcemap.then_some(SourceMapType::File),
         ..Default::default()
@@ -96,13 +99,19 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         .await
         .map_err(|e| format!("rolldown generate failed: {e}"))?;
 
-    let mut code = None;
+    let mut chunks = Vec::new();
     for asset in &output.assets {
         if let Output::Chunk(chunk) = asset {
-            code = Some(chunk.code.clone());
+            chunks.push(chunk.code.clone());
         }
     }
-    let code = code.ok_or_else(|| "rolldown produced no chunk".to_string())?;
+    if chunks.len() != 1 {
+        return Err(format!(
+            "rolldown produced {} chunks; expected a single bundle",
+            chunks.len()
+        ));
+    }
+    let code = chunks.into_iter().next().unwrap();
 
     Ok(Bundle {
         code,
@@ -419,6 +428,36 @@ mod tests {
         let a = bundle(opts()).unwrap();
         let b = bundle(opts()).unwrap();
         assert_eq!(a.code, b.code, "minified bundle must be deterministic");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn dynamic_import_is_inlined_single_chunk() {
+        let cwd = scratch();
+        mk(&cwd, "lazy.js", "export const v = \"lazy-marker\";\n");
+        mk(
+            &cwd,
+            "entry.js",
+            "const m = await import(\"./lazy.js\");\nconsole.log(m.v);\n",
+        );
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert!(
+            b.code.contains("lazy-marker"),
+            "dynamic import not inlined:\n{}",
+            b.code
+        );
+        assert!(
+            !b.code.contains("./lazy"),
+            "expected no sibling chunk import:\n{}",
+            b.code
+        );
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }
