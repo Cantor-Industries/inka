@@ -51,6 +51,6 @@ fully offline against a local directory.
 
 **Coming from 0.4.x (or older) to 0.5.0.** 0.5.0 is a clean break: the package
 store and vendoring were removed, `inka build` now bundles, and the runtime tuple
-moved to `0.266.5`. `inka update` will not cross this boundary — re-run
+moved to `0.266.2`. `inka update` will not cross this boundary — re-run
 `install.sh` (the same command you installed with). It detects the pre-0.5.0
 install and resets the old toolchain and runtime before provisioning fresh.

@@ -270,7 +270,14 @@ impl NpmPackageFolderResolver for ExecutionFolderResolver {
         referrer: &UrlOrPathRef,
     ) -> Result<PathBuf, PackageFolderResolveError> {
         let candidates = package_candidates(specifier);
-        let ref_path = referrer.path().ok();
+        // Node/Deno resolve the referrer's realpath before walking
+        // `node_modules`. This is required for symlinked stores (pnpm
+        // `.pnpm/`, yarn, bun), where a package's dependencies live beside its
+        // realpath rather than at the project root.
+        let ref_path = referrer
+            .path()
+            .ok()
+            .map(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
 
         // A single root: the execution tree's `node_modules`. A referrer inside
         // the tree resolves via the nearest-`node_modules` walk (nested beats
@@ -279,12 +286,14 @@ impl NpmPackageFolderResolver for ExecutionFolderResolver {
         if let Some(nm) = self.roots.node_modules() {
             let root = NodeModulesRoot::new(nm);
             for name in &candidates {
-                let found = match ref_path {
+                let found = match ref_path.as_deref() {
                     Some(p) => root.nearest(p, name).or_else(|| root.hoisted(name)),
                     None => root.hoisted(name),
                 };
                 if let Some(f) = found {
-                    return Ok(f);
+                    // Return the realpath so the package's own deps resolve from
+                    // its real location too.
+                    return Ok(std::fs::canonicalize(&f).unwrap_or(f));
                 }
             }
         }

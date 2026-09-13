@@ -120,6 +120,25 @@ case "$out" in
 esac
 rm -rf "$SECRET_DIR"
 
+echo "== pnpm-style symlinked node_modules =="
+# A package reached through a symlink whose dependency lives beside its realpath
+# (pnpm's isolated `.pnpm/` store), not hoisted to the project root.
+mkdir -p node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a \
+         node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b
+printf '%s\n' '{"name":"pkg-a","version":"1.0.0","type":"module","main":"index.js"}' \
+    > node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/package.json
+printf '%s\n' 'import b from "pkg-b";' 'export default "a+" + b;' \
+    > node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-a/index.js
+printf '%s\n' '{"name":"pkg-b","version":"1.0.0","type":"module","main":"index.js"}' \
+    > node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b/package.json
+printf '%s\n' 'export default "b";' \
+    > node_modules/.pnpm/pkg-b@1.0.0/node_modules/pkg-b/index.js
+ln -sfn ../../pkg-b@1.0.0/node_modules/pkg-b node_modules/.pnpm/pkg-a@1.0.0/node_modules/pkg-b
+ln -sfn .pnpm/pkg-a@1.0.0/node_modules/pkg-a node_modules/pkg-a
+run "pnpm-style symlinked dep" "pnpm-ok a+b" p_pnpm.js \
+'import a from "pkg-a";
+console.log("pnpm-ok", a);'
+
 echo "== jsr / import map (offline Deno cache) =="
 mkdir -p jsrproj
 printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json

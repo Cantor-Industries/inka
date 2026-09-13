@@ -139,7 +139,7 @@ jobs:
               `node_modules`) are resolved and bundled with rolldown into one
               module; the artifact is self-contained. `--external <pkg>` leaves
               a package unbundled but embeds it from `node_modules`.
-            - **Runtime floor raised to `>=0.266.5`.**
+            - **Runtime floor raised to `>=0.266.2`.**
             - **`inka update` will not cross the 0.4.x → 0.5.0 boundary.** Re-run
               `install.sh`; it detects a pre-0.5.0 install and resets the old
               toolchain and runtime before provisioning fresh.
