@@ -2,10 +2,12 @@
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>]
 //               [--runtime <spec>] [--tested-against <ver>] [-P <name>]
-//               [--transpile] [--embed-dir]
+//               [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
+//   inka run [-A] [-P[=name]] [--allow-<cat>[=list]]... <file> [args...]
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
 //   inka list [--home <dir>]
+//   inka doctor
 
 mod build;
 mod config;
@@ -46,7 +48,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes, project, DENO_DIR)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
     );
     std::process::exit(2);
 }
@@ -312,6 +314,44 @@ pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> Vec<(Version, PathBuf)> {
     found
 }
 
+/// Effective Deno cache dir from `$DENO_DIR` (non-empty) else `~/.cache/deno`.
+fn deno_dir_root(env_deno: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> PathBuf {
+    if let Some(d) = env_deno {
+        if !d.is_empty() {
+            return PathBuf::from(d);
+        }
+    }
+    let home = home
+        .filter(|h| !h.is_empty())
+        .unwrap_or_else(|| std::ffi::OsStr::new("."));
+    PathBuf::from(home).join(".cache/deno")
+}
+
+pub(crate) fn default_deno_dir() -> PathBuf {
+    deno_dir_root(
+        env::var_os("DENO_DIR").as_deref(),
+        env::var_os("HOME").as_deref(),
+    )
+}
+
+/// Whether the `inka-launcher` binary can be found (`$INKA_LAUNCHER` or next to
+/// the running `inka`).
+fn launcher_found() -> bool {
+    if let Ok(p) = env::var("INKA_LAUNCHER") {
+        if PathBuf::from(p).is_file() {
+            return true;
+        }
+    }
+    if let Ok(exe) = env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            if dir.join("inka-launcher").is_file() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn cmd_doctor(args: &[String]) {
     if args.iter().any(|a| a == "--help" || a == "-h") {
         eprintln!("usage: inka doctor");
@@ -333,6 +373,68 @@ fn cmd_doctor(args: &[String]) {
     for (v, p) in &runtimes {
         println!("  runtime {v}  {}", p.display());
     }
+
+    // Project resolution status (cwd).
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    println!("project (cwd):");
+    let configs: Vec<&str> = ["package.json", "deno.json", "deno.jsonc"]
+        .into_iter()
+        .filter(|f| cwd.join(f).is_file())
+        .collect();
+    if configs.is_empty() {
+        println!("  config: (no package.json/deno.json/deno.jsonc)");
+    } else {
+        println!("  config: {}", configs.join(", "));
+    }
+    println!(
+        "  node_modules: {}",
+        if cwd.join("node_modules").is_dir() {
+            "present"
+        } else {
+            "absent"
+        }
+    );
+    let deno_dir = default_deno_dir();
+    println!(
+        "  DENO_DIR: {} ({}; remote={} npm={})",
+        deno_dir.display(),
+        if deno_dir.is_dir() {
+            "present"
+        } else {
+            "absent"
+        },
+        if deno_dir.join("remote").is_dir() {
+            "yes"
+        } else {
+            "no"
+        },
+        if deno_dir.join("npm").is_dir() {
+            "yes"
+        } else {
+            "no"
+        },
+    );
+    let bundling = cfg!(feature = "bundle");
+    println!(
+        "  bundling: {}",
+        if bundling {
+            "available"
+        } else {
+            "unavailable (built without `bundle`)"
+        }
+    );
+    if !bundling {
+        warnings
+            .push("inka was built without the `bundle` feature; `inka build` cannot bundle".into());
+    }
+    println!(
+        "  launcher: {}",
+        if launcher_found() {
+            "found"
+        } else {
+            "not found"
+        }
+    );
 
     if warnings.is_empty() {
         println!("warnings: none");
@@ -399,5 +501,22 @@ mod tests {
             root.join("inka/runtime"),
             PathBuf::from("/home/u/.local/share/inka/runtime")
         );
+    }
+
+    #[test]
+    fn deno_dir_prefers_env_then_home() {
+        assert_eq!(
+            deno_dir_root(Some(os("/custom")), Some(os("/home/u"))),
+            PathBuf::from("/custom")
+        );
+        assert_eq!(
+            deno_dir_root(Some(os("")), Some(os("/home/u"))),
+            PathBuf::from("/home/u/.cache/deno")
+        );
+        assert_eq!(
+            deno_dir_root(None, Some(os("/home/u"))),
+            PathBuf::from("/home/u/.cache/deno")
+        );
+        assert_eq!(deno_dir_root(None, None), PathBuf::from("./.cache/deno"));
     }
 }
