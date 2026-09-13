@@ -13,7 +13,7 @@ skipped).
 Native `.node` (N-API) addons are `dlopen`ed at run time, so they need `ffi`
 (scoped to the addon path). Addons that probe the platform also need `sys`
 (e.g. `detect-libc`). Deny-by-default means an addon load without `ffi` fails
-with `NotCapable` — see [Packages](packages.md#commonjs).
+with `NotCapable` — see [Dependencies & resolution](packages.md#native-addons-node).
 
 ## The permission DSL
 

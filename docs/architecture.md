@@ -23,7 +23,7 @@ they are delivered as a new tuple without changing the `deno_runtime` pin.
 
 ```
 [ launcher bytes ]
-[ payload: one source file, or a files archive ]
+[ payload: a bundle plus optional embedded files, or a legacy archive/source ]
 [ manifest bytes ]
 [ footer: magic + payload length + manifest length ]
 ```
@@ -31,9 +31,10 @@ they are delivered as a new tuple without changing the `deno_runtime` pin.
 The footer is the last 24 bytes: an 8-byte magic plus two little-endian `u64`
 lengths. Magic values:
 
-- `INKFOOT2` — a single embedded source file
-- `INKFOOT3` — a multi-file archive
-- `INKFOOT4` — a multi-file archive with TypeScript pre-transpiled to JavaScript
+- `INKFOOT5` — a bundle plus optional embedded files (current `inka build`)
+- `INKFOOT2` — a single embedded source file (legacy)
+- `INKFOOT3` — a multi-file archive (legacy)
+- `INKFOOT4` — a multi-file archive with TypeScript pre-transpiled (legacy)
 
 At run time the launcher reads its own executable, parses the trailer, and
 extracts the archive to a temp tree when needed.
@@ -43,8 +44,8 @@ extracts the archive to a temp tree when needed.
 Recognized keys:
 
 ```
-runtime=inka_runtime>=0.266.4     # floor (also >, ==, or bare exact)
-tested-against=0.266.4            # cap: do not roll forward past this
+runtime=inka_runtime>=0.266.5     # floor (also >, ==, or bare exact)
+tested-against=0.266.5            # cap: do not roll forward past this
 module=main.js                    # entry file inside the payload
 permissions=all                   # or allow-<cat>=… / deny-<cat>=…
 allow-read=./data,/etc
@@ -74,7 +75,7 @@ The launcher `dlopen`s the runtime and calls a frozen C ABI:
 The runtime is loaded **`RTLD_GLOBAL`** (not the `RTLD_LOCAL` default) so native
 `.node` addons `dlopen`ed later by the runtime can resolve the N-API/uv symbols
 it exports; with `RTLD_LOCAL` the addon aborts with `undefined symbol:
-napi_module_register`. See [Packages & the store](packages.md#commonjs).
+napi_module_register`. See [Dependencies & resolution](packages.md#native-addons-node).
 
 `_perm` and `_dir` are mandatory: a runtime that lacks either is refused
 (exit 4) rather than run with the wrong semantics. There is no permission-less
@@ -82,9 +83,9 @@ entry point, so deny-by-default cannot degrade to allow-all.
 
 ## Resolution
 
-ESM `import` and CJS `require()` share one policy: Deno's store-backed
-`NodeResolver`, driven by a nearest-`node_modules` walk over three derived
-roots in precedence order — `vendored/node_modules`, the project/artifact
-`node_modules` (BYONM), then the default store — followed by built-ins. Nested
-packages beat hoisted ones; store referrers stay confined to the store. See
-[Packages & the store](packages.md).
+Resolution is **offline**. ESM `import` and CJS `require()` share one policy:
+a `deno.json` import map, then a nearest-`node_modules` walk over the
+project/artifact tree (BYONM; nested beats hoisted), then `jsr:`/remote modules
+from the Deno cache (`$DENO_DIR`), then `node:` built-ins. `npm:` packages
+resolve from `node_modules`. `inka build` bundles this graph up front; `inka run`
+resolves it live. See [Dependencies & resolution](packages.md).

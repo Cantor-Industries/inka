@@ -22,7 +22,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 It installs the toolchain under `~/.local/lib/inka` (shimmed at
 `~/.local/bin/inka`), adds `~/.local/bin` to your `PATH`, and provisions the
-shared engine (runtime + package store). On macOS/other OSes, build
+shared engine (runtime). On macOS/other OSes, build
 from source (see [Building from source](#5-building-from-source)).
 
 > `install.sh --help` lists options (`--version`, `--prefix`, `--no-engine`,
@@ -31,7 +31,7 @@ from source (see [Building from source](#5-building-from-source)).
 
 ## 2. Install / update the engine
 
-The installer already provisioned the shared engine (runtime + package store).
+The installer already provisioned the shared engine (runtime).
 To update everything to the newest release:
 
 ```sh
@@ -50,9 +50,9 @@ inka update
 inka doctor
 ```
 
-`inka doctor` prints your runtime dir, installed runtimes, and your package
-store, and warns about anything missing or mismatched. If it shows a
-runtime and says no warnings, you're ready.
+`inka doctor` prints your runtime dir, installed runtimes, and project status
+(config, `node_modules`, `DENO_DIR`, bundling, launcher), and warns about
+anything missing. If it shows a runtime and no warnings, you're ready.
 
 ## 4. Build your first app
 
@@ -87,7 +87,8 @@ The toolchain is a normal Rust workspace:
 ```sh
 git clone https://github.com/Cantor-Industries/inka
 cd inka
-cargo build --release -p inka -p inka-launcher
+cargo build --release -p inka --features bundle
+cargo build --release -p inka-launcher
 # target/release/inka
 ```
 
@@ -109,7 +110,7 @@ individual crate READMEs under `crates/` for build/test commands.
 - [`inka build`](build.md) — manifests, permissions, TypeScript, multi-file apps
 - [`inka run`](run.md) — the dev runner and its permission flags
 - [Permissions](permissions.md) — why things are deny-by-default and how to grant
-- [Packages & the store](packages.md) — using and vendoring `npm:`/`jsr:` packages
+- [Dependencies & resolution](packages.md) — bundling `npm:`/`jsr:` packages
 - [Troubleshooting](troubleshooting.md) — `doctor`, exit codes, common errors
 - [CLI reference](cli.md) — every command at a glance
 - [Architecture](architecture.md) — how the launcher, tuples, and ABI work

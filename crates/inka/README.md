@@ -1,39 +1,38 @@
 # inka (CLI)
 
-The inka command-line toolchain: packs your source into a single-file
-executable (launcher + payload + manifest) that loads a shared per-machine
-Deno runtime tuple, and manages that runtime, the package store, and per-project
-vendoring.
+The inka command-line toolchain: bundles a JS/TS project into a single-file
+executable (launcher + bundle + manifest) that loads a shared per-machine Deno
+runtime tuple, and manages that runtime.
 
 See the [repository README](../../README.md) for the full architecture and
 `docs/deployment.md` for distribution.
 
 ## Commands
 
-- `inka build` — pack a `.ts`/`.js` entry (and its import graph) onto the
-  `inka-launcher` into an executable. Permission lines are baked only from
+- `inka build` — bundle a `.ts`/`.js` entry (import maps + `npm:`/`jsr:` +
+  `node_modules`) into one self-contained module and pack it onto
+  `inka-launcher`. `--minify`, `--sourcemap`, `--external <pkg>`, and
+  `--embed-dir` control the bundle. Permission lines are baked only from
   explicit build-intent sources (`-P <set>`, `deno.json compile.permissions`, an
   `inka.permissions` marker); otherwise the artifact is deny-by-default.
-  `--vendor-closure` embeds only reachable vendored modules; `--no-vendor`
-  relies on the machine default store.
 - `inka run` — execute a `.ts`/`.js` file directly through the installed
-  runtime (deno-run-style permission flags, `-A`/`-P`/granular `--allow-*`).
-- `inka install [pkg[@ver]...]` — vendor this project's dependencies
-  (`package.json`/`deno.json`) or the given packages into `vendored/`.
+  runtime (deno-run-style permission flags, `-A`/`-P`/granular `--allow-*`),
+  resolving import maps, `npm:` (node_modules), and `jsr:` (Deno cache, offline).
 - `inka update [<ver>] [--from <base>]` — self-update the toolchain (for
-  installer-managed installs) and reconcile the shared runtime and package
-  store with the newest release (or install a specific tuple), sha256-verified.
-- `inka list` / `inka doctor` — show installed tuples / a diagnostic report.
-- `inka add` / `inka remove` — per-project vendoring into `vendored/` (raw
-  packages; the engine runs CommonJS natively).
-- `inka vendor …` — vendored-set list/status and git posture.
-- `inka internal snapshot-store` — hidden release-time store snapshot builder.
+  installer-managed installs) and reconcile the shared runtime with the newest
+  release (or install a specific tuple), sha256-verified.
+- `inka list` / `inka doctor` — show installed tuples / a diagnostic report
+  (runtimes + project status).
+
+Bundling lives behind the non-default `bundle` cargo feature (release builds
+enable it); without it, `inka build` reports that bundling is unavailable.
 
 ## Build & test
 
 ```sh
-cargo build -p inka            # debug (target/debug/inka)
-cargo test -p inka --bin inka  # unit tests (config, embed, vendor, run)
+cargo build -p inka --features bundle   # debug, with bundling
+cargo build -p inka                     # lean (no rolldown)
+cargo test -p inka --bin inka           # unit tests (config, embed, run, build)
 ```
 
 The launcher must be next to the binary (`target/debug/inka-launcher`) or found
@@ -46,7 +45,8 @@ Authors).
 
 ## Acknowledgments — Deno
 
-This crate uses `deno_ast` (a Deno-project crate) for optional build-time
-TypeScript→JavaScript transpilation (`--transpile`). Deno is Copyright (c) the
-Deno authors, distributed under the MIT license (portions Apache-2.0); see
+This crate links the `inka-bundler` crate, which uses Deno-project crates
+(`deno_graph`, `deno_cache_dir`, `import_map`) for offline resolution, and
+[rolldown](https://rolldown.rs) for bundling. Deno is Copyright (c) the Deno
+authors, distributed under the MIT license (portions Apache-2.0); see
 <https://github.com/denoland/deno>.

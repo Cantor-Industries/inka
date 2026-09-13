@@ -23,30 +23,31 @@ permissions.
 
 Deny-by-default. The manifest/`inka run` DSL (`permissions=all|none`,
 `allow-<cat>`, `deny-<cat>`) maps onto the Deno permission model; prompts are
-disabled. Reads a few env vars set by the launcher/CLI: `INKA_STORE`,
-`INKA_VENDOR`, and `INKA_PRECOMPILED` (serve an archive's already-transpiled TS
-as JS).
+disabled. Reads `INKA_PRECOMPILED` (serve an archive's already-transpiled TS as
+JS). Resolution is rooted at the execution tree; `DENO_DIR` is read for `jsr:`
+and other cached remote modules.
 
-## CommonJS / node services
+## Resolution
 
-`node_services.rs` is the **single seam** over Deno's `deno_node`/`node_resolver`
-machinery. It backs Deno's native CJS loader with the inka store:
+`resolver.rs` builds an offline `deno_graph::ModuleGraph` for the entry from
+`$DENO_DIR` (a `GlobalHttpCache` loader + an `import_map` resolver), then exposes
+synchronous lookups. `node_services.rs` is the CJS/`require()` seam over Deno's
+`deno_node`/`node_resolver` machinery:
 
 - `require()` runs natively (CJS→CJS, Node builtins, nested deps, cycles),
 - ESM `import` of a CJS package is served as an ESM facade (default plus
   statically-detected named exports) via `node_resolver::analyze`,
 - `require()` of an ESM package returns the namespace.
 
-Classification: app code defaults to ESM; `.js` in the store/vendored roots
-defaults to CJS; `.cjs`/`.cts` are CJS; `.mjs`/`.mts`/`.json` are not. The
-analyzer parses the source, so an ESM file inside a package root passes through
-unchanged.
+Classification: app code defaults to ESM; `.js` under a package root defaults to
+CJS; `.cjs`/`.cts` are CJS; `.mjs`/`.mts`/`.json` are not. The analyzer parses
+the source, so an ESM file inside a package root passes through unchanged.
 
 ## Tuple updates
 
 The Deno crates are not a stable API, so the runtime pins them exactly
 (`deno_runtime = "=0.266.0"` and friends) and touches them only through the
-`node_services.rs` seam and `build.rs`. To bump a tuple, see
+`node_services.rs` / `resolver.rs` seams and `build.rs`. To bump a tuple, see
 [`docs/runtime-tuple-update.md`](../../docs/runtime-tuple-update.md).
 
 ## Build (heavy)
@@ -61,8 +62,6 @@ cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat runtime-version).so
 ```
 
-See the repository README "Building the real runtime".
-
 ## License
 
 MIT — see `LICENSE` in this directory (Copyright (c) 2026 Cantor Industries
@@ -71,6 +70,7 @@ Authors).
 ## Acknowledgments — Deno
 
 This crate embeds the Deno runtime: `deno_core`, `deno_runtime`, `deno_error`,
-`deno_semver` (and `deno_ast` for build-time snapshot generation). Deno is the
-work of the Deno authors, Copyright (c) the Deno authors, distributed under the
-MIT license (portions Apache-2.0); see <https://github.com/denoland/deno>.
+`deno_semver`, `deno_graph`, `deno_cache_dir`, `import_map` (and `deno_ast` for
+build-time snapshot generation). Deno is the work of the Deno authors,
+Copyright (c) the Deno authors, distributed under the MIT license (portions
+Apache-2.0); see <https://github.com/denoland/deno>.

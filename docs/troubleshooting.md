@@ -1,7 +1,8 @@
 # Troubleshooting
 
-Start with `inka doctor` — it prints the runtime dirs, installed runtimes, the
-default store (packages + seed `sha256`), the vendored pool, and any warnings.
+Start with `inka doctor` — it prints the runtime dirs, installed runtimes, and
+project status (config files, `node_modules`, `DENO_DIR`, bundling capability,
+launcher), plus any warnings.
 
 ## Exit codes
 
@@ -27,25 +28,29 @@ runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
 **`NotCapable` / permission errors.** inka artifacts are deny-by-default. Grant
 access with `-A`, `-P`, or granular `--allow-*` (see [Permissions](permissions.md)).
 
-**Store missing / `packages=0`.** `inka update` seeds the default store. If
-`inka doctor` warns that `vendored.lock` was built against a different store,
-re-run `inka update` or re-vendor the affected packages.
+**Build fails: package not found.** `inka` is offline. Install dependencies with
+your package manager (so they are in `node_modules`), and for `jsr:` run
+`deno cache`/`deno install` first so the module is in `DENO_DIR`.
 
-**Artifact runs on one machine but not another.** The dependency came from the
-default store, which differs per machine. Vendor the closure (`inka install`,
-`inka build --vendor-closure`) or ensure both machines share the same store
-identity (`inka doctor`).
+**`jsr:` works at build time but not at run time.** `inka build` inlines bundled
+`jsr:` code, so the artifact needs no cache. If you passed `--external`, the
+files are embedded instead. `inka run` resolves `jsr:` from `DENO_DIR` live, so an
+uncached package errors.
+
+**Native `.node` addon fails.** Native addons must be left external
+(`inka build --external <pkg>`) so their files are embedded, and the artifact must
+grant `ffi` (plus `sys` for platform detection) at run time.
+
+**"inka was built without bundling support".** The `inka` binary was compiled
+without the `bundle` feature. Use an official release, or build with
+`cargo build --release -p inka --features bundle`.
 
 **`inka update` can't reach the channel.** Set `INKA_RELEASE_BASE` (or pass
 `--from`) to a reachable release base; `inka update <ver> --from <dir>` works
 fully offline against a local directory.
 
-**Coming from 0.3.x (or older) to 0.4.0.** 0.4.0 is a clean break: the resolver
-was retired and the runtime tuple moved to `0.266.4`. `inka update` will not
-cross this boundary — re-run `install.sh` (the same command you installed with).
-It detects the pre-0.4.0 install and resets the old toolchain, runtime, and store
-before provisioning 0.4.0. From 0.4.0 on, `inka update` self-updates normally.
-
-**Leftover `libinka_resolver-*.so` or old `libinka_runtime-*.so`.** These are
-pre-0.4.0 engine files. The 0.4.0 `install.sh` removes them during its reset;
-`inka doctor` no longer reports a resolver.
+**Coming from 0.4.x (or older) to 0.5.0.** 0.5.0 is a clean break: the package
+store and vendoring were removed, `inka build` now bundles, and the runtime tuple
+moved to `0.266.5`. `inka update` will not cross this boundary — re-run
+`install.sh` (the same command you installed with). It detects the pre-0.5.0
+install and resets the old toolchain and runtime before provisioning fresh.

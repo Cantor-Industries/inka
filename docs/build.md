@@ -1,13 +1,12 @@
 # `inka build`
 
-Packs a source file (and the files it imports) onto the launcher into a single
-executable.
+Bundles a source file and its dependencies into one self-contained module, then
+packs it onto the launcher into a single executable.
 
 ```sh
 inka build [source] [-s|--source <file>] [-o|--output <file>]
-           [--runtime <spec>] [--tested-against <ver>]
-           [-P <name>] [--transpile] [--embed-dir] [--vendor-closure] [--no-vendor]
-           [--no-node-modules]
+           [--runtime <spec>] [--tested-against <ver>] [-P <name>]
+           [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 ```
 
 ## Defaults
@@ -18,23 +17,40 @@ inka build [source] [-s|--source <file>] [-o|--output <file>]
 - **Launcher** — found at `$INKA_LAUNCHER`, else `inka-launcher` next to the
   `inka` binary.
 
+## What gets bundled
+
+`inka build` resolves the entry's imports (import maps, bare `node_modules`,
+`npm:`, `jsr:`, `node:`) and bundles them with
+[rolldown](https://rolldown.rs) into one ESM module. TypeScript is transpiled and
+tree-shaking is on. `node:` built-ins stay external (the engine provides them).
+
+- `--minify` — minify the bundle.
+- `--sourcemap` — embed an inline source map.
+- `--external <pkg>` — leave a package **unbundled** but embed its files from
+  `node_modules` (repeatable). Use it for native `.node` addons and packages that
+  cannot be statically bundled.
+- `--embed-dir` — also embed the whole current-directory tree (minus `.git`,
+  `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files.
+
+The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
+needs no `node_modules` or Deno cache at run time.
+
 ## The embedded manifest
 
 `inka build` derives a small `key=value` manifest from your project config and
-embeds it in the executable. It tells the runtime what the artifact needs and
-may do:
+embeds it. It tells the runtime what the artifact needs and may do:
 
 ```
-runtime=inka_runtime>=0.266.4     # minimum engine floor
-tested-against=0.266.4            # optional cap: never auto-run on something newer
-module=app.js                     # entry name (always derived from the build)
+runtime=inka_runtime>=0.266.5     # minimum engine floor
+tested-against=0.266.5            # optional cap: never auto-run on something newer
+module=main.js                    # entry name (always derived from the build)
 allow-read=./data,/etc            # permissions
 ```
 
-There is **no on-disk manifest input**: `module=` is always the packed entry,
-and the runtime requirement comes from `inka.runtime` (or `--runtime`) with a
-default floor of `>=0.266.4`. The floor is always embedded, so an artifact can
-never select a runtime too old to enforce its permissions.
+There is **no on-disk manifest input**: `module=` is always the packed entry, and
+the runtime requirement comes from `inka.runtime` (or `--runtime`) with a default
+floor of `>=0.266.5`. The floor is always embedded, so an artifact can never
+select a runtime too old to enforce its permissions.
 
 ## Permissions from project config
 
@@ -48,77 +64,24 @@ could modify `deno.json` to elevate permissions):
 | `deno.json.compile.permissions` (category map, or a string naming a set) | baked automatically (build *is* the compile step) |
 | `inka.permissions = "<set>"` marker (under the `inka` block; deno wins) | that named set |
 | `permissions.default.<cat>` with **no** marker | **ignored** + a warning; artifact stays deny-by-default |
-| *(none)* | deny-all + `runtime=inka_runtime>=0.266.4` |
-
-A plain `permissions.default` set exists so local runs (`deno run -P`,
-`deno task`) are frictionless; to bake it explicitly use `-P default`,
-`compile.permissions: "default"`, or an `inka.permissions` marker. Unknown or
-malformed sources warn and produce a deny-by-default artifact — never a silent
-fall-back. `inka.runtime` / `inka.tested-against` emit `runtime=…` /
-`tested-against=…`; `--runtime '<spec>'` / `--tested-against <ver>` override the
-config.
+| *(none)* | deny-all + `runtime=inka_runtime>=0.266.5` |
 
 Full details, including the config-set shapes: [Permissions](permissions.md).
 
-## Local imports & multi-file apps
-
-Importing other files just works — build from the project root so the entry has
-a cwd-relative path:
-
-```sh
-# src/main.ts importing ./lib/util.ts etc.
-inka build src/main.ts     # -> ./src/main executable
-./src/main
-```
-
-Embedding is automatic and happens in one of two modes:
-
-- **Import closure (default):** static imports/exports, literal `import("./x")`,
-  and `.json` are discovered from the entry and embedded. A non-literal dynamic
-  `import(...)` can't be seen statically → a warning suggests `--embed-dir`.
-- **`--embed-dir`:** embed the whole current-directory tree (skipping `.git`,
-  `target`, `node_modules`, `.inka`, `dist`) for computed dynamic imports.
-
-### Dependency embedding
-
-- **Project `node_modules`** — when the project has a `node_modules` directory,
-  `inka build` embeds the reachable graph under `node_modules/…` so the artifact
-  is self-contained (hoisted, nested, and symlinked layouts all work).
-  `--no-node-modules` opts out (dependencies then resolve from the machine
-  store).
-- **`vendored/`** — the whole per-project vendored tree is embedded by default.
-  `--vendor-closure` embeds only the vendored modules reachable from the entry
-  graph (each reached root's `package.json` included). `--no-vendor` embeds no
-  vendored packages. Store-only packages always resolve from the machine store at
-  run time.
-
-Combining `--vendor-closure`/`--no-vendor` with `--embed-dir` errors (the
-whole-tree embed already includes `vendored/`).
-
 ## TypeScript
 
-Single-file and multi-file TypeScript work with no extra steps:
+TypeScript works with no extra steps — the bundler transpiles it:
 
 ```sh
-inka build app.ts        # -> ./app (module=app.ts is set for you)
+inka build app.ts        # -> ./app
 ./app kook
 ```
 
-TS → JS happens one of two ways:
-
-- **Runtime transpile (default):** the artifact keeps your `.ts` source; the
-  shared runtime transpiles it at load with its own compiler.
-- **Build-time transpile:** `inka build app.ts --transpile` ships pure JS.
-  Multi-file apps work too — each `.ts/.mts/.cts` module is transpiled at build
-  time but keeps its original archive path (no import rewriting), and the
-  archive trailer tells the runtime not to re-transpile.
-
-`.tsx`/`.jsx` are not supported yet (`--transpile` handles `.ts/.mts/.cts`;
-JSX entries error).
+`.tsx`/`.jsx` are supported by the bundler.
 
 ## See also
 
 - [`inka run`](run.md) — the no-build dev runner
 - [Permissions](permissions.md)
-- [Packages & the store](packages.md)
+- [Dependencies & resolution](packages.md)
 - [CLI reference](cli.md)

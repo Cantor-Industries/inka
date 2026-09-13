@@ -1,23 +1,20 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--transpile] [--embed-dir] [--vendor-closure|--no-vendor] [--no-node-modules]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
-inka install [pkg[@ver]...] [--force] [--prod]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
-             [--no-toolchain|--toolchain-only|--store-only] [--no-runtime] [--no-store]
-inka add     <pkg[@ver]> [--force]
-inka remove  <pkg>
-inka vendor  list|status|release|ignore
+             [--no-toolchain|--toolchain-only] [--no-runtime]
 inka list    [--home <dir>]
 inka doctor
 ```
 
 ## `build`
 
-Pack the launcher + your source (and its import closure) + a manifest into one
-executable. Permissions bake only from explicit build-intent sources; otherwise
-the artifact is deny-by-default. See [Build](build.md).
+Bundle the entry (import maps + `npm:`/`jsr:` + `node_modules`) into one
+self-contained module, then pack it onto the launcher with a manifest.
+Permissions bake only from explicit build-intent sources; otherwise the artifact
+is deny-by-default. See [Build](build.md).
 
 ## `run`
 
@@ -27,56 +24,37 @@ config set, `--allow-<cat>[=list]` / `--deny-<cat>[=list]` are granular
 (`cat`: `read|write|net|env|run|sys|ffi`). `--runtime <ver>` picks a specific
 tuple; `--` ends options. See [Run](run.md).
 
-## `install`
-
-Vendor dependencies into the project's `vendored/`:
-
-- no arguments: every root declared in `package.json` `dependencies` and
-  `deno.json` `imports`;
-- with arguments: those packages (same as `inka add`).
-
-Already-vendored or store-provided packages are skipped (idempotent). Ranges are
-resolved and pinned exactly. See [Packages & the store](packages.md).
-
 ## `update`
 
-Reconcile the toolchain and shared engine with the release channel:
+Reconcile the toolchain and shared runtime with the release channel:
 
 - no version: read `<base>/versions.json`; self-update the toolchain when an
-  installer-managed install is present (`VERSION` marker), install only the
-  runtime when it is missing or behind, and sync the store snapshot
-  (`sha256`-gated). Never downgrades; older runtime tuples are kept.
+  installer-managed install is present (`VERSION` marker), and install the
+  runtime when it is missing or behind. Never downgrades; older runtime tuples
+  are kept.
 - `<version>`: install that exact runtime tuple (offline/pinned).
 
-`--no-toolchain`/`--toolchain-only` control the toolchain; `--store-only`
-provisions just the package store; `--no-runtime`, `--no-store` skip individual
-components.
+`--no-toolchain`/`--toolchain-only` control the toolchain; `--no-runtime` skips
+the runtime.
 
 Base resolution: `--from` → `$INKA_RELEASE_BASE` → `$INKA_RT_SOURCE` → the
 built-in GitHub latest-release URL. `--sha256` pins a checksum; `--insecure`
 skips verification; `--home <dir>` sets the runtime install dir. See
 [Install & upgrade](install-and-upgrade.md).
 
-## `add` / `remove` / `vendor`
-
-Per-project vendoring into a real npm tree (`vendored/node_modules/…`). `add`
-re-resolves the whole root set and vendors one package; `remove` drops a root and
-re-resolves; `vendor list|status` inspect roots and store coverage; `vendor
-release|ignore` set the git posture of `vendored/`.
-
 ## `list` / `doctor`
 
 `list` prints installed runtime tuples (across all search dirs; `--home` narrows
-to one). `doctor` prints a full diagnostic report.
+to one). `doctor` prints a diagnostic report: installed runtimes plus project
+status (config files, `node_modules`, `DENO_DIR`, bundling capability, launcher).
 
 ## Environment
 
 | Variable | Effect |
 |---|---|
-| `XDG_DATA_HOME` | base for `inka/runtime` and `inka/store` (default `~/.local/share`) |
+| `XDG_DATA_HOME` | base for `inka/runtime` (default `~/.local/share`) |
 | `INKA_RUNTIME_HOME` | override the per-user runtime dir |
-| `INKA_STORE` | override the default store dir |
-| `INKA_VENDOR` | override the vendored root |
+| `DENO_DIR` | Deno cache read for `jsr:`/remote resolution (default `~/.cache/deno`) |
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
 | `INKA_DEBUG` | verbose runtime/resolution logging |

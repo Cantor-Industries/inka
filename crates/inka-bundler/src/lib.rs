@@ -348,4 +348,77 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&cwd);
     }
+
+    #[test]
+    fn external_package_is_not_inlined() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/ms/package.json",
+            r#"{"name":"ms","version":"2.1.3","main":"index.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/ms/index.js",
+            "module.exports = function ms() { return \"marker-inlined\"; };\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import ms from \"ms\";\nconsole.log(ms());\n",
+        );
+        let external = vec!["ms".to_string()];
+        let opts = || BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &external,
+            minify: false,
+            sourcemap: false,
+        };
+        let a = bundle(opts()).unwrap();
+        let b = bundle(opts()).unwrap();
+        assert_eq!(a.code, b.code, "bundle must be deterministic");
+        assert!(
+            !a.code.contains("marker-inlined"),
+            "external package must not be inlined:\n{}",
+            a.code
+        );
+        assert!(
+            a.code.contains("ms"),
+            "expected an external import of ms:\n{}",
+            a.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn minify_is_deterministic() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/pkg/package.json",
+            r#"{"name":"pkg","version":"1.0.0","main":"index.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/pkg/index.js",
+            "module.exports = { f: (a, b) => a * b };\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import p from \"pkg\";\nconsole.log(p.f(6, 7));\n",
+        );
+        let opts = || BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: true,
+            sourcemap: false,
+        };
+        let a = bundle(opts()).unwrap();
+        let b = bundle(opts()).unwrap();
+        assert_eq!(a.code, b.code, "minified bundle must be deterministic");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
 }

@@ -1,10 +1,10 @@
 # `inka run`
 
 Executes a `.ts`/`.js`/`.mjs`/`.cts` file directly through the installed
-runtime — no artifact build. Imports (relative, the project's `node_modules`,
-vendored, store, and `node:`) resolve exactly as they would in a built artifact,
-and `.ts` is transpiled at load. A project with a `node_modules` directory needs
-no vendoring step: `inka run` resolves from it directly.
+runtime — no artifact build. Imports (relative, `deno.json` import maps, the
+project's `node_modules`, `npm:` via `node_modules`, and `jsr:` from the Deno
+cache) resolve exactly as they would in a built artifact, and `.ts` is
+transpiled at load.
 
 ```sh
 inka run [options] <file> [args...]
@@ -55,8 +55,8 @@ Rules:
 
 The entry resolves like a build: a file under the current directory is rooted at
 the current directory; an **outside-cwd file** is rooted at its nearest ancestor
-project (a `vendored/`, `package.json`, or `deno.json`) or its own directory
-otherwise. Relative imports stay bounded by that root.
+project (a `package.json` or `deno.json`) or its own directory otherwise.
+Relative imports stay bounded by that root.
 
 ## See also
 

@@ -1,11 +1,11 @@
 # inka-launcher
 
-The tiny host that every inka artifact is built on. `inka build` appends your
-source + manifest onto this launcher; when you run the resulting file, the
-launcher:
+The tiny host that every inka artifact is built on. `inka build` appends the
+bundle (+ any embedded files) and manifest onto this launcher; when you run the
+resulting file, the launcher:
 
-1. parses its own trailer (single-file payload, or an `INKFOOT3`/`INKFOOT4`
-   multi-file archive, optionally TS pre-transpiled),
+1. parses its own trailer (an `INKFOOT5` bundle + embedded files, or a legacy
+   `INKFOOT2`/`INKFOOT3`/`INKFOOT4` payload),
 2. finds a compatible runtime tuple (`libinka_runtime-<v>.so`) under
    `INKA_RUNTIME_HOME` / `~/.local/share/inka/runtime` matching the manifest's
    `runtime=` floor and `tested-against=` cap,
@@ -17,10 +17,9 @@ launcher:
    entry points. There is no permission-less fallback, so deny-by-default can
    never degrade to allow-all.
 
-It also sets up the environment the runtime reads: default `INKA_STORE` to a
-`store/` dir next to the runtime, and `INKA_VENDOR` to the artifact's embedded
-`vendored/` tree (cleared otherwise, so a caller-exported `INKA_VENDOR` never
-leaks in).
+Archive artifacts are extracted to a temp tree and run with that tree as the
+execution root, so embedded `node_modules/…` files (from `--external`) resolve
+there.
 
 ## Build
 

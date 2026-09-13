@@ -18,14 +18,13 @@ The script:
 2. symlinks `<prefix>/bin/inka` and adds `<prefix>/bin` to your `PATH`
    (`--no-modify-path` to skip);
 3. runs `inka update` to provision the shared **runtime** under
-   `~/.local/share/inka`, then seeds the default package **store** as its own
-   step.
+   `~/.local/share/inka`.
 
 ### Options
 
 The defaults are sensible: install to `~/.local` (toolchain `<prefix>/lib/inka`,
 shim `<prefix>/bin/inka`), add `~/.local/bin` to `PATH`, and provision the
-runtime and store under `~/.local/share/inka`.
+runtime under `~/.local/share/inka`.
 
 To pass options through the pipe, use `sh -s --` (the `--` stops `sh` from
 parsing them):
@@ -42,8 +41,8 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 | `--from <dir-or-url>` | release base override (mirror / local staging) |
 | `--prefix <dir>` | toolchain prefix (default `$HOME/.local`) |
 | `--no-modify-path` | do not edit shell rc files |
-| `--no-engine` | skip runtime (the store still seeds) |
-| `--no-runtime` / `--no-store` | skip individual components |
+| `--no-engine` | skip the runtime |
+| `--no-runtime` | skip the runtime `.so` |
 | `--uninstall` | remove the toolchain (and engine) |
 
 To pin **both** the script and the assets, fetch the script from the tag rather
@@ -66,9 +65,9 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 inka doctor
 ```
 
-`doctor` prints the runtime dirs, the installed runtimes, the default store
-(packages + seed `sha256`), and any warnings. If it shows a runtime and no
-warnings, you're ready.
+`doctor` prints the runtime dirs, the installed runtimes, project status
+(config, `node_modules`, `DENO_DIR`, bundling, launcher), and any warnings. If it
+shows a runtime and no warnings, you're ready.
 
 ## First app
 
@@ -86,25 +85,22 @@ inka build app.ts         # -> ./app  (manifest derived from config, deny-by-def
 ## Upgrade
 
 ```sh
-inka update               # toolchain + runtime + store, newest
+inka update               # toolchain + runtime, newest
 inka update <ver> --from <base>   # a specific runtime tuple (offline/pinned)
 ```
 
-> **Coming from 0.3.x?** 0.4.0 is a clean break: the resolver was retired
-> (resolution is now unified on Deno's `NodeResolver`) and the runtime tuple
-> moved to `0.266.4`. Just re-run `install.sh` once — it detects a pre-0.4.0
-> install and resets the old toolchain, runtime, and store before provisioning
-> the new release. `inka update` alone will not cross this boundary. From 0.4.0
-> on, `inka update` self-updates normally.
+> **Coming from 0.4.x?** 0.5.0 is a clean break: the package store and vendoring
+> were removed and `inka build` now bundles. Just re-run `install.sh` once — it
+> detects a pre-0.5.0 install and resets the old toolchain and runtime before
+> provisioning the new release. `inka update` alone will not cross this boundary.
+> From 0.5.0 on, `inka update` self-updates normally.
 
 `inka update` reconciles every component against `<base>/versions.json`:
 
 - **toolchain** — self-updates when a newer release exists (only for
   installer-managed installs, i.e. those with a `VERSION` marker);
 - **runtime** — installs only when missing or a newer tuple exists; never
-  downgrades, and leaves older tuples in place;
-- **store** — replaces `node_modules` when the release's snapshot `sha256`
-  differs.
+  downgrades, and leaves older tuples in place.
 
 The base defaults to the GitHub latest-release URL and is overridable with
 `--from`, `INKA_RELEASE_BASE`, or `INKA_RT_SOURCE`.
@@ -116,7 +112,7 @@ The base defaults to the GitHub latest-release URL and is overridable with
 | Toolchain (`inka`, launcher) | `<prefix>/lib/inka` (`$HOME/.local/lib/inka`) | `--prefix` at install |
 | Toolchain shim | `<prefix>/bin/inka` | — |
 | Runtime | `~/.local/share/inka/runtime` | `INKA_RUNTIME_HOME` |
-| Default package store | `~/.local/share/inka/store` | `INKA_STORE` |
+| Deno cache (read for `jsr:`) | `~/.cache/deno` | `DENO_DIR` |
 
 `~/.local/share` is `$XDG_DATA_HOME` when set.
 
@@ -125,7 +121,8 @@ The base defaults to the GitHub latest-release URL and is overridable with
 ```sh
 git clone https://github.com/Cantor-Industries/inka
 cd inka
-cargo build --release -p inka -p inka-launcher
+cargo build --release -p inka --features bundle
+cargo build --release -p inka-launcher
 ```
 
 The **runtime** (`crates/inka-runtime`) is the heavy part — a Deno/V8 build that
@@ -149,7 +146,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 ```
 
 This removes the toolchain, the `PATH` block, and `~/.local/share/inka`
-(runtime + store).
+(runtime).
 
 ## Versioning
 
@@ -157,7 +154,7 @@ Two independent version lines:
 
 - **Toolchain** — the release tag (`v0.4.0`); the `inka` crate version tracks it.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
-  revision: `0.266.0` → `0.266.1`, …, `0.266.4`; when the base moves to
+  revision: `0.266.0` → `0.266.1`, …, `0.266.5`; when the base moves to
   `0.267.0`, revisions restart at `0.267.1`. See
   `crates/inka-runtime/runtime-version`.
 

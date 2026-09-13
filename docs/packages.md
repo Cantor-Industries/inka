@@ -1,106 +1,79 @@
-# Packages & the store
+# Dependencies & resolution
 
-inka resolves `npm:`/`jsr:` (and bare) imports from these tiers, checked in
-order:
+inka does **no package management**. It expects an existing project managed by
+any package manager (npm, pnpm, yarn, bun, or Deno) and resolves/bundles from
+what is already on disk.
 
-1. **Project `vendored/`** — a real npm `node_modules` tree
-   (`vendored/node_modules/…`) committed or ignored with your project (see
-   `inka vendor release|ignore`). Self-contained and version-pinned; it shadows
-   the tiers below.
-2. **Project `node_modules`** — if your project already has one (created by
-   `npm`, `yarn`, `pnpm`, or `deno install`), inka resolves from it
-   (bring-your-own-node_modules). Hoisted, nested (conflicting versions), and
-   symlinked layouts (Deno isolated `.deno/`, pnpm `.pnpm/`) all work.
-3. **Machine default store** — `~/.local/share/inka/store` (`$INKA_STORE`
-   overrides), a shared hoisted `node_modules` pool seeded from a release
-   snapshot and kept current by `inka update`.
-4. **Built-ins** — Node built-ins served by the engine.
+## Resolution order
 
-Within a tree the **nearest `node_modules` wins** (a nested version beats a
-hoisted one). Store-internal imports never consult project tiers; project code
-resolves vendored → project `node_modules` → store.
+`inka build` and `inka run` resolve imports from:
 
-## Bring your own `node_modules`
+1. **Import map** — `deno.json`/`deno.jsonc` `imports`/`scopes` (bare specifiers
+   and remaps).
+2. **Project `node_modules`** — bring-your-own-node_modules. Hoisted, nested
+   (conflicting versions), and symlinked layouts (Deno isolated `.deno/`, pnpm
+   `.pnpm/`) all work; the **nearest `node_modules` wins**.
+3. **Deno cache (`DENO_DIR`)** — `jsr:` modules (and any cached remote `https:`)
+   are read from `$DENO_DIR/remote`; `npm:` resolves against `node_modules`.
+4. **Built-ins** — `node:` modules served by the engine.
 
-If a project already has a `node_modules` directory, `inka run` resolves bare
-imports from it with no vendoring step. `inka build` **auto-embeds** the
-reachable `node_modules` graph into the artifact so it stays self-contained;
-pass `--no-node-modules` to leave dependencies to the machine store instead.
+`inka` is **offline**: it never fetches from the network. If a `jsr:` package is
+not in the Deno cache, run `deno cache`/`deno install` first.
 
-## The default store
+## `inka build` bundles
 
-The store is a normal npm layout (`node_modules/` + `seed-manifest.json`). It is
-provisioned automatically:
+`inka build` walks the entry graph (import maps, bare, `npm:`, `jsr:`, `node:`)
+and bundles it with [rolldown](https://rolldown.rs) into one self-contained ESM
+module, then packs it onto the launcher. TypeScript is transpiled; tree-shaking
+is on. Options:
 
-- `install.sh` seeds it on first install (it runs `inka update`; see
-  [Install & upgrade](install-and-upgrade.md));
-- `inka update` fetches `seed-manifest.json` + `store.tar.gz` from the release
-  channel and replaces `node_modules` when the recorded `sha256` differs.
+- `--minify` — minify the bundle.
+- `--sourcemap` — embed an inline source map.
+- `--external <pkg>` — leave a package **unbundled** but embed its files from
+  `node_modules` (the artifact resolves it from the extracted tree at run time).
+- `--embed-dir` — also embed the whole current-directory tree (for assets).
 
-Nothing installs or runs on the consumer machine — the snapshot is built once,
-at release time, with pre/postinstall already applied.
+Everything else (import maps, `npm:`, `jsr:`, `node_modules`) is inlined, so the
+artifact needs no `node_modules` or Deno cache at run time.
 
-## Declaring dependencies
+## `inka run` executes directly
 
-`package.json` `dependencies` and `deno.json` `imports` are the project's root
-set. Vendor all of them, or individual packages:
-
-```sh
-inka install                 # vendor every declared root
-inka install zod@3.23.8      # vendor specific packages (like `inka add`)
-inka add nanoid              # vendor one package
-inka remove nanoid           # un-vendor a package
-```
-
-`vendored/` holds a real npm `node_modules` tree. `inka add`/`install`/`remove`
-re-resolve the whole root set with one `npm install`, so transitive version
-conflicts are **nested** rather than rejected:
-
-```
-vendored/node_modules/ms/                       # hoisted (a root)
-vendored/node_modules/debug/node_modules/ms/    # nested (a conflict)
-```
-
-- If the default store already provides the exact resolved root, nothing is
-  vendored (root-level dedupe). Use `--force` to vendor anyway.
-- Ranges (`^1.2`, `~1.2.3`, `>=…`) are resolved via npm and pinned to the
-  resolved exact version in your manifests and `vendored.lock`.
-- `jsr:@scope/pkg` is stored under its npm-mirror identity `@jsr/scope__pkg`.
+`inka run` executes a `.ts`/`.js` entry through the installed runtime without
+building. It resolves import maps, bare `node_modules`, `npm:` (node_modules),
+and `jsr:` (Deno cache, offline). Uncached `jsr:` packages are a clear error.
 
 ## CommonJS
 
-The engine runs CommonJS natively, so vendored, project `node_modules`, and
-store packages are shipped exactly as npm resolves them — no conversion step.
-`require()` works inside CJS packages (including nested deps and cycles), and
-ESM `import` of a CJS package is served as an ESM facade with `default` plus
-statically-detected named exports.
+The engine runs CommonJS natively. `require()` works inside CJS packages
+(including nested deps and cycles), and ESM `import` of a CJS package is served
+as an ESM facade with `default` plus statically-detected named exports. `npm:`
+packages are taken from `node_modules` exactly as npm resolves them.
 
-Native `.node` (N-API) addons load from the store or a project-local
-`node_modules`/vendored tree, but they are **opt-in**: deny-by-default still
-applies, so the artifact or `inka run` must grant `ffi` for the addon path (and
-`sys` for platform detection, e.g. `detect-libc`). Without it, requiring an
-addon fails with a clean `NotCapable` rather than crashing. For example:
+## Native addons (`.node`)
+
+Native addons cannot be bundled, so leave the package external so its files are
+embedded:
 
 ```sh
-inka run --allow-sys --allow-ffi app.ts   # or bake the same grants at build time
+inka build app.ts --external @parcel/watcher
 ```
 
-## Inspecting
+They are **opt-in** at run time: deny-by-default still applies, so grant `ffi`
+for the addon path (and usually `sys` for platform detection such as
+`detect-libc`). Without it, loading the addon fails with a clean `NotCapable`
+rather than crashing.
 
 ```sh
-inka vendor list     # vendored roots + node_modules package count
-inka vendor status   # vendored roots + default-store coverage, lock drift
-inka doctor          # store path, package count, seed sha, vendored pool
+inka run --allow-sys --allow-ffi app.ts   # or bake the grants at build time
 ```
 
-`vendored.lock` (format v2) records the declared roots and the default-store
-identity used at vendor time; `inka doctor` warns (never fails) when the current
-store differs.
+## Declaring dependencies
 
-## Building offline / portable
+inka reads `package.json` (`dependencies`) and `deno.json` (`imports`) only for
+the **permission/runtime manifest** — it does not install anything. Declare and
+install dependencies with your package manager as usual:
 
-- `inka build` embeds the project `node_modules` closure and the `vendored/`
-  tree automatically. `--no-node-modules` and `--no-vendor` opt out (the
-  artifact then resolves from the machine store at run time).
-- `inka build --vendor-closure` embeds only the vendored modules reachable from
-  the entry graph.
+```sh
+npm install zod
+inka build app.ts      # zod is bundled
+```

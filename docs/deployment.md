@@ -2,9 +2,9 @@
 
 How inka itself is distributed and how the executables it builds are deployed.
 inka's core property drives every choice here: **the engine is not in the file.**
-A built artifact is a small launcher + your payload + a manifest; it loads a
-shared per-machine runtime tuple (`libinka_runtime-<v>.so`) plus an optional
-package store. That makes runtime upgrades independent of your artifacts.
+A built artifact is a small launcher + a bundled module + a manifest; it loads a
+shared per-machine runtime tuple (`libinka_runtime-<v>.so`). That makes runtime
+upgrades independent of your artifacts.
 
 ## Distribution model
 
@@ -13,11 +13,10 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 
 - `install.sh` downloads the toolchain archive, verifies its `sha256`, installs
   it under `<prefix>/lib/inka` (default `~/.local`), symlinks
-  `<prefix>/bin/inka`, and then runs `inka update` to provision the runtime and
-  store.
-- `inka update` keeps the toolchain, runtime, and store current from the same
-  release channel. The runtime is fetched only when missing or newer; older
-  tuples are retained for roll-forward.
+  `<prefix>/bin/inka`, and then runs `inka update` to provision the runtime.
+- `inka update` keeps the toolchain and runtime current from the same release
+  channel. The runtime is fetched only when missing or newer; older tuples are
+  retained for roll-forward.
 
 ## What ships where
 
@@ -25,7 +24,9 @@ inka ships as GitHub Release assets fetched by a bootstrap script
 |---|---|---|
 | Toolchain (`inka`, `inka-launcher`) | `<prefix>/lib/inka`, shimmed at `<prefix>/bin/inka` | `install.sh`, then `inka update` |
 | `libinka_runtime-<v>.so` | `~/.local/share/inka/runtime` (`INKA_RUNTIME_HOME`) | `inka update` |
-| default store (`node_modules` + record) | `~/.local/share/inka/store` (`INKA_STORE`) | `inka update` (sha-gated) |
+
+There is no package store: dependencies come from each project's own
+`node_modules` and the Deno cache (`DENO_DIR`) at build/run time.
 
 ## Release assets
 
@@ -34,8 +35,6 @@ Each `v*` tag publishes:
 - `inka-toolchain-<rel>-x86_64-unknown-linux-gnu.tar.gz` (+ `.sha256`) — CLI +
   launcher;
 - `libinka_runtime-<runtime>.so` (+ `.sha256`) — the shared runtime tuple;
-- `store.tar.gz` (+ `.sha256`) + `seed-manifest.json` — the default store
-  snapshot;
 - `install.sh` and `versions.json`.
 
 `versions.json` records the release, the toolchain block (version/target/archive/
@@ -47,17 +46,16 @@ sha256), the runtime tuple and its base `deno_runtime`, and the runtime `sha256`
 `.github/workflows/release.yml` runs on a self-hosted runner whenever a `v*`
 tag is pushed:
 
-1. **Build** the toolchain (`inka`, `inka-launcher`) and the runtime `.so`. The
-   runtime tuple version comes from `crates/inka-runtime/runtime-version` (base
-   `deno_runtime` + inka revision).
-2. **Snapshot** the default store (`inka internal snapshot-store`).
-3. **Stage + package**: the toolchain tarball, engine assets, `store.tar.gz` +
-   `seed-manifest.json`, `install.sh`, `versions.json`, and `.sha256` sidecars.
-4. **Smoke** the staged release in a throwaway prefix/store by running
-   `install.sh --from <stage>` and then doctor, store-mode imports, an artifact
-   build+run, permission enforcement, and a vendored CJS require. Any failure
-   aborts before publishing.
-5. **Publish** the assets to the GitHub Release for the tag (refuses to
+1. **Build** the toolchain (`inka --features bundle`, `inka-launcher`) and the
+   runtime `.so`. The tuple version comes from
+   `crates/inka-runtime/runtime-version`.
+2. **Stage + package**: the toolchain tarball, runtime `.so`, `install.sh`,
+   `versions.json`, and `.sha256` sidecars.
+3. **Smoke** the staged release in a throwaway prefix by running
+   `install.sh --from <stage>` and then doctor, a simple run + build, permission
+   enforcement, an `--external` artifact, an import-map→jsr artifact (offline at
+   run time), and the runtime matrix. Any failure aborts before publishing.
+4. **Publish** the assets to the GitHub Release for the tag (refuses to
    re-publish a tag that already has a release).
 
 Runner setup: register a self-hosted runner (label `self-hosted`) and give its
@@ -70,16 +68,10 @@ After a release is published, run the checklist in
 
 ## App deployment
 
-A built artifact is self-contained **except** for dependencies that resolve from
-the default store at run time (anything not vendored). Two deployment styles:
-
-- **Fully portable single exe**: build on a machine/step without a store
-  (`INKA_STORE` pointing at an empty dir) so `inka add` vendors the whole
-  closure; copy the exe anywhere. Recommended for third-party distribution.
-- **Store-mode app**: build with the target store present and deploy the exe +
-  ensure the machine's store identity matches (compare `inka doctor` /
-  `vendored.lock` store note); reseed if it drifted. Best when one store serves
-  many apps on a host/container.
+A built artifact is **self-contained**: `inka build` bundles the reachable
+dependency graph, and `--external <pkg>` packages are embedded from
+`node_modules`. Copy the executable anywhere; it needs only a compatible shared
+runtime on the target machine (installed by `install.sh`/`inka update`).
 
 ### Containers
 
@@ -96,14 +88,15 @@ ENV PATH=/root/.local/bin:$PATH
 # copy your built executable(s) in and run them
 ```
 
-App builds can happen in a separate builder stage (with the store present for
-deterministic store-mode resolution) and only the resulting exe copied in.
+App builds can happen in a separate builder stage (with the project's
+`node_modules` and, for `jsr:`, a populated `DENO_DIR`); only the resulting
+executable needs to be copied in.
 
 ## Operations
 
 - After any install/upgrade/deploy, run `inka doctor`; it reports runtime dirs,
-  installed runtimes, store packages + sha, and the vendored pool, and prints
-  warnings.
+  installed runtimes, and project status (config, `node_modules`, `DENO_DIR`,
+  bundling capability, launcher), and prints warnings.
 - Releases carry `.sha256` sidecars and are verified on install. Today that
   verifies integrity, not authenticity — sign checksums (e.g. minisign) and pin
   a trust anchor for production distribution.
