@@ -1,0 +1,29 @@
+[package]
+name = "inka-bundler"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+deno_cache_dir = "=0.50.0"
+deno_error = "=0.7.1"
+deno_graph = "=0.111.0"
+futures = "0.3"
+import_map = "=0.25.0"
+rolldown = "=1.2.7"
+rolldown_common = "=1.2.7"
+rolldown_ecmascript = "=1.2.7"
+rolldown_ecmascript_utils = "=1.2.7"
+rolldown_error = "=1.2.7"
+rolldown_fs = "=1.2.7"
+rolldown_plugin = "=1.2.7"
+rolldown_sourcemap = "=1.2.7"
+rolldown_std_utils = "=1.2.7"
+rolldown_tracing = "=1.2.7"
+rolldown_utils = "=1.2.7"
+serde_json = "1"
+sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }
+tokio = { version = "=1.53.1", features = ["rt", "macros"] }
+url = "2"
