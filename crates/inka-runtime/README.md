@@ -39,8 +39,11 @@ absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 
 `resolver.rs` builds an offline `deno_graph::ModuleGraph` for the entry from
 `$DENO_DIR` (a `GlobalHttpCache` loader + an `import_map` resolver), then exposes
-synchronous lookups. `node_services.rs` is the CJS/`require()` seam over Deno's
-`deno_node`/`node_resolver` machinery:
+synchronous lookups. `tsconfig.rs` resolves bare `baseUrl`/`paths` aliases
+(e.g. `src/util` under `"baseUrl": "."`, or `@/*`) from the importing file's
+nearest `tsconfig.json`/`jsconfig.json`, honoring `extends` and JSONC, and
+confines results to the execution tree. `node_services.rs` is the CJS/`require()`
+seam over Deno's `deno_node`/`node_resolver` machinery:
 
 - `require()` runs natively (CJS→CJS, Node builtins, nested deps, cycles),
 - ESM `import` of a CJS package is served as an ESM facade (default plus

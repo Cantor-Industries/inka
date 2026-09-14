@@ -39,6 +39,7 @@ mod runtime_snapshot {
 mod node_services;
 mod resolver;
 mod temp;
+mod tsconfig;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -66,6 +67,8 @@ struct PkgLoader {
     node_services: node_services::NodeServices,
     /// Offline module-graph/import-map resolution (`inka run`).
     resolver: Rc<resolver::GraphResolverState>,
+    /// Nearest `tsconfig.json`/`jsconfig.json` `baseUrl`/`paths` resolution.
+    tsconfig: tsconfig::Resolver,
 }
 
 fn precompiled_flag() -> bool {
@@ -89,6 +92,15 @@ impl ModuleLoader for PkgLoader {
         } else {
             None
         };
+        // A `tsconfig.json` `baseUrl`/`paths` alias (e.g. `src/util`). Import maps
+        // take precedence; tsconfig applies to otherwise-unmapped bare names.
+        if bare && mapped.is_none() {
+            if let Ok(referrer_url) = url::Url::parse(referrer) {
+                if let Some(u) = self.tsconfig.resolve(specifier, &referrer_url) {
+                    return Ok(u);
+                }
+            }
+        }
         let spec = mapped.as_deref().unwrap_or(specifier);
 
         if spec.starts_with("npm:") {
@@ -647,10 +659,11 @@ fn run_tree(
         let (node_services, ext_services) = node_services::NodeServices::new(roots);
         let resolver_state = resolver::build(&root, &file).await;
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
-            artifact_root: root,
+            artifact_root: root.clone(),
             precompiled: precompiled_flag(),
             node_services,
             resolver: Rc::new(resolver_state),
+            tsconfig: tsconfig::Resolver::new(root),
         });
         run_module_async(&url, args, permissions, loader, ext_services).await
     })

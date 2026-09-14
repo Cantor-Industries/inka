@@ -39,6 +39,15 @@ permission source was found.
 your package manager (so they are in `node_modules`), and for `jsr:` run
 `deno cache`/`deno install` first so the module is in `DENO_DIR`.
 
+**`Could not find package 'src'` (or another first path segment).** The import is
+a `tsconfig.json` `baseUrl`/`paths` alias (e.g. `import "src/util"` with
+`"baseUrl": "."`), not an npm package. `inka run` reads the importing file's
+nearest `tsconfig.json`/`jsconfig.json` (`baseUrl`/`paths`, `extends`, JSONC), so
+this works for ESM imports. If it still fails, check that the config is an
+ancestor of the importing file, that the path exists, and that the file is
+inside the execution tree. `require()` of a `baseUrl` path is not resolved (use
+an ESM import).
+
 **`jsr:` works at build time but not at run time.** `inka build` inlines bundled
 `jsr:` code, so the artifact needs no cache. If you passed `--external`, the
 files are embedded instead. `inka run` resolves `jsr:` from `DENO_DIR` live, so an

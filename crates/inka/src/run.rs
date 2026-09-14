@@ -179,14 +179,63 @@ fn is_project_root(dir: &Path) -> bool {
     dir.join("package.json").is_file() || dir.join("deno.json").is_file()
 }
 
-/// The execution root for a file under the cwd. Normally the cwd, but when the
-/// cwd has no `node_modules` we climb to the nearest ancestor that both is a
-/// project root (`package.json`/`deno.json`) and has a `node_modules`. That
-/// matches `inka build`'s Node-style upward `node_modules` resolution for
+/// True when `package.json` declares a non-empty `workspaces` list (npm/pnpm/
+/// yarn/bun) or `deno.json` declares a `workspace`.
+fn declares_workspace(dir: &Path) -> bool {
+    if let Ok(text) = fs::read_to_string(dir.join("package.json")) {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+            match v.get("workspaces") {
+                Some(serde_json::Value::Array(a)) if !a.is_empty() => return true,
+                Some(serde_json::Value::Object(o))
+                    if o.get("packages")
+                        .and_then(|p| p.as_array())
+                        .is_some_and(|a| !a.is_empty()) =>
+                {
+                    return true
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Ok(text) = fs::read_to_string(dir.join("deno.json")) {
+        let stripped = crate::config::strip_jsonc(&text);
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stripped) {
+            if v.get("workspace")
+                .is_some_and(|w| w.is_array() || w.is_object())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The nearest ancestor (or `dir` itself) that is a workspace root. Running
+/// inside a member package must root there so sibling packages (symlinked into
+/// `node_modules`) stay inside the execution tree.
+fn workspace_root(dir: &Path) -> Option<PathBuf> {
+    let mut cur = Some(dir);
+    while let Some(d) = cur {
+        if declares_workspace(d) {
+            return Some(d.to_path_buf());
+        }
+        cur = d.parent();
+    }
+    None
+}
+
+/// The execution root for a file under the cwd. Normally the cwd, but a
+/// workspace member roots at its workspace root (so sibling packages resolve),
+/// and when the cwd has no `node_modules` we climb to the nearest ancestor that
+/// both is a project root (`package.json`/`deno.json`) and has a `node_modules`.
+/// That matches `inka build`'s Node-style upward `node_modules` resolution for
 /// monorepos/workspaces, where dependencies are hoisted to the workspace root.
 /// The climb is bounded by a project marker so confinement never broadens to an
 /// unrelated directory that merely happens to contain `node_modules`.
 fn execution_root_for_cwd(cwd: &Path) -> PathBuf {
+    if let Some(ws) = workspace_root(cwd) {
+        return ws;
+    }
     if cwd.join("node_modules").is_dir() {
         return cwd.to_path_buf();
     }
@@ -241,23 +290,30 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
         return Ok((root, entry));
     }
 
-    // Outside the cwd: find the nearest ancestor project root.
+    // Outside the cwd: root at the workspace root if the file is in one, else
+    // the nearest ancestor project root.
     let file_dir = match canon.parent() {
         Some(d) => d.to_path_buf(),
         None => return Err(format!("no parent directory for {}", file.display())),
     };
-    let mut root = file_dir.clone();
-    let mut cur = file_dir;
-    loop {
-        if is_project_root(&cur) {
-            root = cur;
-            break;
+    let root = match workspace_root(&file_dir) {
+        Some(ws) => ws,
+        None => {
+            let mut root = file_dir.clone();
+            let mut cur = file_dir;
+            loop {
+                if is_project_root(&cur) {
+                    root = cur;
+                    break;
+                }
+                match cur.parent() {
+                    Some(p) if p != cur => cur = p.to_path_buf(),
+                    _ => break,
+                }
+            }
+            root
         }
-        match cur.parent() {
-            Some(p) if p != cur => cur = p.to_path_buf(),
-            _ => break,
-        }
-    }
+    };
     let rel = canon
         .strip_prefix(&root)
         .map_err(|_| format!("cannot relate {} to {}", file.display(), root.display()))?;

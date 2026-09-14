@@ -92,6 +92,9 @@ jobs:
       - name: Runtime contract matrix
         run: |
           set -euo pipefail
+          # The matrix's monorepo case builds an artifact for parity, so point it
+          # at the launcher built above.
+          export INKA_LAUNCHER="$CARGO_TARGET_DIR/release/inka-launcher"
           bash scripts/ci/runtime-matrix.sh "$CARGO_TARGET_DIR/release/inka"
 
       - name: Build E2E (bundle -> self-contained artifact)

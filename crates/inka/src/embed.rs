@@ -62,28 +62,33 @@ pub fn collect_directory(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec
 /// runtime dependency closure** at `node_modules/**`, so the artifact resolves
 /// it without the project `node_modules`.
 ///
-/// The closure is walked from each package's canonical realpath and every dep
-/// is resolved with a Node-style nearest-`node_modules` lookup, so hoisted
-/// (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, yarn, bun) layouts
-/// both work. Deps are flattened to `node_modules/<name>`; a name that resolves
-/// to a second version is nested under the referring package
+/// The package is located with a Node-style nearest-`node_modules` lookup from
+/// the entry's directory (`entry_dir`), so a workspace member's package
+/// (`packages/app/node_modules/@scope/other` → `packages/other`) is found even
+/// though it is not hoisted to `<cwd>/node_modules`. The closure is walked from
+/// each package's canonical realpath and every dep is resolved the same way, so
+/// hoisted (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, yarn, bun)
+/// layouts both work. Deps are flattened to `node_modules/<name>`; a name that
+/// resolves to a second version is nested under the referring package
 /// (`node_modules/<pkg>/node_modules/<name>`) so nearest-wins still holds.
 #[cfg(feature = "bundle")]
-pub fn collect_package(cwd: &Path, pkg: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub fn collect_package(
+    cwd: &Path,
+    entry_dir: &Path,
+    pkg: &str,
+) -> Result<Vec<(String, Vec<u8>)>, String> {
     if !valid_package_name(pkg) {
         return Err(format!("invalid external package name '{pkg}'"));
-    }
-    let project_nm = cwd.join("node_modules");
-    let root = project_nm.join(pkg);
-    if !root.is_dir() {
-        return Err(format!(
-            "external package '{pkg}' not found at {}",
-            root.display()
-        ));
     }
     // Confine every walked realpath to the project tree (workspace symlinks and
     // isolated stores stay inside it; a malicious dep cannot pull in /etc).
     let tree_real = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let Some(root) = find_package_root(&tree_real, entry_dir, pkg) else {
+        return Err(format!(
+            "external package '{pkg}' not found in a nearest node_modules under {}",
+            cwd.display()
+        ));
+    };
     let root_real = fs::canonicalize(&root).unwrap_or(root);
     if !root_real.starts_with(&tree_real) {
         return Err(format!(
@@ -172,6 +177,27 @@ fn package_dep_names(folder: &Path) -> Vec<String> {
         }
     }
     names
+}
+
+/// Locate an external package's folder with a Node-style nearest-`node_modules`
+/// lookup from `start`, climbing to the project root (`tree`) and no further.
+#[cfg(feature = "bundle")]
+fn find_package_root(tree: &Path, start: &Path, name: &str) -> Option<PathBuf> {
+    let start = fs::canonicalize(start).unwrap_or_else(|_| start.to_path_buf());
+    let mut dir = start;
+    loop {
+        if !dir.starts_with(tree) {
+            return None;
+        }
+        let candidate = dir.join("node_modules").join(name);
+        if candidate.is_dir() {
+            return Some(candidate);
+        }
+        if dir == tree {
+            return None;
+        }
+        dir = dir.parent()?.to_path_buf();
+    }
 }
 
 /// Node-style nearest-`node_modules/<name>` lookup from `referrer`'s realpath,
@@ -308,7 +334,7 @@ mod tests {
             "node_modules/pkg/node_modules/dep/index.js",
             "module.exports = 2;\n",
         );
-        let files = collect_package(&cwd, "pkg").unwrap();
+        let files = collect_package(&cwd, &cwd, "pkg").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert!(
             rels.contains(&"node_modules/pkg/index.js".to_string()),
@@ -362,8 +388,8 @@ mod tests {
     fn collect_package_rejects_bad_external_name() {
         let cwd = scratch();
         mk(&cwd, "node_modules/pkg/package.json", r#"{"name":"pkg"}"#);
-        assert!(collect_package(&cwd, "../etc").is_err());
-        assert!(collect_package(&cwd, "a/b").is_err());
+        assert!(collect_package(&cwd, &cwd, "../etc").is_err());
+        assert!(collect_package(&cwd, &cwd, "a/b").is_err());
         let _ = fs::remove_dir_all(&cwd);
     }
 
@@ -394,7 +420,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = collect_package(&cwd, "pkg").unwrap();
+        let files = collect_package(&cwd, &cwd, "pkg").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert!(
             rels.contains(&"node_modules/pkg/index.js".to_string()),
@@ -427,7 +453,7 @@ mod tests {
             r#"{"name":"ms","version":"2.1.3","main":"index.js"}"#,
         );
         mk(&cwd, "node_modules/ms/index.js", "module.exports = 1;\n");
-        let files = collect_package(&cwd, "dbg").unwrap();
+        let files = collect_package(&cwd, &cwd, "dbg").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert!(
             rels.contains(&"node_modules/dbg/index.js".to_string()),
@@ -438,6 +464,38 @@ mod tests {
             "{rels:?}"
         );
         let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_package_resolves_workspace_member_from_entry_dir() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "packages/app/package.json",
+            r#"{"name":"@scope/app","dependencies":{"@scope/other":"workspace:*"}}"#,
+        );
+        mk(
+            &cwd,
+            "packages/other/package.json",
+            r#"{"name":"@scope/other","exports":{".":"./src/index.ts"}}"#,
+        );
+        mk(&cwd, "packages/other/src/index.ts", "export const x = 1;\n");
+        std::fs::create_dir_all(cwd.join("packages/app/node_modules/@scope")).unwrap();
+        std::os::unix::fs::symlink(
+            "../../../other",
+            cwd.join("packages/app/node_modules/@scope/other"),
+        )
+        .unwrap();
+        let entry_dir = cwd.join("packages/app/src");
+        std::fs::create_dir_all(&entry_dir).unwrap();
+
+        let files = collect_package(&cwd, &entry_dir, "@scope/other").unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert!(
+            rels.contains(&"node_modules/@scope/other/src/index.ts".to_string()),
+            "{rels:?}"
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
     }
 
     #[test]
@@ -473,7 +531,7 @@ mod tests {
         )
         .unwrap();
 
-        let files = collect_package(&cwd, "a").unwrap();
+        let files = collect_package(&cwd, &cwd, "a").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert!(
             rels.contains(&"node_modules/a/index.js".to_string()),
@@ -519,7 +577,7 @@ mod tests {
             "node_modules/other/node_modules/dep/index.js",
             "module.exports = 2;\n",
         );
-        let files = collect_package(&cwd, "top").unwrap();
+        let files = collect_package(&cwd, &cwd, "top").unwrap();
         let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
         assert!(
             rels.contains(&"node_modules/dep/index.js".to_string()),

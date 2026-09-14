@@ -10,15 +10,22 @@ what is already on disk.
 
 1. **Import map** — `deno.json`/`deno.jsonc` `imports`/`scopes` (bare specifiers
    and remaps).
-2. **Project `node_modules`** — bring-your-own-node_modules. Hoisted, nested
+2. **`tsconfig.json`/`jsconfig.json` `baseUrl`/`paths`** — a bare specifier like
+   `src/util` (with `"baseUrl": "."`) or an alias like `@/*` resolves against
+   the **nearest** config for the importing file (the same lookup TypeScript and
+   Bun use, including `extends` and JSONC comments). Results are confined to the
+   execution tree. Applies to ESM imports; `require()` of a `baseUrl` path is
+   not resolved (deno's CommonJS loader does not consult tsconfig) — use an ESM
+   import for those.
+3. **Project `node_modules`** — bring-your-own-node_modules. Hoisted, nested
    (conflicting versions), and symlinked layouts (Deno isolated `.deno/`, pnpm
    `.pnpm/`) all work; the **nearest `node_modules` wins**. In a monorepo where
    deps are hoisted to a workspace root, both commands climb to the ancestor
    `node_modules` (the run root is the nearest ancestor that is a project root
-   and has a `node_modules`).
-3. **Deno cache (`DENO_DIR`)** — `jsr:` modules (and any cached remote `https:`)
+   and has a `node_modules`, or the workspace root itself).
+4. **Deno cache (`DENO_DIR`)** — `jsr:` modules (and any cached remote `https:`)
    are read from `$DENO_DIR/remote`; `npm:` resolves against `node_modules`.
-4. **Built-ins** — `node:` modules served by the engine.
+5. **Built-ins** — `node:` modules served by the engine.
 
 `inka` is **offline**: it never fetches from the network. If a `jsr:` package is
 not in the Deno cache, run `deno cache`/`deno install` first.

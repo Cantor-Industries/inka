@@ -278,8 +278,11 @@ fn pack(
         for (rel, bytes) in bundle.embedded {
             push_unique(&mut files, rel, bytes);
         }
+        let entry_dir = cwd.join(entry_rel);
+        let entry_dir = entry_dir.parent().unwrap_or(cwd);
         for pkg in external {
-            for (rel, bytes) in crate::embed::collect_package(cwd, pkg).unwrap_or_else(|e| err(&e))
+            for (rel, bytes) in
+                crate::embed::collect_package(cwd, entry_dir, pkg).unwrap_or_else(|e| err(&e))
             {
                 push_unique(&mut files, rel, bytes);
             }

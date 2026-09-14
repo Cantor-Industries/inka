@@ -63,9 +63,18 @@ the current directory; an **outside-cwd file** is rooted at its nearest ancestor
 project (a `package.json` or `deno.json`) or its own directory otherwise.
 Relative imports stay bounded by that root.
 
-When the current directory has no `node_modules` but an ancestor workspace root
-does (a monorepo with hoisted dependencies), `run` roots at that ancestor so
-imports resolve as they do in `inka build`.
+Inside a **workspace** (an ancestor `package.json` with `workspaces`, or a
+`deno.json` `workspace`), the root is the workspace root instead, so sibling
+packages (symlinked into `node_modules`) stay inside the execution tree and
+resolve as they do in `inka build`. When the current directory has no
+`node_modules` but an ancestor workspace root does (hoisted dependencies), `run`
+also roots at that ancestor.
+
+Bare specifiers additionally resolve through the importing file's nearest
+`tsconfig.json`/`jsconfig.json` `compilerOptions.baseUrl`/`paths` (with
+`extends` and JSONC comments), matching TypeScript/Bun. This is how a
+`"baseUrl": "."` `src/util` import or a `@/*` alias works without an import map.
+`require()` of a `baseUrl` path is not supported (use an ESM import).
 
 ## See also
 

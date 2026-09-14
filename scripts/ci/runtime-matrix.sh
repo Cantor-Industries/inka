@@ -177,6 +177,64 @@ const require = createRequire(import.meta.url);
 try { console.log("escape-loaded", require("evilpkg")); }
 catch (e) { console.log("escape-denied", e && e.constructor && e.constructor.name); }'
 
+echo "== workspace monorepo (tsconfig baseUrl/paths, #imports, workspace climb) =="
+MONO="$SCRATCH/mono"
+mkdir -p "$MONO/packages/other/src" "$MONO/packages/app/src"
+printf '%s\n' '{"name":"mono","private":true,"workspaces":["packages/*"]}' > "$MONO/package.json"
+printf '%s\n' '{"name":"@scope/other","type":"module","exports":{".":"./src/index.ts"}}' \
+    > "$MONO/packages/other/package.json"
+printf '%s\n' '{ "compilerOptions": { "baseUrl": "." } }' > "$MONO/packages/other/tsconfig.json"
+printf '%s\n' 'export const util = () => "mono-util";' > "$MONO/packages/other/src/util.ts"
+printf '%s\n' 'import { util } from "src/util";' \
+    'export const hello = () => `hello+${util()}`;' > "$MONO/packages/other/src/index.ts"
+printf '%s\n' '{"name":"@scope/app","type":"module","bin":"src/index.ts","imports":{"#hash":"./src/hash.ts"},"dependencies":{"@scope/other":"workspace:*"}}' \
+    > "$MONO/packages/app/package.json"
+printf '%s\n' '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }' \
+    > "$MONO/packages/app/tsconfig.json"
+printf '%s\n' 'export const viaHash = () => "mono-hash";' > "$MONO/packages/app/src/hash.ts"
+printf '%s\n' 'export const helper = () => "mono-helper";' > "$MONO/packages/app/src/lib.ts"
+printf '%s\n' 'import { hello } from "@scope/other";' \
+    'import { helper } from "@/lib";' \
+    'import { viaHash } from "#hash";' \
+    'console.log("mono", hello(), helper(), viaHash());' > "$MONO/packages/app/src/index.ts"
+mkdir -p "$MONO/packages/app/node_modules/@scope"
+ln -sfn ../../../other "$MONO/packages/app/node_modules/@scope/other"
+
+# From the workspace root (entry under cwd).
+out="$(cd "$MONO" && "$INKA" run -A packages/app/src/index.ts 2>&1)" || {
+    echo "FAIL: monorepo run from root" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"mono hello+mono-util mono-helper mono-hash"*) echo "ok: monorepo run from workspace root" ;;
+    *) echo "FAIL: monorepo run from root" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# From the member package (workspace-root climb keeps the sibling in-tree).
+out="$(cd "$MONO/packages/app" && "$INKA" run -A src/index.ts 2>&1)" || {
+    echo "FAIL: monorepo run from member" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"mono hello+mono-util mono-helper mono-hash"*) echo "ok: monorepo run from member (workspace climb)" ;;
+    *) echo "FAIL: monorepo run from member" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# Build parity (needs the launcher). Covers tsconfig resolution in the bundler.
+if [ -n "${INKA_LAUNCHER:-}" ] && [ -x "${INKA_LAUNCHER}" ]; then
+    (cd "$MONO" && INKA_LAUNCHER="$INKA_LAUNCHER" "$INKA" build packages/app/src/index.ts \
+        -o "$MONO/app" >/dev/null 2>&1) || {
+        echo "FAIL: monorepo build" >&2; exit 1
+    }
+    out="$("$MONO/app" 2>&1)" || {
+        echo "FAIL: monorepo artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"mono hello+mono-util mono-helper mono-hash"*) echo "ok: monorepo build parity" ;;
+        *) echo "FAIL: monorepo artifact output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "monorepo build parity (INKA_LAUNCHER unset or not executable)"
+fi
+
 echo "== jsr / import map (offline Deno cache) =="
 mkdir -p jsrproj
 printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json
