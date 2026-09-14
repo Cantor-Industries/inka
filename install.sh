@@ -285,7 +285,7 @@ else
     verify_sha "$TMP/$TC_ARCHIVE" "$TMP/$TC_ARCHIVE.sha256"
     mkdir -p "$PREFIX/lib/inka"
     tar -xzf "$TMP/$TC_ARCHIVE" --no-same-owner --no-same-permissions \
-        --no-absolute-filenames -C "$PREFIX/lib/inka"
+        -C "$PREFIX/lib/inka"
     chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher"
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi

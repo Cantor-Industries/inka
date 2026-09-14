@@ -218,9 +218,10 @@ case "$out" in
     *) echo "FAIL: monorepo run from member" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
 esac
 
-# Build parity (needs the launcher). Covers tsconfig resolution in the bundler.
-if [ -n "${INKA_LAUNCHER:-}" ] && [ -x "${INKA_LAUNCHER}" ]; then
-    (cd "$MONO" && INKA_LAUNCHER="$INKA_LAUNCHER" "$INKA" build packages/app/src/index.ts \
+# Build parity (needs the launcher, which sits next to the inka binary).
+LAUNCHER="${INKA_LAUNCHER:-$(dirname "$INKA")/inka-launcher}"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$MONO" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build packages/app/src/index.ts \
         -o "$MONO/app" >/dev/null 2>&1) || {
         echo "FAIL: monorepo build" >&2; exit 1
     }
@@ -232,7 +233,7 @@ if [ -n "${INKA_LAUNCHER:-}" ] && [ -x "${INKA_LAUNCHER}" ]; then
         *) echo "FAIL: monorepo artifact output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
     esac
 else
-    skip "monorepo build parity (INKA_LAUNCHER unset or not executable)"
+    skip "monorepo build parity (no inka-launcher next to $INKA)"
 fi
 
 echo "== jsr / import map (offline Deno cache) =="

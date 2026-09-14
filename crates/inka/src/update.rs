@@ -299,12 +299,7 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     let mut cmd = Command::new("tar");
     cmd.args(["-xzf"])
         .arg(&archive_path)
-        .args([
-            "--no-same-owner",
-            "--no-same-permissions",
-            "--no-absolute-filenames",
-            "-C",
-        ])
+        .args(["--no-same-owner", "--no-same-permissions", "-C"])
         .arg(&tmp.0);
     run_ok(&mut cmd, "tar extract")?;
     replace_toolchain(&tmp.0, &dir)?;
