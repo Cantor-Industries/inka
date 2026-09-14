@@ -53,15 +53,16 @@ jobs:
       - name: Rustfmt
         run: cargo fmt --all -- --check
 
-      # Fast crates only; `inka-runtime` is built and contract-tested on the
-      # self-hosted runtime-ci workflow (see .github/workflows/runtime-ci.yml).
+      # Fast crates only; `inka-runtime` and the bundler (rolldown) are built,
+      # linted, and contract-tested on the self-hosted runtime-ci workflow (see
+      # .github/workflows/runtime-ci.yml).
       - name: Clippy (fast crates, deny warnings)
         run: |
           set -euo pipefail
-          cargo clippy -p inka --bin inka -p inka-launcher -p inka-runtime-stub -- -D warnings
+          cargo clippy --locked -p inka --bin inka -p inka-launcher -p inka-runtime-stub -- -D warnings
 
       - name: Fast-crate tests
         run: |
           set -euo pipefail
-          cargo test -p inka --bin inka
-          cargo build -p inka-launcher -p inka-runtime-stub
+          cargo test --locked -p inka --bin inka
+          cargo build --locked -p inka-launcher -p inka-runtime-stub

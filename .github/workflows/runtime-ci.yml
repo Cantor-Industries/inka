@@ -57,9 +57,19 @@ jobs:
         run: |
           set -euo pipefail
           : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
-          cargo build --release -p inka --features bundle
-          cargo build --release -p inka-launcher
-          cargo build --release -p inka-runtime
+          cargo build --locked --release -p inka --features bundle
+          cargo build --locked --release -p inka-launcher
+          cargo build --locked --release -p inka-runtime
+
+      # The hosted `ci.yml` cannot afford the rolldown cold build, so the
+      # bundler and every `#[cfg(feature = "bundle")]` test are exercised here.
+      - name: Bundler + bundle-feature lint and tests
+        run: |
+          set -euo pipefail
+          cargo clippy --locked -p inka --features bundle --all-targets -- -D warnings
+          cargo clippy --locked -p inka-bundler --all-targets -- -D warnings
+          cargo test --locked -p inka-bundler
+          cargo test --locked -p inka --bin inka --features bundle
 
       - name: Stage runtime for the matrix
         run: |
