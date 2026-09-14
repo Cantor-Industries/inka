@@ -9,6 +9,42 @@ const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
 const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS pre-transpiled to JS
 const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
 
+/// Remove the extracted tree if the process exits from inside the runtime
+/// (e.g. `Deno.exit`), which calls `exit()` and skips Rust destructors. The
+/// `atexit` handler runs on that path; the `TempTree` `Drop` covers normal
+/// returns. Declared `extern` to avoid a `libc` dependency.
+#[cfg(unix)]
+mod tree_cleanup {
+    use std::path::Path;
+    use std::sync::{Once, OnceLock};
+
+    static ROOT: OnceLock<String> = OnceLock::new();
+    static ARM: Once = Once::new();
+
+    extern "C" fn cleanup() {
+        if let Some(root) = ROOT.get() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    extern "C" {
+        fn atexit(cb: extern "C" fn()) -> std::ffi::c_int;
+    }
+
+    pub(super) fn arm(root: &Path) {
+        let _ = ROOT.set(root.to_string_lossy().into_owned());
+        ARM.call_once(|| unsafe {
+            atexit(cleanup);
+        });
+    }
+}
+
+#[cfg(not(unix))]
+mod tree_cleanup {
+    use std::path::Path;
+    pub(super) fn arm(_root: &Path) {}
+}
+
 macro_rules! debug_log {
     ($($arg:tt)*) => {
         if std::env::var_os("INKA_DEBUG").is_some() {
@@ -145,20 +181,84 @@ fn validate_rel_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Materialize the embedded archive under a fresh temp dir, mirroring paths.
-fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<PathBuf, String> {
-    let nonce = format!("{}-{}", std::process::id(), files.len());
-    let root = std::env::temp_dir().join(format!("inka-{nonce}"));
-    let _ = fs::remove_dir_all(&root);
+/// A freshly created, exclusive temp tree, removed when dropped.
+struct TempTree {
+    root: PathBuf,
+}
+
+impl TempTree {
+    fn path(&self) -> &Path {
+        &self.root
+    }
+}
+
+impl Drop for TempTree {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Hex string from `/dev/urandom` (fallback: pid + time), for unpredictable
+/// temp names. No new dependency; the launcher already assumes Linux.
+fn random_hex(bytes: usize) -> String {
+    use std::io::Read;
+    let mut buf = vec![0u8; bytes];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            let mut s = String::with_capacity(bytes * 2);
+            for b in buf {
+                s.push_str(&format!("{b:02x}"));
+            }
+            return s;
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), nanos)
+}
+
+/// Materialize the embedded archive under a fresh, exclusive temp dir (mode
+/// 0700), mirroring paths. Files are created with `create_new` (never following
+/// a planted symlink), and the tree is removed when the guard drops.
+fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
+    let base = std::env::temp_dir();
+    let mut root = None;
+    for _ in 0..8 {
+        let candidate = base.join(format!("inka-{}", random_hex(8)));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                root = Some(candidate);
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("cannot create {}: {e}", candidate.display())),
+        }
+    }
+    let root = root.ok_or_else(|| "could not create a unique temp dir".to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o700));
+    }
+    // Cover exits that skip Drop (the runtime may call exit() itself).
+    tree_cleanup::arm(&root);
     for (path, data) in files {
         let target = root.join(path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
         }
-        fs::write(&target, data).map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        std::io::Write::write_all(&mut f, data)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
     }
-    Ok(root)
+    Ok(TempTree { root })
 }
 
 #[derive(Default)]
@@ -302,7 +402,7 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
         Ok(l) => l,
         Err(e) => {
             eprintln!("[inka] failed to load {}: {e}", lib.display());
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -322,17 +422,38 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
     type FnDestroy = unsafe extern "C" fn(*mut c_void);
 
     unsafe {
-        let ver: libloading::Symbol<FnVersion> = library
-            .get(b"inka_runtime_version")
-            .expect("missing inka_runtime_version");
+        let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[inka] runtime {} is missing inka_runtime_version; reinstall it",
+                    lib.display()
+                );
+                return 4;
+            }
+        };
         let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
 
-        let create: libloading::Symbol<FnCreate> = library
-            .get(b"inka_runtime_create")
-            .expect("missing inka_runtime_create");
-        let destroy: libloading::Symbol<FnDestroy> = library
-            .get(b"inka_runtime_destroy")
-            .expect("missing inka_runtime_destroy");
+        let create: libloading::Symbol<FnCreate> = match library.get(b"inka_runtime_create") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[inka] runtime {} is missing inka_runtime_create; reinstall it",
+                    lib.display()
+                );
+                return 4;
+            }
+        };
+        let destroy: libloading::Symbol<FnDestroy> = match library.get(b"inka_runtime_destroy") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[inka] runtime {} is missing inka_runtime_destroy; reinstall it",
+                    lib.display()
+                );
+                return 4;
+            }
+        };
 
         debug_log!("[inka] runtime {} reports: {reported}", lib.display());
 
@@ -362,7 +483,7 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
                         lib.display()
                     );
                     destroy(rt);
-                    std::process::exit(4);
+                    return 4;
                 }
             };
 
@@ -388,7 +509,7 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
 
         if rc != 0 {
             eprintln!("[inka] runtime call failed (rc={rc})");
-            std::process::exit(rc);
+            return rc;
         }
         exit_code
     }
@@ -399,7 +520,7 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
         Ok(l) => l,
         Err(e) => {
             eprintln!("[inka] failed to load {}: {e}", lib.display());
-            std::process::exit(1);
+            return 1;
         }
     };
 
@@ -425,12 +546,28 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
         let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|c| c.as_ptr()).collect();
         argv_ptrs.push(std::ptr::null());
 
-        let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> = library
-            .get(b"inka_runtime_create")
-            .expect("missing inka_runtime_create");
-        let destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> = library
-            .get(b"inka_runtime_destroy")
-            .expect("missing inka_runtime_destroy");
+        let create: libloading::Symbol<unsafe extern "C" fn() -> *mut c_void> =
+            match library.get(b"inka_runtime_create") {
+                Ok(s) => s,
+                Err(_) => {
+                    eprintln!(
+                        "[inka] runtime {} is missing inka_runtime_create; reinstall it",
+                        lib.display()
+                    );
+                    return 4;
+                }
+            };
+        let destroy: libloading::Symbol<unsafe extern "C" fn(*mut c_void)> =
+            match library.get(b"inka_runtime_destroy") {
+                Ok(s) => s,
+                Err(_) => {
+                    eprintln!(
+                        "[inka] runtime {} is missing inka_runtime_destroy; reinstall it",
+                        lib.display()
+                    );
+                    return 4;
+                }
+            };
         let run_dir: libloading::Symbol<FnRunDir> =
             match library.get(b"inka_runtime_run_module_dir") {
                 Ok(s) => s,
@@ -440,7 +577,7 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
                      (missing inka_runtime_run_module_dir); install a newer runtime",
                         lib.display()
                     );
-                    std::process::exit(4);
+                    return 4;
                 }
             };
 
@@ -468,7 +605,7 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
 
         if rc != 0 {
             eprintln!("[inka] runtime call failed (rc={rc})");
-            std::process::exit(rc);
+            return rc;
         }
         exit_code
     }
@@ -540,15 +677,22 @@ fn main() {
                 env::set_var("INKA_PRECOMPILED", "1");
                 debug_log!("[inka] precompiled archive (no runtime TS transpile)");
             }
-            let root = match extract_tree(&files) {
-                Ok(r) => r,
+            let tree = match extract_tree(&files) {
+                Ok(t) => t,
                 Err(e) => {
                     eprintln!("[inka] failed to extract artifact tree: {e}");
                     std::process::exit(1);
                 }
             };
-            let code = load_and_run_dir(&path, &root.to_string_lossy(), &m.module, &args, &m.perms);
-            let _ = fs::remove_dir_all(&root);
+            let code = load_and_run_dir(
+                &path,
+                &tree.path().to_string_lossy(),
+                &m.module,
+                &args,
+                &m.perms,
+            );
+            // Remove the tree before exiting (process::exit skips destructors).
+            drop(tree);
             code
         }
     };
@@ -594,5 +738,36 @@ mod tests {
     fn archive_rejects_parent_dir() {
         assert!(parse_archive(&entry("../evil", b"x")).is_err());
         assert!(parse_archive(&entry("/abs", b"x")).is_err());
+    }
+
+    #[test]
+    fn extract_tree_creates_and_cleans_up() {
+        let files = vec![
+            ("main.js".to_string(), b"console.log(1)".to_vec()),
+            ("node_modules/x/index.js".to_string(), b"x".to_vec()),
+        ];
+        let root;
+        {
+            let tree = extract_tree(&files).unwrap();
+            root = tree.path().to_path_buf();
+            assert!(root.starts_with(std::env::temp_dir()));
+            assert!(root.join("main.js").is_file());
+            assert!(root.join("node_modules/x/index.js").is_file());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = fs::metadata(&root).unwrap().permissions().mode() & 0o777;
+                assert_eq!(mode, 0o700, "temp tree must be 0700");
+            }
+        }
+        assert!(!root.exists(), "tree must be removed on drop");
+    }
+
+    #[test]
+    fn extract_tree_uses_distinct_roots() {
+        let files = vec![("a".to_string(), b"a".to_vec())];
+        let t1 = extract_tree(&files).unwrap();
+        let t2 = extract_tree(&files).unwrap();
+        assert_ne!(t1.path(), t2.path());
     }
 }

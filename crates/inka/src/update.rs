@@ -39,6 +39,22 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// A short unpredictable suffix for temp names (urandom, fallback pid+time).
+fn random_suffix() -> String {
+    use std::io::Read;
+    let mut buf = [0u8; 8];
+    if let Ok(mut f) = fs::File::open("/dev/urandom") {
+        if f.read_exact(&mut buf).is_ok() {
+            return buf.iter().map(|b| format!("{b:02x}")).collect();
+        }
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    format!("{:x}{:x}", std::process::id(), nanos)
+}
+
 /// A remote-supplied asset name must be a plain basename: non-empty, no
 /// directory separators, no `..`, no NUL. Guards `base.join(name)` and
 /// `target_dir.join(name)` against traversal from a hostile `versions.json`.
@@ -54,6 +70,25 @@ fn valid_asset_name(name: &str) -> bool {
 
 /// Removes a temp directory on drop, so failures don't leave junk behind.
 struct TempDir(PathBuf);
+impl TempDir {
+    /// Create a fresh, exclusive temp dir (retrying on a name collision).
+    fn create(prefix: &str) -> Result<TempDir, String> {
+        let base = env::temp_dir();
+        for _ in 0..8 {
+            let p = base.join(format!(
+                "{prefix}{}-{}",
+                std::process::id(),
+                random_suffix()
+            ));
+            match fs::create_dir(&p) {
+                Ok(()) => return Ok(TempDir(p)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(format!("cannot create {}: {e}", p.display())),
+            }
+        }
+        Err(format!("could not create a unique {prefix} temp dir"))
+    }
+}
 impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
@@ -256,9 +291,7 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
         _ => {}
     }
 
-    let tmp = TempDir(env::temp_dir().join(format!("inka-toolchain-{}", std::process::id())));
-    let _ = fs::remove_dir_all(&tmp.0);
-    fs::create_dir_all(&tmp.0).map_err(|e| format!("cannot create {}: {e}", tmp.0.display()))?;
+    let tmp = TempDir::create("inka-toolchain-")?;
     // Fixed staging name: the remote name is only used for the fetch URL.
     let archive_path = tmp.0.join("toolchain.tar.gz");
     fs::write(&archive_path, &bytes)
@@ -285,7 +318,7 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
 /// `staging`. Binary replacement is an atomic rename over the running image
 /// (Linux keeps the old inode until this process exits).
 fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
-    let pid = std::process::id();
+    let nonce = format!("{}-{}", std::process::id(), random_suffix());
     // Stage every binary first: if one is missing or unwritable, nothing is
     // replaced yet and the previous toolchain stays usable.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
@@ -295,7 +328,7 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
             cleanup_staged(&staged);
             return Err(format!("toolchain archive is missing '{f}'"));
         }
-        let new = dir.join(format!(".{f}.new{pid}"));
+        let new = dir.join(format!(".{f}.new{nonce}"));
         if let Err(e) = fs::copy(&src, &new)
             .and_then(|_| fs::set_permissions(&new, fs::Permissions::from_mode(0o755)))
         {
@@ -525,19 +558,28 @@ fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
 }
 
 fn install_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    let tmp = target.with_extension(format!("so.tmp{}", std::process::id()));
-    if let Err(e) = fs::write(&tmp, bytes) {
+    use std::io::Write;
+    let tmp = target.with_extension(format!("so.tmp{}-{}", std::process::id(), random_suffix()));
+    // `create_new` never follows a pre-planted symlink at the temp path.
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)
+        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
+    if let Err(e) = f.write_all(bytes) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("cannot write {}: {e}", tmp.display()));
     }
+    drop(f);
     if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("cannot chmod {}: {e}", tmp.display()));
     }
-    fs::rename(&tmp, target).map_err(|e| {
+    if let Err(e) = fs::rename(&tmp, target) {
         let _ = fs::remove_file(&tmp);
-        format!("cannot move {} into place: {e}", target.display())
-    })
+        return Err(format!("cannot move {} into place: {e}", target.display()));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -584,5 +626,36 @@ mod tests {
         for bad in ["", ".", "..", "../evil", "/abs", "a/b", "a\\b", "dir/../x"] {
             assert!(!valid_asset_name(bad), "{bad} should be invalid");
         }
+    }
+
+    #[test]
+    fn install_atomically_writes_and_cleans_temp() {
+        let dir = std::env::temp_dir().join(format!(
+            "inka-install-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("libinka_runtime-0.0.0.so");
+        install_atomically(&target, b"ELF").unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"ELF");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temp leftovers: {leftovers:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn temp_dir_create_is_exclusive_and_cleans_up() {
+        let p;
+        {
+            let t = TempDir::create("inka-test-").unwrap();
+            p = t.0.clone();
+            assert!(p.is_dir());
+        }
+        assert!(!p.exists(), "TempDir should clean up on drop");
     }
 }
