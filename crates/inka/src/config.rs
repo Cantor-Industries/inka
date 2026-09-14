@@ -68,10 +68,27 @@ pub fn strip_jsonc(input: &str) -> String {
                 i = (i + 2).min(n);
             }
             ',' => {
-                // peek ahead for a closing bracket
+                // Peek past whitespace *and* comments for a closing bracket.
                 let mut j = i + 1;
-                while j < n && bytes[j].is_whitespace() {
-                    j += 1;
+                loop {
+                    while j < n && bytes[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j + 1 < n && bytes[j] == '/' && bytes[j + 1] == '/' {
+                        while j < n && bytes[j] != '\n' {
+                            j += 1;
+                        }
+                        continue;
+                    }
+                    if j + 1 < n && bytes[j] == '/' && bytes[j + 1] == '*' {
+                        j += 2;
+                        while j + 1 < n && !(bytes[j] == '*' && bytes[j + 1] == '/') {
+                            j += 1;
+                        }
+                        j = (j + 2).min(n);
+                        continue;
+                    }
+                    break;
                 }
                 if j < n && (bytes[j] == '}' || bytes[j] == ']') {
                     // drop the trailing comma
@@ -208,16 +225,33 @@ fn inka_block_runtime(cfg: &ConfigFiles) -> (Option<String>, Option<String>) {
     (runtime, tested)
 }
 
-/// Render an allow/deny value: `true` => "*", array => comma list.
+/// True when a rendered comma-list carries at least one non-empty item.
+/// Guards against a value like `""`, `" "`, or `","` being mistaken for a grant
+/// (the runtime treats an empty list as "all", which would be an over-grant).
+fn list_has_items(list: &str) -> bool {
+    list.split(',').any(|s| !s.trim().is_empty())
+}
+
+/// Render an allow/deny value: `true` => "*", array => comma list. Empty or
+/// whitespace-only array items are dropped so the result never has empty slots.
 fn render_val(v: &Value) -> Option<String> {
     match v {
         Value::Bool(true) => Some("*".to_string()),
         Value::Bool(false) => None,
-        Value::String(s) => Some(s.to_string()),
+        Value::String(s) => {
+            if s.trim().is_empty() {
+                None
+            } else {
+                Some(s.clone())
+            }
+        }
         Value::Array(items) => {
             let parts: Vec<String> = items
                 .iter()
-                .filter_map(|i| i.as_str().map(str::to_string))
+                .filter_map(|i| i.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
                 .collect();
             if parts.is_empty() {
                 None
@@ -226,6 +260,24 @@ fn render_val(v: &Value) -> Option<String> {
             }
         }
         _ => None,
+    }
+}
+
+/// Push a rendered allow/deny list, warning instead when it carries no items
+/// (an empty list would become "all" in the runtime DSL — an over-grant).
+fn push_permission(
+    target: &mut Vec<(String, String)>,
+    kind: &str,
+    cat: &str,
+    list: String,
+    warns: &mut Vec<String>,
+) {
+    if list_has_items(&list) {
+        target.push((cat.to_string(), list));
+    } else {
+        warns.push(format!(
+            "permission '{cat}' {kind} list is empty; ignored (use \"*\" for all)"
+        ));
     }
 }
 
@@ -255,22 +307,23 @@ fn apply_category_map(
                     allow.push((cat.clone(), "*".to_string()));
                 }
             }
-            Value::Array(_) => {
-                if let Some(list) = render_val(val) {
-                    allow.push((cat.clone(), list));
-                }
-            }
-            Value::String(s) => {
-                if !s.is_empty() {
-                    allow.push((cat.clone(), s.clone()));
-                }
-            }
+            Value::Array(_) => match render_val(val) {
+                Some(list) => push_permission(allow, "allow", cat, list, warns),
+                None => push_permission(allow, "allow", cat, String::new(), warns),
+            },
+            Value::String(s) => push_permission(allow, "allow", cat, s.clone(), warns),
             Value::Object(o) => {
-                if let Some(a) = o.get("allow").and_then(render_val) {
-                    allow.push((cat.clone(), a));
+                if let Some(a) = o.get("allow") {
+                    push_permission(
+                        allow,
+                        "allow",
+                        cat,
+                        render_val(a).unwrap_or_default(),
+                        warns,
+                    );
                 }
-                if let Some(d) = o.get("deny").and_then(render_val) {
-                    deny.push((cat.clone(), d));
+                if let Some(d) = o.get("deny") {
+                    push_permission(deny, "deny", cat, render_val(d).unwrap_or_default(), warns);
                 }
                 if o.contains_key("ignore") {
                     warns.push(format!(
@@ -407,9 +460,12 @@ fn resolve_named_set(
 fn grants_access(v: &Value) -> bool {
     match v {
         Value::Bool(true) => true,
-        Value::String(s) => !s.is_empty(),
-        Value::Array(items) => items.iter().any(Value::is_string),
-        Value::Object(o) => o.get("allow").and_then(render_val).is_some(),
+        Value::String(s) => list_has_items(s),
+        Value::Array(_) => render_val(v).is_some_and(|l| list_has_items(&l)),
+        Value::Object(o) => o
+            .get("allow")
+            .and_then(render_val)
+            .is_some_and(|l| list_has_items(&l)),
         _ => false,
     }
 }
@@ -761,6 +817,15 @@ mod tests {
             "{\n  // a comment\n  \"imports\": {\"a\": \"b\",}, /* block */ \"n\": 1,}",
         );
         assert!(serde_json::from_str::<Value>(&s).is_ok(), "json: {s}");
+    }
+
+    #[test]
+    fn jsonc_trailing_comma_before_comment() {
+        // A trailing comma followed by a comment before the closing bracket.
+        let s = strip_jsonc("{\n  \"a\": [1, // note\n  ],\n  \"b\": 2, /* x */\n}");
+        assert!(serde_json::from_str::<Value>(&s).is_ok(), "json: {s}");
+        let v: Value = serde_json::from_str(&s).unwrap();
+        assert_eq!(v["a"], serde_json::json!([1]));
     }
 
     #[test]
@@ -1271,6 +1336,37 @@ mod tests {
         );
         let (_, warns) = read_synth(&cwd, None);
         assert!(has_note(&warns, "comma or newline"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // An empty allow list must never bake `allow-<cat>=` (the runtime treats an
+    // empty list as "all" — an over-grant, incl. run/ffi).
+    #[test]
+    fn empty_allow_list_is_ignored_with_warning() {
+        let cwd = PathBuf::from("/tmp/inkaconf-emptyallow");
+        let _ = std::fs::remove_dir_all(&cwd);
+
+        for body in [
+            r#"{ "compile": { "permissions": { "run": [""] } } }"#,
+            r#"{ "compile": { "permissions": { "run": [","] } } }"#,
+            r#"{ "compile": { "permissions": { "run": " " } } }"#,
+            r#"{ "compile": { "permissions": { "run": { "allow": [""] } } } }"#,
+        ] {
+            write(&cwd, "deno.json", body);
+            let (s, warns) = read_synth(&cwd, None);
+            assert!(!s.contains("allow-run"), "must not bake empty allow: {s}");
+            assert!(has_note(&warns, "allow list is empty"), "{body}: {warns:?}");
+        }
+
+        // A real item mixed with an empty one keeps the real item only.
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["/data", ""] } } }"#,
+        );
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("allow-read=/data"), "{s}");
+        assert!(!s.contains("allow-read=/data,"), "{s}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

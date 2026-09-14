@@ -150,14 +150,22 @@ pub(crate) fn merge_cat(entries: &[(String, String)]) -> Vec<(String, String)> {
     out
 }
 
-/// Reject mutually-exclusive selections (`-A` with `-P`/`--allow-*`; `-P` with
-/// granular flags). `--deny-*` may trim `-A`.
+/// Reject mutually-exclusive or ineffective selections:
+///  - `-A` with `-P`/`--allow-*` (a `--deny-*` may trim `-A`);
+///  - `-P` with granular flags;
+///  - `--deny-*` alone, with no allow source to trim (it would otherwise be
+///    silently ignored, or — when config supplies a grant — silently dropped).
 pub(crate) fn validate(flags: &Flags) -> Result<(), String> {
     if flags.allow_all && (flags.permset.is_some() || !flags.allow.is_empty()) {
         return Err("--allow-all cannot be combined with -P/--permission-set or --allow-*".into());
     }
     if flags.permset.is_some() && (!flags.allow.is_empty() || !flags.deny.is_empty()) {
         return Err("-P/--permission-set cannot be combined with --allow-*/--deny-*".into());
+    }
+    if !flags.deny.is_empty() && !flags.allow_all && flags.allow.is_empty() {
+        return Err(
+            "--deny-* needs an allow source (-A or --allow-*); a bare deny would be ignored".into(),
+        );
     }
     Ok(())
 }
@@ -263,6 +271,18 @@ mod tests {
         let (f, _) = parse(&["-P", "--allow-read"]);
         assert!(validate(&f).is_err());
         let (f, _) = parse(&["-A", "--deny-read=x"]);
+        assert!(validate(&f).is_ok());
+    }
+
+    #[test]
+    fn deny_without_allow_is_rejected() {
+        let (f, _) = parse(&["--deny-read=./secret"]);
+        let err = validate(&f).expect_err("deny-only must be rejected");
+        assert!(err.contains("needs an allow source"), "{err}");
+        // An allow source makes the deny valid.
+        let (f, _) = parse(&["--allow-read", "--deny-read=./secret"]);
+        assert!(validate(&f).is_ok());
+        let (f, _) = parse(&["-A", "--deny-read=./secret"]);
         assert!(validate(&f).is_ok());
     }
 
