@@ -24,7 +24,15 @@ RUNTIME="$(ls "$STAGE"/libinka_runtime-*.so 2>/dev/null | head -1 | sed 's/.*lib
 [ -n "$RUNTIME" ] || { echo "error: no libinka_runtime-*.so in $STAGE" >&2; exit 1; }
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-smoke.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+# The --external test hides a project node_modules; restore it on any exit.
+cleanup() {
+    # Restore any hidden node_modules before removing the scratch dir.
+    if [ -d "$SCRATCH/npm/node_modules.hidden" ] && [ ! -e "$SCRATCH/npm/node_modules" ]; then
+        mv "$SCRATCH/npm/node_modules.hidden" "$SCRATCH/npm/node_modules" 2>/dev/null || true
+    fi
+    rm -rf "$SCRATCH"
+}
+trap cleanup EXIT
 PREFIX="$SCRATCH/prefix"
 export INKA_RUNTIME_HOME="$SCRATCH/runtime"
 export HOME="$SCRATCH/home"   # keep any fallback away from the host

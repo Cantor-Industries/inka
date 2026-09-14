@@ -4,8 +4,11 @@ use std::sync::OnceLock;
 fn version_cstr() -> &'static CStr {
     static V: OnceLock<CString> = OnceLock::new();
     V.get_or_init(|| {
-        let v = option_env!("INKA_STUB_VERSION").unwrap_or("0.0.0");
-        CString::new(format!("inka-stub-runtime {v}")).expect("nul in version")
+        // Injected by build.rs (`cargo:rustc-env`), defaulting to 0.0.0.
+        let v = env!("INKA_STUB_VERSION");
+        // Match the real runtime's ABI: the launcher requires the reported
+        // version to be `inka_runtime-<x.y.z>` and to match the filename.
+        CString::new(format!("inka_runtime-{v}")).expect("nul in version")
     })
 }
 

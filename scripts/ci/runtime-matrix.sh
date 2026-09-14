@@ -8,7 +8,8 @@
 # usage: runtime-matrix.sh [path-to-inka]
 #
 # Includes jsr import-map (offline Deno cache), release-package, and
-# native-addon checks; those skip when their inputs are unavailable.
+# native-addon checks. A skipped check is a failure unless
+# INKA_MATRIX_ALLOW_SKIP=1 (local dev without network/deno).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -17,7 +18,17 @@ INKA="${1:-$ROOT/target/debug/inka}"
 [ -x "$INKA" ] || { echo "error: inka binary not found: $INKA" >&2; exit 1; }
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-matrix.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
+SECRET_DIR=""
+SKIPS=0
+cleanup() {
+    rm -rf "$SCRATCH"
+    [ -n "$SECRET_DIR" ] && rm -rf "$SECRET_DIR"
+}
+trap cleanup EXIT
+skip() {
+    echo "skip: $*"
+    SKIPS=$((SKIPS + 1))
+}
 
 echo "== installing packages into the project node_modules =="
 (cd "$SCRATCH" && npm install --no-save --omit=dev \
@@ -118,7 +129,6 @@ case "$out" in
     *"perm-allowed 42"*) echo "ok: require outside the project allowed with -R" ;;
     *) echo "FAIL: require with -R was not allowed" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
 esac
-rm -rf "$SECRET_DIR"
 
 echo "== pnpm-style symlinked node_modules =="
 # A package reached through a symlink whose dependency lives beside its realpath
@@ -149,10 +159,10 @@ printf '%s\n' \
 if out="$(cd jsrproj && DENO_DIR="${DENO_DIR:-$HOME/.cache/deno}" "$INKA" run main.ts 2>&1)"; then
     case "$out" in
         *jsr-ok*) echo "ok: jsr import map (offline cache)" ;;
-        *) echo "skip: jsr import map ($out)" ;;
+        *) skip "jsr import map ($out)" ;;
     esac
 else
-    echo "skip: jsr import map (no cached @std/assert in ${DENO_DIR:-$HOME/.cache/deno})"
+    skip "jsr import map (no cached @std/assert in ${DENO_DIR:-$HOME/.cache/deno})"
 fi
 
 echo "== release packages + native addon (project node_modules) =="
@@ -170,7 +180,7 @@ const require = createRequire(import.meta.url);
 const effect = require("effect");
 console.log("require-esm", typeof effect.Effect, typeof effect.Effect.succeed);'
 else
-    echo "skip: release-package checks (npm install unavailable)"
+    skip "release-package checks (npm install unavailable)"
 fi
 
 if [ -f "$SCRATCH/node_modules/@parcel/watcher-linux-x64-glibc/watcher.node" ]; then
@@ -188,7 +198,15 @@ const require = createRequire(import.meta.url);
 const w = require("@parcel/watcher");
 console.log("native-ok", typeof w.subscribe, typeof w.getEventsSince);'
 else
-    echo "skip: native-addon checks (no @parcel/watcher native binary)"
+    skip "native-addon checks (no @parcel/watcher native binary)"
 fi
 
+if [ "$SKIPS" -gt 0 ]; then
+    if [ "${INKA_MATRIX_ALLOW_SKIP:-0}" = "1" ]; then
+        echo "runtime-matrix: OK ($SKIPS skipped; INKA_MATRIX_ALLOW_SKIP=1)"
+        exit 0
+    fi
+    echo "runtime-matrix: FAILED: $SKIPS check(s) skipped (set INKA_MATRIX_ALLOW_SKIP=1 to allow)" >&2
+    exit 1
+fi
 echo "runtime-matrix: OK"

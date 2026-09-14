@@ -1,14 +1,16 @@
 # Release pipeline for inka.
 #
 # Triggered by every `v*` tag. On a self-hosted runner:
-#   - builds the toolchain (inka, inka-launcher),
-#   - builds the heavy runtime,
-#   - stages a toolchain tarball + engine assets + versions.json,
-#   - smoke-tests the whole release through install.sh,
-#   - publishes the assets as GitHub Release assets for the tag.
+#   - `build`: builds the toolchain (inka, inka-launcher) and the heavy runtime,
+#     stages a toolchain tarball + engine assets + versions.json, and smoke-tests
+#     the whole release through install.sh (this job runs npm/deno, so it only
+#     has `contents: read`).
+#   - `publish`: a separate job with `contents: write` that only runs the
+#     release action; it carries no untrusted package-manager code.
 #
 # Runner requirements:
-#   - runs-on: self-hosted
+#   - runs-on: self-hosted (a single runner, so both jobs share the filesystem
+#     and the `/tmp/inka-release-<run_id>` stage path)
 #   - the runner's own environment provides CARGO_HOME and CARGO_TARGET_DIR
 #     (a big disk; the Deno runtime build is ~10-15 min and needs several GB).
 #   - network (npm/deno for the smoke test).
@@ -21,19 +23,25 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
     runs-on: self-hosted
     timeout-minutes: 300
+    permissions:
+      contents: read
     env:
-      STAGE: ${{ github.workspace }}/_release_stage
+      # A stable path on the (single) self-hosted runner, shared with `publish`.
+      STAGE: /tmp/inka-release-${{ github.run_id }}
       TARGET: x86_64-unknown-linux-gnu
+    outputs:
+      rel: ${{ steps.versions.outputs.rel }}
+      runtime: ${{ steps.versions.outputs.runtime }}
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -46,11 +54,13 @@ jobs:
           mkdir -p "$CARGO_TARGET_DIR" "$STAGE"
           echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
           echo "CARGO_HOME=$CARGO_HOME"
+          echo "STAGE=$STAGE"
 
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
 
       - name: Discover versions
+        id: versions
         run: |
           set -euo pipefail
           out="$(scripts/ci/version.sh "${GITHUB_REF_NAME}")"
@@ -59,6 +69,8 @@ jobs:
           DENO="$(printf '%s\n' "$out" | sed -n 's/^deno=//p')"
           [ -n "$REL" ] && [ -n "$RUNTIME" ] && [ -n "$DENO" ] \
             || { echo "error: could not parse version.sh output" >&2; exit 1; }
+          echo "rel=$REL" >> "$GITHUB_OUTPUT"
+          echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
           echo "REL=$REL" >> "$GITHUB_ENV"
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
           echo "DENO=$DENO" >> "$GITHUB_ENV"
@@ -67,13 +79,13 @@ jobs:
       - name: Build toolchain
         run: |
           set -euo pipefail
-          cargo build --release -p inka --features bundle
-          cargo build --release -p inka-launcher
+          cargo build --locked --release -p inka --features bundle
+          cargo build --locked --release -p inka-launcher
 
       - name: Build runtime (always; tuple = runtime-version)
         run: |
           set -euo pipefail
-          cargo build --release -p inka-runtime
+          cargo build --locked --release -p inka-runtime
           test -f "$CARGO_TARGET_DIR/release/libinka_runtime.so"
 
       - name: Stage release assets
@@ -91,8 +103,9 @@ jobs:
           # Engine asset (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$RUNTIME.so"
 
-          # The bootstrap script itself.
+          # The bootstrap script and the curated release notes.
           cp install.sh "$STAGE/install.sh"
+          cp RELEASE_NOTES.md "$STAGE/RELEASE_NOTES.md"
 
           # sha256 sidecars (bare hex, as the installer/update expect).
           for f in "$TC" "libinka_runtime-$RUNTIME.so"; do
@@ -121,85 +134,27 @@ jobs:
       - name: Smoke test (never publish a broken release)
         run: scripts/ci/smoke.sh "$STAGE"
 
+  publish:
+    needs: build
+    runs-on: self-hosted
+    permissions:
+      contents: write
+    env:
+      STAGE: /tmp/inka-release-${{ github.run_id }}
+      TARGET: x86_64-unknown-linux-gnu
+    steps:
+      # No checkout and no package-manager code here: only the publish action.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
           tag_name: ${{ github.ref_name }}
-          name: inka ${{ env.REL }}
-          body: |
-            inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
-
-            0.5.3 makes permissions usable from **any** package manager. Deno
-            projects declare build-intent permissions in `deno.json`; npm, pnpm,
-            yarn, and bun projects previously had no equivalent, so a build was
-            deny-by-default and the executable failed at run time. `inka build`
-            now accepts the same grant flags as `inka run`, `package.json` can
-            carry an inline permission map, and a build with no permission
-            source warns instead of failing silently. Runtime tuple stays
-            `0.266.2`.
-
-            ## What's new
-
-            - **`inka build` takes permission flags.** The full `inka run`
-              surface now works at build time and is baked into the artifact:
-              `-A`/`--allow-all`, `-R`/`-W`/`-N`/`-E`/`-S[=list]`,
-              `--allow-<cat>[=list]`, `--deny-<cat>[=list]`, and
-              `-P[=<set>]`/`--permission-set[=<set>]`. CLI flags override any
-              config-derived permissions, so `inka build -A app.ts` needs no
-              config at all and `inka build --allow-env app.ts` bakes least
-              privilege. `-A` cannot be combined with `-P`/`--allow-*`.
-            - **Manager-agnostic inline permissions.** The `inka.permissions`
-              marker (in `package.json` or `deno.json`) now accepts three
-              shapes: the string `"all"` (`permissions=all`), a named-set
-              string, or an **inline category map**. This is the no-`deno.json`
-              path for npm/pnpm/yarn/bun:
-
-              ```json
-              { "inka": { "permissions": { "env": true, "read": ["./data"] } } }
-              ```
-
-            - **No-source build advisory.** When a build has neither CLI
-              permission flags nor a config build-intent source, `inka build`
-              now warns that the artifact is deny-by-default and points at
-              `--allow-*`/`-A`, `-P=<set>`, and `inka.permissions`, instead of
-              surfacing `NotCapable` only at run time.
-
-            ## Changed
-
-            - **Unified `-P`.** `inka build` now uses `-P[=<set>]` like
-              `inka run`: a bare `-P` selects the `default` set and `-P=<name>`
-              names one. The old space form `inka build -P <name> app.ts` is no
-              longer parsed; use `-P=<name>` or `--permission-set <name>` (a
-              clear hint is printed). This is the only CLI break.
-
-            ## Docs
-
-            - `README.md` and `docs/{build,permissions,run,cli,troubleshooting}.md`
-              updated for the build grant flags, the inline map, and the
-              no-source advisory.
-
-            ## Upgrade
-
-            ```sh
-            curl --proto '=https' --tlsv1.2 -fsSL \
-              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
-            ```
-
-            Then keep the toolchain and runtime current with `inka update`.
-
-            ## Assets
-
-            - `inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz` — CLI + launcher
-            - `libinka_runtime-${{ env.RUNTIME }}.so` — shared runtime tuple
-            - `install.sh` + `versions.json` — bootstrap installer + version record
-
-            `.sha256` sidecars are published for the toolchain and runtime.
-          generate_release_notes: true
+          name: inka ${{ needs.build.outputs.rel }}
+          body_path: ${{ env.STAGE }}/RELEASE_NOTES.md
           draft: false
           files: |
-            ${{ env.STAGE }}/inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz
-            ${{ env.STAGE }}/inka-toolchain-${{ env.REL }}-${{ env.TARGET }}.tar.gz.sha256
-            ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so
-            ${{ env.STAGE }}/libinka_runtime-${{ env.RUNTIME }}.so.sha256
+            ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz
+            ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz.sha256
+            ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so
+            ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so.sha256
             ${{ env.STAGE }}/versions.json
             ${{ env.STAGE }}/install.sh

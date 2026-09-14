@@ -27,17 +27,23 @@ if [ "$runtime_base" != "$deno_base" ]; then
 fi
 
 # Every Deno-project dependency must be an exact (=) pin, in every crate that
-# names one (the runtime engine and the bundler).
+# names one (the runtime engine and the bundler). Match generically so a newly
+# added crate (e.g. another rolldown_* or deno_*) is enforced too.
+PIN_PATTERN='^(rolldown(_[a-z0-9_]+)?|deno_[a-z0-9_]+|node_resolver|import_map|sys_traits)[[:space:]]*='
 for toml in "$ROOT/crates/inka-runtime/Cargo.toml" "$ROOT/crates/inka-bundler/Cargo.toml"; do
     [ -f "$toml" ] || continue
-    for dep in deno_core deno_runtime deno_semver deno_error node_resolver sys_traits deno_ast deno_graph deno_cache_dir deno_lockfile deno_npm import_map; do
-        if grep -qE "^[[:space:]]*${dep}[[:space:]]*=" "$toml"; then
-            if ! grep -qE "^[[:space:]]*${dep}[[:space:]]*=.*\"=" "$toml"; then
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        dep="${line%%=*}"
+        dep="$(printf '%s' "$dep" | tr -d '[:space:]')"
+        case "$line" in
+            *'"='*) ;;
+            *)
                 echo "error: $dep in $toml is not pinned exactly (expected \"=<version>\")" >&2
                 exit 1
-            fi
-        fi
-    done
+                ;;
+        esac
+    done < <(grep -E "$PIN_PATTERN" "$toml" || true)
 done
 
 echo "deno pins OK (runtime $RUNTIME, deno_runtime $DENO)"
