@@ -124,44 +124,44 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
 
-            0.5.0 is a **breaking release**. inka is now a build-only tool: it
-            bundles a JS/TS project into one self-contained executable. The
-            package store, per-project vendoring, and the standalone import
-            resolver are gone; all package management is external.
+            0.5.2 makes `inka build` and `inka run` resolve dependencies
+            correctly from **any** local `node_modules` layout, and closes the
+            build/run permission-seam gap. Runtime tuple stays `0.266.2`.
 
-            ## Breaking changes
+            ## Fixes
 
-            - **No package store, vendoring, or resolver.** `store`,
-              `vendored/`, `inka add`/`install`/`remove`/`vendor`, and the
-              `libinka_resolver` component are removed. Dependencies resolve
-              from your project's `node_modules` and the Deno cache (`DENO_DIR`).
-            - **`inka build` bundles.** Imports (import maps, `npm:`, `jsr:`,
-              `node_modules`) are resolved and bundled with rolldown into one
-              module; the artifact is self-contained. `--external <pkg>` leaves
-              a package unbundled but embeds it from `node_modules`.
-            - **Runtime floor raised to `>=0.266.2`.**
-            - **`inka update` will not cross the 0.4.x → 0.5.0 boundary.** Re-run
-              `install.sh`; it detects a pre-0.5.0 install and resets the old
-              toolchain and runtime before provisioning fresh.
+            - **`--external <pkg>` now embeds the dependency closure.**
+              `inka build --external` previously embedded only the package's own
+              folder, so an artifact failed at run time as soon as the package
+              required a transitive dependency. It now embeds the full runtime
+              closure, resolved with Node-style nearest-`node_modules` semantics
+              from each package's canonical realpath. Hoisted (npm, yarn, bun)
+              and symlinked isolated (pnpm `.pnpm/`, Deno `.deno/`) layouts both
+              work; conflicting versions are nested under the referring package,
+              and symlinks are followed with cycle protection.
+            - **`inka run` resolves workspace-hoisted `node_modules`.** In a
+              monorepo where dependencies are hoisted to a workspace root, `run`
+              now roots at the nearest ancestor that is a project root
+              (`package.json`/`deno.json`) and has a `node_modules`, matching
+              what `build` already did. The climb is bounded by a project marker
+              so read confinement cannot broaden to an unrelated directory.
+
+            ## Permissions
+
+            - **Build/run permission hint.** `inka run` now prints a note when
+              the config defines a build-intent permission source
+              (`deno.json.compile.permissions` or an `inka.permissions` marker),
+              naming the `-P=<set>` that reproduces the permissions `inka build`
+              would bake. `run` still never applies `compile.permissions`
+              implicitly (deny-by-default).
+
+            ## Docs
+
+            - `docs/packages.md`, `docs/build.md`, `docs/run.md`, and
+              `docs/permissions.md` updated for closure embedding, workspace-root
+              `node_modules` resolution, and the run hint.
 
             ## Upgrade
-
-            ```sh
-            curl --proto '=https' --tlsv1.2 -fsSL \
-              https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install.sh | sh
-            ```
-
-            ## What's new
-
-            - **`inka build`** — bundles an entry (import maps + `npm:`/`jsr:` +
-              `node_modules`) into a self-contained `INKFOOT5` executable, with
-              `--minify`, `--sourcemap`, and `--external <pkg>`.
-            - **`inka run`** — executes a project directly, resolving import
-              maps, `npm:` (via `node_modules`), and `jsr:` (Deno cache, offline).
-            - **Offline by default.** `jsr:`/`npm:` resolution reads the local
-              Deno cache; no network at build or run time.
-
-            ## Install
 
             ```sh
             curl --proto '=https' --tlsv1.2 -fsSL \
