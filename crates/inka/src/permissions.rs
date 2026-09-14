@@ -56,6 +56,14 @@ pub(crate) fn cat_for_short(short: char) -> Option<&'static str> {
     }
 }
 
+/// A raw newline in a CLI value would inject an extra manifest/DSL line.
+fn reject_newline(what: &str, value: &str) -> Result<(), String> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(format!("{what} contains a newline, which is not allowed"));
+    }
+    Ok(())
+}
+
 /// Interpret `arg` as a permission flag, mutating `flags`. Returns `Not` when it
 /// is some other option.
 pub(crate) fn parse_perm_flag(flags: &mut Flags, arg: &str) -> Result<PermFlag, String> {
@@ -70,11 +78,15 @@ pub(crate) fn parse_perm_flag(flags: &mut Flags, arg: &str) -> Result<PermFlag, 
         }
         "--permission-set" => Ok(PermFlag::ConsumeNext),
         _ if arg.starts_with("-P=") => {
-            flags.permset = Some(arg["-P=".len()..].to_string());
+            let name = arg["-P=".len()..].to_string();
+            reject_newline("permission set name", &name)?;
+            flags.permset = Some(name);
             Ok(PermFlag::Once)
         }
         _ if arg.starts_with("--permission-set=") => {
-            flags.permset = Some(arg["--permission-set=".len()..].to_string());
+            let name = arg["--permission-set=".len()..].to_string();
+            reject_newline("permission set name", &name)?;
+            flags.permset = Some(name);
             Ok(PermFlag::Once)
         }
         _ if arg.starts_with("--allow-") || arg.starts_with("--deny-") => {
@@ -96,6 +108,10 @@ pub(crate) fn parse_perm_flag(flags: &mut Flags, arg: &str) -> Result<PermFlag, 
             } else {
                 list
             };
+            reject_newline(
+                &format!("--{}-{cat} value", if deny { "deny" } else { "allow" }),
+                &list,
+            )?;
             let slot = if deny {
                 &mut flags.deny
             } else {
@@ -121,6 +137,7 @@ pub(crate) fn parse_perm_flag(flags: &mut Flags, arg: &str) -> Result<PermFlag, 
                     "option '{arg}' takes an optional '=<list>' value (e.g. -{short}=./data)"
                 ));
             };
+            reject_newline(&format!("-{short} value"), &list)?;
             flags.allow.push((cat, list));
             Ok(PermFlag::Once)
         }
@@ -171,14 +188,15 @@ pub(crate) fn validate(flags: &Flags) -> Result<(), String> {
 }
 
 /// Render the permission DSL from parsed flags. `-P` resolves a named set from
-/// `root`'s config; returns any notes (e.g. an unknown set name).
-pub(crate) fn dsl(root: &Path, flags: &Flags) -> (String, Vec<String>) {
+/// `root`'s config; returns any notes (e.g. an unknown set name). Errors on a
+/// value the manifest/DSL cannot represent (a raw newline).
+pub(crate) fn dsl(root: &Path, flags: &Flags) -> Result<(String, Vec<String>), String> {
     if flags.allow_all {
         let mut lines = vec!["permissions=all".to_string()];
         for (cat, list) in merge_cat(&flags.deny) {
             lines.push(format!("deny-{cat}={list}"));
         }
-        return (lines.join("\n"), Vec::new());
+        return Ok((lines.join("\n"), Vec::new()));
     }
     if let Some(name) = &flags.permset {
         return crate::config::permission_set_dsl(root, name);
@@ -190,7 +208,7 @@ pub(crate) fn dsl(root: &Path, flags: &Flags) -> (String, Vec<String>) {
     for (cat, list) in merge_cat(&flags.deny) {
         lines.push(format!("deny-{cat}={list}"));
     }
-    (lines.join("\n"), Vec::new())
+    Ok((lines.join("\n"), Vec::new()))
 }
 
 #[cfg(test)]
@@ -221,7 +239,7 @@ mod tests {
         let (f, _) = parse(&["-R", "-W", "-N", "-E", "-S"]);
         let cats: Vec<&str> = f.allow.iter().map(|(c, _)| c.as_str()).collect();
         assert_eq!(cats, vec!["read", "write", "net", "env", "sys"]);
-        let dsl = dsl(Path::new("."), &f).0;
+        let dsl = dsl(Path::new("."), &f).unwrap().0;
         assert!(dsl.contains("allow-read=*"), "{dsl}");
         assert!(dsl.contains("allow-net=*"), "{dsl}");
     }
@@ -229,7 +247,7 @@ mod tests {
     #[test]
     fn short_with_list_and_long_allow() {
         let (f, _) = parse(&["-R=./data", "--allow-net=api.example.com"]);
-        let dsl = dsl(Path::new("."), &f).0;
+        let dsl = dsl(Path::new("."), &f).unwrap().0;
         assert!(dsl.contains("allow-read=./data"), "{dsl}");
         assert!(dsl.contains("allow-net=api.example.com"), "{dsl}");
     }
@@ -248,7 +266,7 @@ mod tests {
     fn allow_all_with_deny() {
         let (f, _) = parse(&["-A", "--deny-read=./secret"]);
         assert_eq!(
-            dsl(Path::new("."), &f).0,
+            dsl(Path::new("."), &f).unwrap().0,
             "permissions=all\ndeny-read=./secret"
         );
     }
@@ -262,6 +280,15 @@ mod tests {
             "{}",
             errs[0]
         );
+    }
+
+    #[test]
+    fn newline_in_value_is_rejected() {
+        let (_, errs) = parse(&["--allow-read=a\nb"]);
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("newline"), "{}", errs[0]);
+        let (_, errs) = parse(&["-P=bad\nname"]);
+        assert!(errs.iter().any(|e| e.contains("newline")), "{errs:?}");
     }
 
     #[test]

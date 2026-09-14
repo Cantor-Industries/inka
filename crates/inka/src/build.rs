@@ -204,12 +204,15 @@ pub fn cmd_build(args: &[String]) {
 
     let cwd = env::current_dir()
         .unwrap_or_else(|e| err(&format!("cannot determine current directory: {e}")));
-    let (manifest_bytes, manifest_warnings) = resolve_manifest(
+    let (manifest_bytes, manifest_warnings) = match resolve_manifest(
         &cwd,
         runtime_flag.as_deref(),
         tested_flag.as_deref(),
         &perm_flags,
-    );
+    ) {
+        Ok(v) => v,
+        Err(e) => err(&e),
+    };
     for w in &manifest_warnings {
         eprintln!("warning: {w}");
     }
@@ -487,25 +490,36 @@ fn runtime_value(spec: &str) -> String {
 /// override config) or package.json / deno.json(.jsonc) build-intent sources,
 /// and the runtime requirement from config plus `--runtime`/`--tested-against`.
 /// Returns the manifest bytes and any non-fatal warnings.
+/// Validate a `--runtime`/`--tested-against` value: no newline (manifest
+/// injection) and the version grammar the launcher understands.
+fn check_version_arg(flag: &str, value: &str) -> Result<(), String> {
+    if !crate::config::valid_version_spec(value) {
+        return Err(format!(
+            "{flag} expects a version like 0.266.2 (optionally >=/==), got '{value}'"
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_manifest(
     cwd: &Path,
     runtime_flag: Option<&str>,
     tested_flag: Option<&str>,
     perm_flags: &Flags,
-) -> (Vec<u8>, Vec<String>) {
+) -> Result<(Vec<u8>, Vec<String>), String> {
     // Must track `crates/inka-runtime/runtime-version`: an older runtime needs
     // the retired resolver, which this toolchain no longer installs.
     const DEFAULT_RUNTIME: &str = ">=0.266.2";
 
     // CLI permission flags override any config-derived permission source.
     let (cli_dsl, cli_warns) = if perm_flags.selects() {
-        permissions::dsl(cwd, perm_flags)
+        permissions::dsl(cwd, perm_flags)?
     } else {
         (String::new(), Vec::new())
     };
     let cli_dsl = perm_flags.selects().then_some(cli_dsl.as_str());
 
-    let syn = crate::config::synthesize_manifest(cwd, None, cli_dsl);
+    let syn = crate::config::synthesize_manifest(cwd, None, cli_dsl)?;
     let mut bytes = syn.bytes;
     let mut warnings = cli_warns;
     warnings.extend(syn.warnings);
@@ -514,14 +528,16 @@ fn resolve_manifest(
     // floor is always embedded so an artifact can never select a runtime too old
     // to enforce its permission DSL.
     if let Some(r) = runtime_flag {
+        check_version_arg("--runtime", r)?;
         manifest_set_key(&mut bytes, "runtime", &runtime_value(r));
     } else if !manifest_has_key(&bytes, "runtime") {
         manifest_set_key(&mut bytes, "runtime", &runtime_value(DEFAULT_RUNTIME));
     }
     if let Some(t) = tested_flag {
+        check_version_arg("--tested-against", t)?;
         manifest_set_key(&mut bytes, "tested-against", t);
     }
-    (bytes, warnings)
+    Ok((bytes, warnings))
 }
 
 #[cfg(feature = "bundle")]
@@ -582,7 +598,7 @@ mod tests {
         tested: Option<&str>,
         pset: Option<&str>,
     ) -> String {
-        let (bytes, _) = resolve_manifest(cwd, runtime, tested, &flags(pset));
+        let (bytes, _) = resolve_manifest(cwd, runtime, tested, &flags(pset)).unwrap();
         String::from_utf8(bytes).unwrap()
     }
 
@@ -640,7 +656,7 @@ mod tests {
             allow_all: true,
             ..Default::default()
         };
-        let (bytes, _) = resolve_manifest(&cwd, None, None, &f);
+        let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("permissions=all"), "{m}");
         assert!(m.contains("runtime=inka_runtime>=0.266.2"), "{m}");
@@ -659,7 +675,7 @@ mod tests {
             allow: vec![("env".to_string(), "*".to_string())],
             ..Default::default()
         };
-        let (bytes, _) = resolve_manifest(&cwd, None, None, &f);
+        let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("allow-env=*"), "{m}");
         assert!(!m.contains("allow-read"), "CLI should override config: {m}");

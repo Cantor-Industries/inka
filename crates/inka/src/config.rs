@@ -263,15 +263,21 @@ fn render_val(v: &Value) -> Option<String> {
     }
 }
 
-/// Push a rendered allow/deny list, warning instead when it carries no items
-/// (an empty list would become "all" in the runtime DSL — an over-grant).
+/// Push a rendered allow/deny list. A raw newline is a hard error (it would
+/// inject an extra manifest line); an itemless list warns and is skipped (an
+/// empty list would become "all" in the runtime DSL — an over-grant).
 fn push_permission(
     target: &mut Vec<(String, String)>,
     kind: &str,
     cat: &str,
     list: String,
     warns: &mut Vec<String>,
-) {
+) -> Result<(), String> {
+    if list.contains('\n') || list.contains('\r') {
+        return Err(format!(
+            "permission '{cat}' {kind} list contains a newline, which the manifest cannot represent"
+        ));
+    }
     if list_has_items(&list) {
         target.push((cat.to_string(), list));
     } else {
@@ -279,6 +285,7 @@ fn push_permission(
             "permission '{cat}' {kind} list is empty; ignored (use \"*\" for all)"
         ));
     }
+    Ok(())
 }
 
 /// Apply one category map (`{ cat: bool | string | array | {allow,deny,ignore} }`)
@@ -288,8 +295,10 @@ fn apply_category_map(
     allow: &mut Vec<(String, String)>,
     deny: &mut Vec<(String, String)>,
     warns: &mut Vec<String>,
-) {
-    let Some(obj) = map.as_object() else { return };
+) -> Result<(), String> {
+    let Some(obj) = map.as_object() else {
+        return Ok(());
+    };
     for (cat, val) in obj {
         if !CATEGORIES.contains(&cat.as_str()) {
             if cat == "import" {
@@ -308,10 +317,10 @@ fn apply_category_map(
                 }
             }
             Value::Array(_) => match render_val(val) {
-                Some(list) => push_permission(allow, "allow", cat, list, warns),
-                None => push_permission(allow, "allow", cat, String::new(), warns),
+                Some(list) => push_permission(allow, "allow", cat, list, warns)?,
+                None => push_permission(allow, "allow", cat, String::new(), warns)?,
             },
-            Value::String(s) => push_permission(allow, "allow", cat, s.clone(), warns),
+            Value::String(s) => push_permission(allow, "allow", cat, s.clone(), warns)?,
             Value::Object(o) => {
                 if let Some(a) = o.get("allow") {
                     push_permission(
@@ -320,10 +329,10 @@ fn apply_category_map(
                         cat,
                         render_val(a).unwrap_or_default(),
                         warns,
-                    );
+                    )?;
                 }
                 if let Some(d) = o.get("deny") {
-                    push_permission(deny, "deny", cat, render_val(d).unwrap_or_default(), warns);
+                    push_permission(deny, "deny", cat, render_val(d).unwrap_or_default(), warns)?;
                 }
                 if o.contains_key("ignore") {
                     warns.push(format!(
@@ -334,12 +343,29 @@ fn apply_category_map(
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// True when a permission descriptor looks like a relative filesystem path
 /// (not `*`, not absolute, not a URL/scheme).
 fn is_relative_path(item: &str) -> bool {
     !item.is_empty() && item != "*" && !item.starts_with('/') && !item.contains("://")
+}
+
+/// Accept the runtime-requirement grammar the launcher understands: an optional
+/// `>=`/`>`/`==` prefix followed by a dotted numeric version (`0.266.2`).
+/// Rejects empty, trailing junk, and injected newlines.
+pub(crate) fn valid_version_spec(spec: &str) -> bool {
+    let rest = spec
+        .strip_prefix(">=")
+        .or_else(|| spec.strip_prefix("=="))
+        .or_else(|| spec.strip_prefix('>'))
+        .unwrap_or(spec);
+    if rest.is_empty() || rest.contains('\n') || rest.contains('\r') {
+        return false;
+    }
+    rest.split('.')
+        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// Append the scalar string items of a category value (`true` counts as `*`).
@@ -435,8 +461,17 @@ fn resolve_named_set(
     let p = named_set_in(cfg.pkg.as_ref(), name);
     match (d, p) {
         (Some(dv), Some(pv)) => {
-            let mut merged = pv;
-            if let (Some(dobj), Some(mobj)) = (dv.as_object(), merged.as_object_mut()) {
+            // A non-object deno.json set is authoritative: it grants nothing and
+            // must not silently fall back to the package.json definition.
+            let Some(dobj) = dv.as_object() else {
+                return Some(dv);
+            };
+            let mut merged = if pv.is_object() {
+                pv
+            } else {
+                Value::Object(Default::default())
+            };
+            if let Some(mobj) = merged.as_object_mut() {
                 for (k, v) in dobj {
                     mobj.insert(k.clone(), v.clone());
                 }
@@ -607,6 +642,7 @@ fn effective_permission_map(
 }
 
 /// Synthesized manifest bytes plus any non-fatal warnings.
+#[derive(Debug)]
 pub struct Synth {
     pub bytes: Vec<u8>,
     pub warnings: Vec<String>,
@@ -616,16 +652,16 @@ pub struct Synth {
 /// (`inka run -P [<name>]`). Only the named set is honored — never
 /// `compile.permissions` or auto-defaults (dev-run intent). Returns the
 /// newline-joined DSL lines (empty = deny-by-default) plus informational notes.
-pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>) {
+pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> Result<(String, Vec<String>), String> {
     let (cfg, load_warns) = load(cwd);
     let mut notes = load_warns;
     let Some(map) = resolve_named_set(&cfg, name, "-P", &mut notes) else {
         // resolve_named_set already recorded the unknown-name note.
-        return (String::new(), notes);
+        return Ok((String::new(), notes));
     };
     let mut allow: Vec<(String, String)> = Vec::new();
     let mut deny: Vec<(String, String)> = Vec::new();
-    apply_category_map(&map, &mut allow, &mut deny, &mut notes);
+    apply_category_map(&map, &mut allow, &mut deny, &mut notes)?;
     validate_category_map(&map, &mut notes);
     warn_ineffective_denies(&allow, &deny, &mut notes);
     let mut lines: Vec<String> = Vec::new();
@@ -635,7 +671,7 @@ pub(crate) fn permission_set_dsl(cwd: &Path, name: &str) -> (String, Vec<String>
     for (cat, list) in deny {
         lines.push(format!("deny-{cat}={list}"));
     }
-    (lines.join("\n"), notes)
+    Ok((lines.join("\n"), notes))
 }
 
 /// Does the project config declare a non-empty `permissions.default` set that
@@ -726,13 +762,22 @@ pub(crate) fn build_intent_permission_hint(cwd: &Path) -> Option<BuildIntentHint
 /// `cli_dsl`, when present, is a permission DSL rendered from `inka build`'s
 /// CLI flags; it overrides the config permission source entirely. Caller
 /// applies the runtime floor default + module= later.
-pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>, cli_dsl: Option<&str>) -> Synth {
+pub fn synthesize_manifest(
+    cwd: &Path,
+    perm_set: Option<&str>,
+    cli_dsl: Option<&str>,
+) -> Result<Synth, String> {
     let (cfg, load_warns) = load(cwd);
     let mut lines: Vec<String> = Vec::new();
     let mut warns: Vec<String> = load_warns;
 
     let (runtime, tested) = inka_block_runtime(&cfg);
     if let Some(r) = runtime {
+        if !valid_version_spec(&r) {
+            return Err(format!(
+                "inka.runtime must be a version like 0.266.2 (optionally >=/==), got '{r}'"
+            ));
+        }
         let line = if r.starts_with('>') || r.starts_with('=') {
             format!("runtime=inka_runtime{r}")
         } else {
@@ -741,6 +786,11 @@ pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>, cli_dsl: Option<&
         lines.push(line);
     }
     if let Some(t) = tested {
+        if !valid_version_spec(&t) {
+            return Err(format!(
+                "inka.tested-against must be a version like 0.266.2, got '{t}'"
+            ));
+        }
         lines.push(format!("tested-against={t}"));
     }
 
@@ -758,7 +808,7 @@ pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>, cli_dsl: Option<&
             Some(PermSelection::Map(map)) => {
                 let mut allow: Vec<(String, String)> = Vec::new();
                 let mut deny: Vec<(String, String)> = Vec::new();
-                apply_category_map(&map, &mut allow, &mut deny, &mut warns);
+                apply_category_map(&map, &mut allow, &mut deny, &mut warns)?;
                 validate_category_map(&map, &mut warns);
                 warn_ineffective_denies(&allow, &deny, &mut warns);
                 for (cat, list) in allow {
@@ -777,10 +827,10 @@ pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>, cli_dsl: Option<&
         bytes.push_str(&lines.join("\n"));
         bytes.push('\n');
     }
-    Synth {
+    Ok(Synth {
         bytes: bytes.into_bytes(),
         warnings: warns,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -798,7 +848,7 @@ mod tests {
     }
 
     fn read_synth(cwd: &Path, perm_set: Option<&str>) -> (String, Vec<String>) {
-        let s = synthesize_manifest(cwd, perm_set, None);
+        let s = synthesize_manifest(cwd, perm_set, None).unwrap();
         (String::from_utf8(s.bytes).unwrap(), s.warnings)
     }
 
@@ -1367,6 +1417,76 @@ mod tests {
         let (s, _) = read_synth(&cwd, None);
         assert!(s.contains("allow-read=/data"), "{s}");
         assert!(!s.contains("allow-read=/data,"), "{s}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // A raw newline in a permission item would inject a manifest line.
+    #[test]
+    fn newline_in_permission_item_is_rejected() {
+        let cwd = PathBuf::from("/tmp/inkaconf-injectitem");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["/a\npermissions=all"] } } }"#,
+        );
+        let err = synthesize_manifest(&cwd, None, None)
+            .expect_err("newline must be rejected")
+            .to_string();
+        assert!(err.contains("newline"), "{err}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn newline_in_runtime_is_rejected() {
+        let cwd = PathBuf::from("/tmp/inkaconf-injectrt");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "inka": { "runtime": ">=0.266.2\npermissions=all" } }"#,
+        );
+        assert!(synthesize_manifest(&cwd, None, None).is_err());
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn malformed_runtime_spec_is_rejected() {
+        let cwd = PathBuf::from("/tmp/inkaconf-badrt");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(&cwd, "deno.json", r#"{ "inka": { "runtime": ">=abc" } }"#);
+        let err = synthesize_manifest(&cwd, None, None)
+            .expect_err("bad runtime spec must be rejected")
+            .to_string();
+        assert!(err.contains("inka.runtime"), "{err}");
+        // A well-formed spec still works.
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "inka": { "runtime": ">=0.266.2" } }"#,
+        );
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("runtime=inka_runtime>=0.266.2"), "{s}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // A non-object deno.json set is authoritative; package.json must not win.
+    #[test]
+    fn deno_non_object_set_is_authoritative() {
+        let cwd = PathBuf::from("/tmp/inkaconf-nonobjset");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "permissions": { "server": true } }"#,
+        );
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "permissions": { "server": { "net": true } } }"#,
+        );
+        let (s, _) = read_synth(&cwd, Some("server"));
+        assert!(!s.contains("allow-net"), "deno.json must win: {s}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

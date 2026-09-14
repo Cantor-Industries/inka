@@ -299,7 +299,10 @@ pub(crate) fn cmd_run(args: &[String]) {
         Ok(r) => r,
         Err(e) => fail(&e),
     };
-    let (perms, perm_notes) = permissions::dsl(&root, &flags);
+    let (perms, perm_notes) = match permissions::dsl(&root, &flags) {
+        Ok(v) => v,
+        Err(e) => fail(&e),
+    };
     for n in &perm_notes {
         eprintln!("warning: {n}");
     }
@@ -469,7 +472,7 @@ mod tests {
         ]);
         assert_eq!(file, PathBuf::from("app.js"));
         assert!(prog.is_empty());
-        let dsl = permissions::dsl(Path::new("."), &f).0;
+        let dsl = permissions::dsl(Path::new("."), &f).unwrap().0;
         assert!(dsl.contains("allow-read=data.txt"), "{dsl}");
         assert!(dsl.contains("allow-net=*"), "{dsl}");
         assert!(dsl.contains("deny-net=1.2.3.4"), "{dsl}");
@@ -493,12 +496,12 @@ mod tests {
     #[test]
     fn repeated_flags_merge_per_category() {
         let (f, _, _) = parsed(&["--allow-read=./a", "--allow-read=./b", "app.js"]);
-        let dsl = permissions::dsl(Path::new("."), &f).0;
+        let dsl = permissions::dsl(Path::new("."), &f).unwrap().0;
         assert!(dsl.contains("allow-read=./a,./b"), "{dsl}");
 
         // "*" wins over explicit lists
         let (f2, _, _) = parsed(&["--allow-net=a.com", "--allow-net", "app.js"]);
-        let dsl2 = permissions::dsl(Path::new("."), &f2).0;
+        let dsl2 = permissions::dsl(Path::new("."), &f2).unwrap().0;
         assert!(dsl2.contains("allow-net=*"), "{dsl2}");
         assert!(!dsl2.contains("a.com"), "{dsl2}");
     }
@@ -506,14 +509,14 @@ mod tests {
     #[test]
     fn allow_all_trims_by_deny() {
         let (f, _, _) = parsed(&["-A", "--deny-read=x", "app.js"]);
-        let dsl = permissions::dsl(Path::new("."), &f).0;
+        let dsl = permissions::dsl(Path::new("."), &f).unwrap().0;
         assert_eq!(dsl, "permissions=all\ndeny-read=x");
     }
 
     #[test]
     fn no_flags_is_deny_by_default() {
         let (f, _, _) = parsed(&["app.js"]);
-        assert_eq!(permissions::dsl(Path::new("."), &f).0, "");
+        assert_eq!(permissions::dsl(Path::new("."), &f).unwrap().0, "");
     }
 
     #[test]
