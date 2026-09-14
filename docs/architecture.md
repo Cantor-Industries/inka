@@ -59,8 +59,9 @@ deny-by-default unless an allow source was baked at build time (see
 
 The launcher searches `$INKA_RUNTIME_HOME` and `~/.local/share/inka/runtime`,
 then picks the **newest** tuple that satisfies the manifest's `runtime=` floor
-and `tested-against=` cap. `$INKA_RUNTIME` forces a specific file. No match →
-exit 3. Updating the machine's runtime updates every artifact at once.
+and `tested-against=` cap. The runtime's self-reported `inka_runtime_version()`
+must match the version in its filename, or the launcher refuses to load it. No
+match → exit 3. Updating the machine's runtime updates every artifact at once.
 
 ## C ABI
 

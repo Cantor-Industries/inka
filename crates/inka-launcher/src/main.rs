@@ -71,7 +71,7 @@ fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 struct Version(u64, u64, u64);
 
 impl std::fmt::Display for Version {
@@ -264,8 +264,12 @@ fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
 #[derive(Default)]
 struct Manifest {
     min: Option<Version>,
+    gt: Option<Version>,
     exact: Option<Version>,
     tested: Option<Version>,
+    /// A present-but-unparseable `runtime=`/`tested-against=` value. A malformed
+    /// constraint must not silently drop to "accept anything".
+    malformed: Option<String>,
     module: String,
     /// Canonical permission lines (`permissions=…`, `allow-*=…`, `deny-*=…`)
     /// forwarded verbatim to the runtime.
@@ -288,17 +292,28 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
         match key {
             "runtime" => {
                 let rest = val.strip_prefix("inka_runtime").unwrap_or(val).trim_start();
-                if let Some(x) = rest.strip_prefix(">=") {
-                    m.min = parse_version(x);
+                let (slot, text) = if let Some(x) = rest.strip_prefix(">=") {
+                    (Slot::Min, x)
                 } else if let Some(x) = rest.strip_prefix(">") {
-                    m.min = parse_version(x);
+                    (Slot::Gt, x)
                 } else if let Some(x) = rest.strip_prefix("==") {
-                    m.exact = parse_version(x);
+                    (Slot::Exact, x)
                 } else {
-                    m.exact = parse_version(rest);
+                    (Slot::Exact, rest)
+                };
+                match parse_version(text) {
+                    Some(v) => match slot {
+                        Slot::Min => m.min = Some(v),
+                        Slot::Gt => m.gt = Some(v),
+                        Slot::Exact => m.exact = Some(v),
+                    },
+                    None => m.malformed = Some(format!("runtime={val}")),
                 }
             }
-            "tested-against" => m.tested = parse_version(val),
+            "tested-against" => match parse_version(val) {
+                Some(v) => m.tested = Some(v),
+                None => m.malformed = Some(format!("tested-against={val}")),
+            },
             "module" => m.module = val.to_string(),
             "permissions" => {
                 if !m.perms.is_empty() {
@@ -316,6 +331,63 @@ fn parse_manifest(bytes: &[u8]) -> Manifest {
         }
     }
     m
+}
+
+enum Slot {
+    Min,
+    Gt,
+    Exact,
+}
+
+/// Does `v` satisfy every constraint in the manifest?
+fn constraint_allows(m: &Manifest, v: Version) -> bool {
+    if let Some(e) = m.exact {
+        if v != e {
+            return false;
+        }
+    }
+    if let Some(g) = m.gt {
+        if v <= g {
+            return false;
+        }
+    }
+    if let Some(mn) = m.min {
+        if v < mn {
+            return false;
+        }
+    }
+    if let Some(t) = m.tested {
+        if v > t {
+            return false;
+        }
+    }
+    true
+}
+
+/// Confirm the loaded runtime's self-reported version matches the version its
+/// filename claims. `inka_runtime_version()` returns `inka_runtime-<x.y.z>`.
+fn check_reported_version(lib: &Path, reported: &str, expected: Version) -> Result<(), i32> {
+    match reported
+        .strip_prefix("inka_runtime-")
+        .and_then(parse_version)
+    {
+        Some(v) if v == expected => Ok(()),
+        Some(v) => {
+            eprintln!(
+                "[inka] runtime {} reports version {v}, but its filename says {expected}; \
+                 refusing to load",
+                lib.display()
+            );
+            Err(4)
+        }
+        None => {
+            eprintln!(
+                "[inka] runtime {} reports an unrecognized version '{reported}'; refusing to load",
+                lib.display()
+            );
+            Err(4)
+        }
+    }
 }
 
 /// `$XDG_DATA_HOME` when absolute, else `$HOME/.local/share`.
@@ -340,20 +412,37 @@ fn runtime_dirs() -> Vec<PathBuf> {
     out
 }
 
-fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
-    if let Some(p) = env::var_os("INKA_RUNTIME") {
-        let p = PathBuf::from(p);
-        if p.is_file() {
-            return Some((Version(0, 0, 0), p));
+#[cfg(unix)]
+fn warn_if_world_writable(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(md) = fs::metadata(dir) {
+        if md.permissions().mode() & 0o002 != 0 {
+            eprintln!(
+                "[inka] warning: runtime dir {} is world-writable; a local user could \
+                 replace the runtime",
+                dir.display()
+            );
         }
     }
+}
+
+#[cfg(not(unix))]
+fn warn_if_world_writable(_dir: &Path) {}
+
+fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
     let mut best: Option<(Version, PathBuf)> = None;
     for dir in dirs {
         if !dir.is_dir() {
             continue;
         }
+        warn_if_world_writable(dir);
         let Ok(rd) = fs::read_dir(dir) else { continue };
         for ent in rd.flatten() {
+            // Skip symlinked entries: the version is the filename's claim, and a
+            // symlink lets it point anywhere.
+            if ent.file_type().map(|t| t.is_symlink()).unwrap_or(false) {
+                continue;
+            }
             let name = ent.file_name().to_string_lossy().into_owned();
             let Some(stripped) = name.strip_prefix("libinka_runtime-") else {
                 continue;
@@ -364,20 +453,8 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
             let Some(v) = parse_version(vstr) else {
                 continue;
             };
-            if let Some(exact) = m.exact {
-                if v != exact {
-                    continue;
-                }
-            }
-            if let Some(min) = m.min {
-                if v < min {
-                    continue;
-                }
-            }
-            if let Some(t) = m.tested {
-                if v > t {
-                    continue;
-                }
+            if !constraint_allows(m, v) {
+                continue;
             }
             if best.as_ref().is_none_or(|(bv, _)| v > *bv) {
                 best = Some((v, ent.path()));
@@ -390,6 +467,8 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
 fn required_string(m: &Manifest) -> String {
     if let Some(e) = m.exact {
         format!("inka_runtime == {e}")
+    } else if let Some(g) = m.gt {
+        format!("inka_runtime > {g}")
     } else if let Some(x) = m.min {
         format!("inka_runtime >= {x}")
     } else {
@@ -397,7 +476,14 @@ fn required_string(m: &Manifest) -> String {
     }
 }
 
-fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms: &str) -> i32 {
+fn load_and_run(
+    lib: &Path,
+    expected: Version,
+    module: &str,
+    payload: &[u8],
+    args: &[String],
+    perms: &str,
+) -> i32 {
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
@@ -433,6 +519,9 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
             }
         };
         let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
+        if let Err(code) = check_reported_version(lib, &reported, expected) {
+            return code;
+        }
 
         let create: libloading::Symbol<FnCreate> = match library.get(b"inka_runtime_create") {
             Ok(s) => s,
@@ -515,7 +604,14 @@ fn load_and_run(lib: &Path, module: &str, payload: &[u8], args: &[String], perms
     }
 }
 
-fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: &str) -> i32 {
+fn load_and_run_dir(
+    lib: &Path,
+    expected: Version,
+    dir: &str,
+    entry: &str,
+    args: &[String],
+    perms: &str,
+) -> i32 {
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
@@ -524,6 +620,7 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
         }
     };
 
+    type FnVersion = unsafe extern "C" fn() -> *const c_char;
     type FnRunDir = unsafe extern "C" fn(
         *mut c_void,
         *const c_char,
@@ -536,6 +633,21 @@ fn load_and_run_dir(lib: &Path, dir: &str, entry: &str, args: &[String], perms: 
     ) -> c_int;
 
     unsafe {
+        let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
+            Ok(s) => s,
+            Err(_) => {
+                eprintln!(
+                    "[inka] runtime {} is missing inka_runtime_version; reinstall it",
+                    lib.display()
+                );
+                return 4;
+            }
+        };
+        let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
+        if let Err(code) = check_reported_version(lib, &reported, expected) {
+            return code;
+        }
+
         let dir_c = CString::new(dir).expect("nul in dir");
         let entry_c = CString::new(entry).expect("nul in entry");
         let perms_c = CString::new(perms).unwrap_or_else(|_| CString::new("").unwrap());
@@ -639,6 +751,10 @@ fn main() {
         Trailer::Single { manifest, .. } | Trailer::Archive { manifest, .. } => *manifest,
     };
     let m = parse_manifest(manifest_bytes);
+    if let Some(bad) = &m.malformed {
+        eprintln!("[inka] manifest has an unparseable version constraint: {bad}");
+        std::process::exit(3);
+    }
     let dirs = runtime_dirs();
 
     let Some((v, path)) = resolve_runtime(&m, &dirs) else {
@@ -664,7 +780,7 @@ fn main() {
                 m.module,
                 source.len()
             );
-            load_and_run(&path, &m.module, source, &args, &m.perms)
+            load_and_run(&path, v, &m.module, source, &args, &m.perms)
         }
         Trailer::Archive {
             files, precompiled, ..
@@ -686,6 +802,7 @@ fn main() {
             };
             let code = load_and_run_dir(
                 &path,
+                v,
                 &tree.path().to_string_lossy(),
                 &m.module,
                 &args,
@@ -769,5 +886,58 @@ mod tests {
         let t1 = extract_tree(&files).unwrap();
         let t2 = extract_tree(&files).unwrap();
         assert_ne!(t1.path(), t2.path());
+    }
+
+    #[test]
+    fn manifest_operator_semantics() {
+        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\n");
+        assert_eq!(m.min, Some(Version(0, 266, 2)));
+        assert!(m.gt.is_none() && m.exact.is_none() && m.malformed.is_none());
+
+        let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
+        assert_eq!(m.gt, Some(Version(0, 266, 2)));
+        assert!(m.min.is_none());
+
+        let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
+        assert_eq!(m.exact, Some(Version(0, 266, 2)));
+
+        let m = parse_manifest(b"runtime=0.266.2\n");
+        assert_eq!(m.exact, Some(Version(0, 266, 2)));
+    }
+
+    #[test]
+    fn malformed_version_is_detected() {
+        assert!(parse_manifest(b"runtime=inka_runtime>=garbage\n")
+            .malformed
+            .is_some());
+        assert!(parse_manifest(b"tested-against=nope\n").malformed.is_some());
+    }
+
+    #[test]
+    fn strict_gt_and_constraints() {
+        let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
+        assert!(
+            !constraint_allows(&m, Version(0, 266, 2)),
+            "> rejects equal"
+        );
+        assert!(constraint_allows(&m, Version(0, 266, 3)));
+        assert!(!constraint_allows(&m, Version(0, 266, 1)));
+
+        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
+        assert!(constraint_allows(&m, Version(0, 266, 2)));
+        assert!(constraint_allows(&m, Version(0, 266, 4)));
+        assert!(!constraint_allows(&m, Version(0, 266, 5)), "cap");
+
+        let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
+        assert!(constraint_allows(&m, Version(0, 266, 2)));
+        assert!(!constraint_allows(&m, Version(0, 266, 3)));
+    }
+
+    #[test]
+    fn reported_version_must_match_filename() {
+        let lib = Path::new("/x/libinka_runtime-0.266.2.so");
+        assert!(check_reported_version(lib, "inka_runtime-0.266.2", Version(0, 266, 2)).is_ok());
+        assert!(check_reported_version(lib, "inka_runtime-0.266.3", Version(0, 266, 2)).is_err());
+        assert!(check_reported_version(lib, "garbage", Version(0, 266, 2)).is_err());
     }
 }
