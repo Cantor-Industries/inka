@@ -103,7 +103,9 @@ bakes a relative `read`/`write` grant.
   deny. Rebuild old artifacts against the current runtime to inherit the new
   default (or declare `permissions=all`).
 - `inka run` grants are per-invocation flags (see [`inka run`](run.md)); `run`
-  honors `-P` only and never applies `compile.permissions`/auto-defaults.
+  honors `-P` only and never applies `compile.permissions`/auto-defaults. When
+  the config defines a build-intent source, `run` prints a hint naming the
+  `-P=<set>` that reproduces the build's permissions.
 
 ## See also
 

@@ -45,7 +45,10 @@ Rules:
 - `-A` cannot combine with `-P` or `--allow-*` (deny-* may trim it); `-P`
   cannot combine with granular flags.
 - Only `-P` is honored for `run` — `compile.permissions` and auto-defaults are
-  never applied (that's a *build* concept).
+  never applied (that's a *build* concept). If the config has
+  `compile.permissions` or an `inka.permissions` marker, `run` prints a hint
+  naming the `-P=<set>` that reproduces what a build would bake. Use `-P=<name>`
+  (or `--permission-set=<name>`); a bare `-P` selects the `default` set.
 - Repeated allow/deny flags merge per category (`*` wins, lists join).
 - If you run with no permission flags and your config declares a non-empty
   `permissions.default`, inka prints a hint reminding you the run is

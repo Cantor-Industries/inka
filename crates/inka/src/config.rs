@@ -572,6 +572,70 @@ pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
     })
 }
 
+/// A build-intent permission source that `inka build` bakes automatically but
+/// `inka run` does not apply (a documented asymmetry: run is deny-by-default
+/// unless flags or `-P` are given).
+pub(crate) struct BuildIntentHint {
+    /// Human-readable source, e.g. `deno.json compile.permissions`.
+    pub source: String,
+    /// The named set to select with `-P <name>`, when the source names one.
+    pub set_name: Option<String>,
+}
+
+/// Detect an explicit build-intent permission source (`compile.permissions` or
+/// an `inka.permissions` marker) so `inka run` can point the user at the flags
+/// that reproduce what a build would bake. Returns `None` when there is none.
+pub(crate) fn build_intent_permission_hint(cwd: &Path) -> Option<BuildIntentHint> {
+    let (cfg, _) = load(cwd);
+
+    if let Some(p) = cfg
+        .deno
+        .as_ref()
+        .and_then(|d| d.get("compile"))
+        .and_then(|c| c.get("permissions"))
+    {
+        if p.is_object() {
+            return Some(BuildIntentHint {
+                source: "deno.json compile.permissions (category map)".to_string(),
+                set_name: None,
+            });
+        }
+        if let Some(name) = p.as_str() {
+            return Some(BuildIntentHint {
+                source: format!("deno.json compile.permissions set '{name}'"),
+                set_name: Some(name.to_string()),
+            });
+        }
+        return Some(BuildIntentHint {
+            source: "deno.json compile.permissions (malformed)".to_string(),
+            set_name: None,
+        });
+    }
+
+    let marker = cfg
+        .deno
+        .as_ref()
+        .and_then(|d| d.get("inka"))
+        .and_then(|i| i.get("permissions"))
+        .or_else(|| {
+            cfg.pkg
+                .as_ref()
+                .and_then(|p| p.get("inka"))
+                .and_then(|i| i.get("permissions"))
+        });
+    match marker {
+        Some(serde_json::Value::String(name)) => Some(BuildIntentHint {
+            source: format!("inka.permissions set '{name}'"),
+            set_name: Some(name.clone()),
+        }),
+        Some(_) => Some(BuildIntentHint {
+            source: "inka.permissions (malformed)".to_string(),
+            set_name: None,
+        }),
+        None => None,
+    }
+}
+
 pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
     let (cfg, load_warns) = load(cwd);
     let mut lines: Vec<String> = Vec::new();
@@ -1165,6 +1229,46 @@ mod tests {
         );
         let (_, warns) = read_synth(&cwd, None);
         assert!(has_note(&warns, "comma or newline"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // WS-`inka run` parity: the hint reports the build-intent source and, when
+    // it names a set, the `-P <name>` that reproduces a build's permissions.
+    #[test]
+    fn build_intent_hint_reports_named_and_map_sources() {
+        let cwd = PathBuf::from("/tmp/inkaconf-buildintent");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        assert!(build_intent_permission_hint(&cwd).is_none());
+
+        // compile.permissions naming a set -> selectable with -P <name>.
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": "server" }, "permissions": { "server": { "net": true } } }"#,
+        );
+        let h = build_intent_permission_hint(&cwd).expect("hint");
+        assert_eq!(h.set_name.as_deref(), Some("server"), "{}", h.source);
+
+        // compile.permissions as a category map -> no -P target.
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["./data"] } } }"#,
+        );
+        let h = build_intent_permission_hint(&cwd).expect("hint");
+        assert!(h.set_name.is_none(), "{}", h.source);
+        assert!(h.source.contains("category map"), "{}", h.source);
+
+        // inka.permissions marker -> selectable with -P <name>.
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "inka": { "permissions": "server" }, "permissions": { "server": { "net": true } } }"#,
+        );
+        let h = build_intent_permission_hint(&cwd).expect("hint");
+        assert_eq!(h.set_name.as_deref(), Some("server"), "{}", h.source);
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

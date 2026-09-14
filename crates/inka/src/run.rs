@@ -283,6 +283,31 @@ fn is_project_root(dir: &Path) -> bool {
     dir.join("package.json").is_file() || dir.join("deno.json").is_file()
 }
 
+/// The execution root for a file under the cwd. Normally the cwd, but when the
+/// cwd has no `node_modules` we climb to the nearest ancestor that both is a
+/// project root (`package.json`/`deno.json`) and has a `node_modules`. That
+/// matches `inka build`'s Node-style upward `node_modules` resolution for
+/// monorepos/workspaces, where dependencies are hoisted to the workspace root.
+/// The climb is bounded by a project marker so confinement never broadens to an
+/// unrelated directory that merely happens to contain `node_modules`.
+fn execution_root_for_cwd(cwd: &Path) -> PathBuf {
+    if cwd.join("node_modules").is_dir() {
+        return cwd.to_path_buf();
+    }
+    let mut cur = cwd.to_path_buf();
+    loop {
+        match cur.parent() {
+            Some(parent) if parent != cur => {
+                if parent.join("node_modules").is_dir() && is_project_root(parent) {
+                    return parent.to_path_buf();
+                }
+                cur = parent.to_path_buf();
+            }
+            _ => return cwd.to_path_buf(),
+        }
+    }
+}
+
 fn join_components(rel: &Path) -> String {
     rel.components()
         .map(|c| c.as_os_str().to_string_lossy())
@@ -307,7 +332,17 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
         if entry.is_empty() {
             return Err(format!("cannot run a directory: {}", file.display()));
         }
-        return Ok((cwd.to_path_buf(), entry));
+        // When the cwd has no node_modules but a workspace ancestor does, root
+        // there so parent-hoisted dependencies resolve as they do in a build.
+        let root = execution_root_for_cwd(&canon_cwd);
+        if root == canon_cwd {
+            return Ok((cwd.to_path_buf(), entry));
+        }
+        let entry = canon
+            .strip_prefix(&root)
+            .map(join_components)
+            .unwrap_or(entry);
+        return Ok((root, entry));
     }
 
     // Outside the cwd: find the nearest ancestor project root.
@@ -377,18 +412,33 @@ pub(crate) fn cmd_run(args: &[String]) {
     };
     let perms = permission_dsl(&root, &flags);
 
-    // Informational guard: config declares a default set but nothing was
-    // selected for this run (permissions are still deny-by-default).
+    // Informational guard: config declares build-intent or default permissions
+    // but nothing was selected for this run (permissions are still
+    // deny-by-default). `run` never auto-applies them.
     if !flags.allow_all
         && flags.permset.is_none()
         && flags.allow.is_empty()
         && flags.deny.is_empty()
-        && crate::config::config_has_default_grants(&root)
     {
-        eprintln!(
-            "[inka] note: config declares permissions but none were selected for this run; \
-             the program is deny-by-default (use -P, -A, or --allow-*)"
-        );
+        if let Some(hint) = crate::config::build_intent_permission_hint(&root) {
+            match &hint.set_name {
+                Some(name) => eprintln!(
+                    "[inka] note: {} is baked by `inka build`; `inka run` does not apply it. \
+                     Use `-P={name}` (or -A/--allow-*) to run with those permissions.",
+                    hint.source
+                ),
+                None => eprintln!(
+                    "[inka] note: {} is baked by `inka build`; `inka run` does not apply it. \
+                     Pass -A/--allow-* (or define a named set and use -P) to match.",
+                    hint.source
+                ),
+            }
+        } else if crate::config::config_has_default_grants(&root) {
+            eprintln!(
+                "[inka] note: config declares permissions but none were selected for this run; \
+                 the program is deny-by-default (use -P, -A, or --allow-*)"
+            );
+        }
     }
 
     let (lib, chosen) = choose_runtime(args);
@@ -572,5 +622,37 @@ mod tests {
     fn no_flags_is_deny_by_default() {
         let (f, _, _) = parsed(&["app.js"]);
         assert_eq!(permission_dsl(Path::new("."), &f), "");
+    }
+
+    #[test]
+    fn execution_root_climbs_to_workspace_node_modules() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("inkarun-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let sub = base.join("apps/sub");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(base.join("package.json"), "{}").unwrap();
+        fs::create_dir_all(base.join("node_modules")).unwrap();
+        fs::write(sub.join("deno.json"), "{}").unwrap();
+
+        // cwd has no node_modules; the workspace root does -> climb.
+        assert_eq!(execution_root_for_cwd(&sub), base);
+
+        // cwd with its own node_modules stays put.
+        fs::create_dir_all(sub.join("node_modules")).unwrap();
+        assert_eq!(execution_root_for_cwd(&sub), sub);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn execution_root_does_not_climb_without_project_marker() {
+        use std::fs;
+        let base = std::env::temp_dir().join(format!("inkarun-nomarker-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        let sub = base.join("loose");
+        fs::create_dir_all(&sub).unwrap();
+        fs::create_dir_all(base.join("node_modules")).unwrap();
+        assert_eq!(execution_root_for_cwd(&sub), sub);
+        let _ = fs::remove_dir_all(&base);
     }
 }

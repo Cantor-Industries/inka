@@ -28,7 +28,8 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
 - `--sourcemap` — embed an inline source map.
 - `--external <pkg>` — leave a package **unbundled** but embed its files from
   `node_modules` (repeatable). Use it for native `.node` addons and packages that
-  cannot be statically bundled.
+  cannot be statically bundled. The package's transitive dependency closure is
+  embedded as well (hoisted and symlinked isolated layouts included).
 - `--embed-dir` — also embed the whole current-directory tree (minus `.git`,
   `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files.
 

@@ -12,7 +12,10 @@ what is already on disk.
    and remaps).
 2. **Project `node_modules`** — bring-your-own-node_modules. Hoisted, nested
    (conflicting versions), and symlinked layouts (Deno isolated `.deno/`, pnpm
-   `.pnpm/`) all work; the **nearest `node_modules` wins**.
+   `.pnpm/`) all work; the **nearest `node_modules` wins**. In a monorepo where
+   deps are hoisted to a workspace root, both commands climb to the ancestor
+   `node_modules` (the run root is the nearest ancestor that is a project root
+   and has a `node_modules`).
 3. **Deno cache (`DENO_DIR`)** — `jsr:` modules (and any cached remote `https:`)
    are read from `$DENO_DIR/remote`; `npm:` resolves against `node_modules`.
 4. **Built-ins** — `node:` modules served by the engine.
@@ -31,6 +34,9 @@ is on. Options:
 - `--sourcemap` — embed an inline source map.
 - `--external <pkg>` — leave a package **unbundled** but embed its files from
   `node_modules` (the artifact resolves it from the extracted tree at run time).
+  The package's **transitive dependency closure** is embedded too, so hoisted
+  (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, Deno `.deno/`) layouts
+  both work; conflicting versions are nested under the referring package.
 - `--embed-dir` — also embed the whole current-directory tree (for assets).
 
 Everything else (import maps, `npm:`, `jsr:`, `node_modules`) is inlined, so the
