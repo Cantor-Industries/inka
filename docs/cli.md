@@ -1,7 +1,7 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
              [--no-toolchain|--toolchain-only] [--no-runtime]
@@ -13,7 +13,9 @@ inka doctor
 
 Bundle the entry (import maps + `npm:`/`jsr:` + `node_modules`) into one
 self-contained module, then pack it onto the launcher with a manifest.
-Permissions bake only from explicit build-intent sources; otherwise the artifact
+Permissions bake from explicit build-intent sources — CLI flags (`-A`/`--allow-*`,
+`-P=<set>`, which override config), `deno.json` `compile.permissions`, or an
+`inka.permissions` marker in `deno.json`/`package.json`; otherwise the artifact
 is deny-by-default. See [Build](build.md).
 
 ## `run`

@@ -5,7 +5,9 @@ packs it onto the launcher into a single executable.
 
 ```sh
 inka build [source] [-s|--source <file>] [-o|--output <file>]
-           [--runtime <spec>] [--tested-against <ver>] [-P <name>]
+           [--runtime <spec>] [--tested-against <ver>]
+           [-A|--allow-all] [-R|-W|-N|-E|-S[=list]]
+           [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]]
            [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 ```
 
@@ -55,18 +57,44 @@ select a runtime too old to enforce its permissions.
 
 ## Permissions from project config
 
-Permission lines are baked **only from explicit build-intent sources**, never
-from a bare dev-run `permissions.default` (matching Deno's model — a script
-could modify `deno.json` to elevate permissions):
+Permission lines are baked from **explicit build-intent sources**. The CLI
+grant flags mirror [`inka run`](run.md) and **override** any config-derived
+permissions:
+
+| CLI flag | Result |
+|---|---|
+| `-A`, `--allow-all` | `permissions=all` (trimmed by any `--deny-*`) |
+| `-R`, `-W`, `-N`, `-E`, `-S[=list]` | grant read/write/net/env/sys (whole category, or scoped) |
+| `--allow-<cat>[=list]` | grant `read\|write\|net\|env\|run\|sys\|ffi` |
+| `--deny-<cat>[=list]` | deny within an allowed category |
+| `-P[=<set>]`, `--permission-set[=<set>]` | a named set from config (bare `-P` = `default`) |
+
+Without CLI flags, the build-intent source is chosen in this order:
 
 | Source | Result |
 |---|---|
-| `inka build -P <set>` | the named set from `deno.json.permissions.<set>` then `package.json.permissions.<set>` (deno wins per key when both define it) |
 | `deno.json.compile.permissions` (category map, or a string naming a set) | baked automatically (build *is* the compile step) |
-| `inka.permissions = "<set>"` marker (under the `inka` block; deno wins) | that named set |
+| `inka.permissions` marker (`deno.json` wins over `package.json`): `"all"`, a set-name string, or a category map | baked automatically |
 | `permissions.default.<cat>` with **no** marker | **ignored** + a warning; artifact stays deny-by-default |
-| *(none)* | deny-all + `runtime=inka_runtime>=0.266.2` |
+| *(none)* | deny-all + a warning pointing at the grant options |
 
+The `inka.permissions` marker is the **manager-agnostic** path — it works in
+`package.json` for npm/pnpm/yarn/bun projects with no `deno.json`:
+
+```jsonc
+// package.json
+{
+  "inka": { "permissions": { "env": true, "read": ["./data"] } }
+}
+```
+
+```jsonc
+// or bake allow-all / a named set
+{ "inka": { "permissions": "all" } }
+{ "permissions": { "server": { "net": true } }, "inka": { "permissions": "server" } }
+```
+
+CLI flags always win, so `inka build -A app.ts` needs no config at all.
 Full details, including the config-set shapes: [Permissions](permissions.md).
 
 ## TypeScript

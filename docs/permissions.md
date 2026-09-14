@@ -38,24 +38,34 @@ resource.
 
 ## Where permissions come from (build)
 
-Permission lines baked by `inka build` come **only from explicit build-intent
-sources**, in precedence order (matching Deno — config permissions are never
-trusted implicitly, since a script could modify `deno.json` to elevate them):
+Permission lines baked by `inka build` come from **explicit build-intent
+sources**. The CLI grant flags (`-A`/`--allow-*`/`-P`) take precedence and
+override any config-derived permissions:
 
-1. `inka build -P <set>` — a named set from `deno.json.permissions.<set>` then
-   `package.json.permissions.<set>` (deno.json wins per key when both define it).
+1. **CLI flags** — `-A`/`--allow-all`, `-R`/`-W`/`-N`/`-E`/`-S[=list]`,
+   `--allow-<cat>[=list]`, `--deny-<cat>[=list]`, or `-P=<set>` /
+   `--permission-set <set>` (bare `-P` = the `default` set). This is the only
+   path that needs no config at all.
 2. `deno.json.compile.permissions` — the deno-compile analog: a category map, or
    a string naming a set. Baked automatically because building *is* the compile
    step (a deliberate divergence from Deno, which needs an explicit `-P`).
-3. An `inka.permissions = "<set>"` marker under the `inka` block (deno wins if
-   both files have one).
+3. An `inka.permissions` marker under the `inka` block (`deno.json` wins if both
+   files have one). It accepts three shapes, so **projects without a
+   `deno.json`** (npm/pnpm/yarn/bun `package.json`) can use it too:
+   - `"all"` → `permissions=all`
+   - a set-name string → that named set from `permissions.<name>`
+   - a category-map object → an inline grant (`{ "env": true, "read": ["./"] }`)
 4. A plain `permissions.default.<cat>` with **no** marker above is **ignored** —
    it's dev-run intent (`deno run -P`, `deno task`); builds warn and stay
-   deny-by-default. Select it explicitly to bake it (`-P default`,
+   deny-by-default. Select it explicitly to bake it (`-P=default`,
    `compile.permissions: "default"`, or the marker).
 
-Unknown or malformed sources (e.g. `-P nope`, a bad `compile.permissions`)
-warn and produce a deny-by-default artifact — never a silent fall-back.
+With no source at all, `inka build` warns and produces a deny-by-default
+artifact, pointing at the grant options.
+
+Unknown or malformed sources (e.g. `-P=nope`, a bad `compile.permissions`, a
+non-string/object `inka.permissions`) warn and produce a deny-by-default
+artifact — never a silent fall-back.
 
 ## Config set shapes
 

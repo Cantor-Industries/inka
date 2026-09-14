@@ -11,7 +11,7 @@
 // Permission baking honors Deno's threat model: a plain `permissions.default`
 // is *dev-run* intent (it exists so `deno run -P` / `deno task` work) and is
 // NEVER baked. Only explicit build-intent sources bake, in precedence order:
-//   -P <set>  >  deno.json compile.permissions  >  inka.permissions marker.
+//   CLI flags  >  deno.json compile.permissions  >  inka.permissions marker.
 // With no source selected the artifact is deny-by-default (no allow/deny
 // lines), matching the manifest-less posture.
 //
@@ -423,41 +423,57 @@ fn set_declares_grants(set: &Value) -> bool {
         .unwrap_or(false)
 }
 
+/// A permission source selected for baking.
+pub(crate) enum PermSelection {
+    /// `permissions=all` (from `inka.permissions = "all"`).
+    All,
+    /// A category map (`{ "env": true, "read": ["./"] }`).
+    Map(Value),
+}
+
 /// Pick the permission source to bake for the build, plus informational notes.
 /// Only explicit build-intent sources are ever baked, in this order:
-///   1. CLI `-P/--permission-set <name>` — a named set.
+///   1. CLI `-P/--permission-set <name>` — a named set (or a CLI grant DSL,
+///      handled by the caller and passed as an override).
 ///   2. deno.json `compile.permissions` — the deno-compile analog; either a
 ///      direct category map, or a string naming a set. `inka build` *is* the
 ///      compile step, so this bakes automatically (documented divergence from
 ///      Deno, which requires `-P` even for compile permissions).
-///   3. An `inka.permissions` marker (deno.json wins over package.json) whose
-///      value is a set-name string.
+///   3. An `inka.permissions` marker (deno.json wins over package.json): the
+///      string `"all"` (`permissions=all`), a set-name string, or a category
+///      map object. This is the manager-agnostic path for projects without a
+///      deno.json (e.g. npm/pnpm/yarn/bun `package.json`).
 ///
 /// A plain `permissions.default` set with none of the above markers is dev-run
 /// intent and is IGNORED; if such a set would actually grant something, an
-/// informational note is returned so the silent drop is never invisible.
+/// informational note is returned so the silent drop is never invisible. With
+/// no source at all, an advisory note points at the ways to grant access.
 /// Unknown or malformed explicit sources warn and yield a deny-by-default
 /// artifact (no `allow-*`/`deny-*` lines).
 fn effective_permission_map(
     cfg: &ConfigFiles,
     perm_set: Option<&str>,
-) -> (Option<Value>, Vec<String>) {
+) -> (Option<PermSelection>, Vec<String>) {
     let mut notes: Vec<String> = Vec::new();
 
     // 1. explicit CLI set selection
     if let Some(name) = perm_set {
-        return (resolve_named_set(cfg, name, "-P", &mut notes), notes);
+        return (
+            resolve_named_set(cfg, name, "-P", &mut notes).map(PermSelection::Map),
+            notes,
+        );
     }
 
     // 2. deno.json compile.permissions (deno-compile analog)
     if let Some(compile) = cfg.deno.as_ref().and_then(|d| d.get("compile")) {
         if let Some(p) = compile.get("permissions") {
             if p.is_object() {
-                return (Some(p.clone()), notes);
+                return (Some(PermSelection::Map(p.clone())), notes);
             }
             if let Some(name) = p.as_str() {
                 return (
-                    resolve_named_set(cfg, name, "compile.permissions", &mut notes),
+                    resolve_named_set(cfg, name, "compile.permissions", &mut notes)
+                        .map(PermSelection::Map),
                     notes,
                 );
             }
@@ -484,22 +500,23 @@ fn effective_permission_map(
         .and_then(|p| p.get("inka"))
         .and_then(|i| i.get("permissions"));
     if let Some(v) = deno_marker.or(pkg_marker) {
-        match v.as_str() {
-            Some(name) => {
-                return (
-                    resolve_named_set(cfg, name, "inka.permissions", &mut notes),
-                    notes,
-                )
-            }
-            None => {
+        return match v {
+            Value::String(s) if s == "all" => (Some(PermSelection::All), notes),
+            Value::String(name) => (
+                resolve_named_set(cfg, name, "inka.permissions", &mut notes)
+                    .map(PermSelection::Map),
+                notes,
+            ),
+            Value::Object(_) => (Some(PermSelection::Map(v.clone())), notes),
+            _ => {
                 notes.push(
-                    "inka.permissions must name a permission set (string); \
-                     the artifact is deny-by-default"
+                    "inka.permissions must be \"all\", a set-name string, or a \
+                     permission map; the artifact is deny-by-default"
                         .to_string(),
                 );
-                return (None, notes);
+                (None, notes)
             }
-        }
+        };
     }
 
     // 4. Nothing was selected. A plain `permissions.default` is dev-run intent
@@ -519,16 +536,21 @@ fn effective_permission_map(
     if !declaring.is_empty() {
         notes.push(format!(
             "{} declares permissions but none were selected for the build; the \
-             artifact is deny-by-default (use compile.permissions, -P <set>, or \
+             artifact is deny-by-default (use compile.permissions, -P=<set>, or \
              inka.permissions)",
             declaring.join(" and ")
         ));
+    } else {
+        notes.push(
+            "no permission source found; the artifact is deny-by-default (use \
+             --allow-*/-A, -P=<set>, or set inka.permissions in package.json)"
+                .to_string(),
+        );
     }
     (None, notes)
 }
 
-/// Synthesize manifest bytes from project config (no defaults applied yet).
-/// Returns the lines; caller applies the runtime floor default + module= later.
+/// Synthesized manifest bytes plus any non-fatal warnings.
 pub struct Synth {
     pub bytes: Vec<u8>,
     pub warnings: Vec<String>,
@@ -578,7 +600,7 @@ pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
 pub(crate) struct BuildIntentHint {
     /// Human-readable source, e.g. `deno.json compile.permissions`.
     pub source: String,
-    /// The named set to select with `-P <name>`, when the source names one.
+    /// The named set to select with `-P=<name>`, when the source names one.
     pub set_name: Option<String>,
 }
 
@@ -624,9 +646,17 @@ pub(crate) fn build_intent_permission_hint(cwd: &Path) -> Option<BuildIntentHint
                 .and_then(|i| i.get("permissions"))
         });
     match marker {
+        Some(serde_json::Value::String(name)) if name == "all" => Some(BuildIntentHint {
+            source: "inka.permissions (all)".to_string(),
+            set_name: None,
+        }),
         Some(serde_json::Value::String(name)) => Some(BuildIntentHint {
             source: format!("inka.permissions set '{name}'"),
             set_name: Some(name.clone()),
+        }),
+        Some(serde_json::Value::Object(_)) => Some(BuildIntentHint {
+            source: "inka.permissions (category map)".to_string(),
+            set_name: None,
         }),
         Some(_) => Some(BuildIntentHint {
             source: "inka.permissions (malformed)".to_string(),
@@ -636,7 +666,11 @@ pub(crate) fn build_intent_permission_hint(cwd: &Path) -> Option<BuildIntentHint
     }
 }
 
-pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
+/// Synthesize manifest bytes from project config (no defaults applied yet).
+/// `cli_dsl`, when present, is a permission DSL rendered from `inka build`'s
+/// CLI flags; it overrides the config permission source entirely. Caller
+/// applies the runtime floor default + module= later.
+pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>, cli_dsl: Option<&str>) -> Synth {
     let (cfg, load_warns) = load(cwd);
     let mut lines: Vec<String> = Vec::new();
     let mut warns: Vec<String> = load_warns;
@@ -654,19 +688,31 @@ pub fn synthesize_manifest(cwd: &Path, perm_set: Option<&str>) -> Synth {
         lines.push(format!("tested-against={t}"));
     }
 
-    let (map, notes) = effective_permission_map(&cfg, perm_set);
-    warns.extend(notes);
-    if let Some(map) = map {
-        let mut allow: Vec<(String, String)> = Vec::new();
-        let mut deny: Vec<(String, String)> = Vec::new();
-        apply_category_map(&map, &mut allow, &mut deny, &mut warns);
-        validate_category_map(&map, &mut warns);
-        warn_ineffective_denies(&allow, &deny, &mut warns);
-        for (cat, list) in allow {
-            lines.push(format!("allow-{cat}={list}"));
+    if let Some(dsl) = cli_dsl {
+        for line in dsl.lines() {
+            if !line.trim().is_empty() {
+                lines.push(line.to_string());
+            }
         }
-        for (cat, list) in deny {
-            lines.push(format!("deny-{cat}={list}"));
+    } else {
+        let (sel, notes) = effective_permission_map(&cfg, perm_set);
+        warns.extend(notes);
+        match sel {
+            Some(PermSelection::All) => lines.push("permissions=all".to_string()),
+            Some(PermSelection::Map(map)) => {
+                let mut allow: Vec<(String, String)> = Vec::new();
+                let mut deny: Vec<(String, String)> = Vec::new();
+                apply_category_map(&map, &mut allow, &mut deny, &mut warns);
+                validate_category_map(&map, &mut warns);
+                warn_ineffective_denies(&allow, &deny, &mut warns);
+                for (cat, list) in allow {
+                    lines.push(format!("allow-{cat}={list}"));
+                }
+                for (cat, list) in deny {
+                    lines.push(format!("deny-{cat}={list}"));
+                }
+            }
+            None => {}
         }
     }
 
@@ -696,7 +742,7 @@ mod tests {
     }
 
     fn read_synth(cwd: &Path, perm_set: Option<&str>) -> (String, Vec<String>) {
-        let s = synthesize_manifest(cwd, perm_set);
+        let s = synthesize_manifest(cwd, perm_set, None);
         (String::from_utf8(s.bytes).unwrap(), s.warnings)
     }
 
@@ -718,13 +764,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_config_emits_nothing() {
+    fn empty_config_emits_nothing_but_advisory() {
         let cwd = PathBuf::from("/tmp/inkaconf-empty");
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
         let (s, warns) = read_synth(&cwd, None);
         assert_eq!(s, "");
-        assert!(warns.is_empty(), "{warns:?}");
+        assert!(has_note(&warns, "no permission source found"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -828,7 +874,7 @@ mod tests {
     }
 
     // Both files define the same set: with no marker it is ignored (+ note);
-    // -P <name> selects it with deno.json winning per-category.
+    // -P=<name> selects it with deno.json winning per-category.
     #[test]
     fn named_set_selection_and_per_key_merge() {
         let cwd = PathBuf::from("/tmp/inkaconf-both");
@@ -1046,25 +1092,21 @@ mod tests {
         );
         let (s, warns) = read_synth(&cwd, None);
         assert!(no_permission_lines(&s), "deny-by-default expected: {s}");
-        assert!(
-            has_note(
-                &warns,
-                "inka.permissions must name a permission set (string)"
-            ),
-            "{warns:?}"
-        );
+        assert!(has_note(&warns, "inka.permissions must be"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
-    // An empty default set grants nothing, so it must not produce the note.
+    // An empty default set grants nothing, so it must not produce the drop note
+    // (the no-source advisory is still emitted).
     #[test]
-    fn empty_default_set_produces_no_note() {
+    fn empty_default_set_produces_no_drop_note() {
         let cwd = PathBuf::from("/tmp/inkaconf-emptyd");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "deno.json", r#"{ "permissions": { "default": {} } }"#);
         let (s, warns) = read_synth(&cwd, None);
         assert_eq!(s, "");
-        assert!(warns.is_empty(), "{warns:?}");
+        assert!(!has_note(&warns, "none were selected"), "{warns:?}");
+        assert!(has_note(&warns, "no permission source found"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 
@@ -1233,7 +1275,7 @@ mod tests {
     }
 
     // WS-`inka run` parity: the hint reports the build-intent source and, when
-    // it names a set, the `-P <name>` that reproduces a build's permissions.
+    // it names a set, the `-P=<name>` that reproduces a build's permissions.
     #[test]
     fn build_intent_hint_reports_named_and_map_sources() {
         let cwd = PathBuf::from("/tmp/inkaconf-buildintent");
@@ -1242,7 +1284,7 @@ mod tests {
 
         assert!(build_intent_permission_hint(&cwd).is_none());
 
-        // compile.permissions naming a set -> selectable with -P <name>.
+        // compile.permissions naming a set -> selectable with -P=<name>.
         write(
             &cwd,
             "deno.json",
@@ -1261,7 +1303,7 @@ mod tests {
         assert!(h.set_name.is_none(), "{}", h.source);
         assert!(h.source.contains("category map"), "{}", h.source);
 
-        // inka.permissions marker -> selectable with -P <name>.
+        // inka.permissions marker -> selectable with -P=<name>.
         write(
             &cwd,
             "deno.json",
@@ -1269,6 +1311,73 @@ mod tests {
         );
         let h = build_intent_permission_hint(&cwd).expect("hint");
         assert_eq!(h.set_name.as_deref(), Some("server"), "{}", h.source);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // Non-Deno accommodation: a package.json-only project can declare
+    // build-intent permissions inline via the `inka.permissions` marker.
+    #[test]
+    fn package_json_inline_permission_map_is_baked() {
+        let cwd = PathBuf::from("/tmp/inkaconf-pkgmap");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "name": "t", "inka": { "permissions": { "env": true, "read": ["./data"] } } }"#,
+        );
+        let (s, warns) = read_synth(&cwd, None);
+        assert!(s.contains("allow-env=*"), "{s}");
+        assert!(s.contains("allow-read=./data"), "{s}");
+        assert!(!has_note(&warns, "no permission source found"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn package_json_inline_all_is_baked() {
+        let cwd = PathBuf::from("/tmp/inkaconf-pkgall");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "name": "t", "inka": { "permissions": "all" } }"#,
+        );
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("permissions=all"), "{s}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn package_json_inline_set_name_is_baked() {
+        let cwd = PathBuf::from("/tmp/inkaconf-pkgset");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "name": "t", "permissions": { "server": { "net": true } }, "inka": { "permissions": "server" } }"#,
+        );
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("allow-net=*"), "{s}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    // deno.json wins over package.json when both carry an inka.permissions marker.
+    #[test]
+    fn deno_json_marker_wins_over_package_json() {
+        let cwd = PathBuf::from("/tmp/inkaconf-markerprecedence");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "name": "t", "inka": { "permissions": { "env": true } } }"#,
+        );
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "inka": { "permissions": { "net": true } } }"#,
+        );
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("allow-net=*"), "{s}");
+        assert!(!s.contains("allow-env"), "deno.json should win: {s}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

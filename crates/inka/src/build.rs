@@ -2,7 +2,9 @@
 // module, then pack it onto the launcher with an embedded manifest.
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>]
-//             [--runtime <spec>] [--tested-against <ver>] [-P <set>]
+//             [--runtime <spec>] [--tested-against <ver>]
+//             [-A|--allow-all] [-R|-W|-N|-E|-S[=list]]
+//             [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]]
 //             [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 //
 // Defaults:
@@ -20,6 +22,8 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::permissions::{self, Flags, PermFlag};
+
 #[cfg(feature = "bundle")]
 const FOOTER_LEN: usize = 24;
 #[cfg(feature = "bundle")]
@@ -29,7 +33,7 @@ const LAUNCHER_BIN: &str = "inka-launcher";
 
 fn help() -> ! {
     println!(
-        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
+        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
          \n\
          bundles <source> (import maps + npm:/jsr:/node_modules) into one self-contained\n\
          module and packs it onto the launcher. The manifest is always derived from\n\
@@ -41,12 +45,19 @@ fn help() -> ! {
          \x20 -o, --output <file>   output executable (default: source without its extension)\n\
          \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.2' or '==0.266.2' (overrides config)\n\
          \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
-         \x20 -P, --permission-set <name>  use this named permission set from the config\n\
+         \x20 -A, --allow-all       bake permissions=all (trimmed by any --deny-*)\n\
+         \x20 -R, -W, -N, -E, -S    bake read/write/net/env/sys (whole category); -R=<list> scopes it\n\
+         \x20     --allow-<cat>[=list]   bake a grant for read|write|net|env|run|sys|ffi\n\
+         \x20     --deny-<cat>[=list]    deny within an allowed category\n\
+         \x20 -P[=<name>], --permission-set[=<name>]  bake a named config set (bare -P = `default`)\n\
          \x20     --minify          minify the bundle\n\
          \x20     --sourcemap       embed an inline source map\n\
          \x20     --external <pkg>  leave a package unbundled and embed it from node_modules (repeatable)\n\
          \x20     --embed-dir       also embed the whole current-directory tree (for assets)\n\
          \x20 -h, --help            show this help\n\
+         \n\
+         CLI permission flags override config-derived permissions. Without any source\n\
+         the artifact is deny-by-default.\n\
          \n\
          launcher is found at $INKA_LAUNCHER or next to the inka binary."
     );
@@ -63,7 +74,7 @@ pub fn cmd_build(args: &[String]) {
     let mut output_flag: Option<PathBuf> = None;
     let mut runtime_flag: Option<String> = None;
     let mut tested_flag: Option<String> = None;
-    let mut perm_set: Option<String> = None;
+    let mut perm_flags = Flags::default();
     let mut minify = false;
     let mut sourcemap = false;
     let mut external: Vec<String> = Vec::new();
@@ -77,13 +88,6 @@ pub fn cmd_build(args: &[String]) {
             "-o" | "--output" => output_flag = Some(next_val(&mut it, a)),
             "--runtime" => runtime_flag = Some(next_str(&mut it, a)),
             "--tested-against" => tested_flag = Some(next_str(&mut it, a)),
-            // `-P <name>` is the documented build form (README: `-P server app.ts`),
-            // so it consumes the next token; `-P=<name>` and the long forms also work.
-            "-P" | "--permission-set" => perm_set = Some(next_str(&mut it, a)),
-            _ if a.starts_with("-P=") => perm_set = Some(a["-P=".len()..].to_string()),
-            _ if a.starts_with("--permission-set=") => {
-                perm_set = Some(a["--permission-set=".len()..].to_string())
-            }
             "--minify" => minify = true,
             "--sourcemap" => sourcemap = true,
             "--external" => external.push(next_str(&mut it, a)),
@@ -93,11 +97,38 @@ pub fn cmd_build(args: &[String]) {
             "--embed-dir" => embed_dir = true,
             "-h" | "--help" => help(),
             other if other.starts_with('-') => {
-                eprintln!("error: unknown option '{other}'");
-                help();
+                match permissions::parse_perm_flag(&mut perm_flags, other) {
+                    Ok(PermFlag::Once) => {}
+                    Ok(PermFlag::ConsumeNext) => {
+                        perm_flags.permset = Some(next_str(&mut it, other));
+                    }
+                    Ok(PermFlag::Not) => {
+                        eprintln!("error: unknown option '{other}'");
+                        help();
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                }
             }
             other => positional.push(PathBuf::from(other)),
         }
+    }
+
+    if let Err(e) = permissions::validate(&perm_flags) {
+        eprintln!("error: {e}");
+        std::process::exit(2);
+    }
+
+    // Bare `-P` selects the `default` set. If it was followed by extra
+    // positionals, the user likely meant `-P <name>`; point at the working form
+    // before the generic "too many arguments" error.
+    if perm_flags.permset.as_deref() == Some("default") && positional.len() >= 2 {
+        eprintln!(
+            "note: bare -P selects the `default` set; use -P=<name> or \
+             --permission-set <name> to pick another set"
+        );
     }
 
     let source = match source_flag {
@@ -151,7 +182,7 @@ pub fn cmd_build(args: &[String]) {
         &cwd,
         runtime_flag.as_deref(),
         tested_flag.as_deref(),
-        perm_set.as_deref(),
+        &perm_flags,
     );
     for w in &manifest_warnings {
         eprintln!("warning: {w}");
@@ -394,21 +425,32 @@ fn runtime_value(spec: &str) -> String {
 }
 
 /// Derive the embedded manifest from project config and CLI overrides. There is
-/// no on-disk manifest: permission lines and the runtime requirement come only
-/// from package.json / deno.json(.jsonc), plus `--runtime`/`--tested-against`.
+/// no on-disk manifest: permission lines come from explicit CLI flags (which
+/// override config) or package.json / deno.json(.jsonc) build-intent sources,
+/// and the runtime requirement from config plus `--runtime`/`--tested-against`.
 /// Returns the manifest bytes and any non-fatal warnings.
 fn resolve_manifest(
     cwd: &Path,
     runtime_flag: Option<&str>,
     tested_flag: Option<&str>,
-    perm_set: Option<&str>,
+    perm_flags: &Flags,
 ) -> (Vec<u8>, Vec<String>) {
     // Must track `crates/inka-runtime/runtime-version`: an older runtime needs
     // the retired resolver, which this toolchain no longer installs.
     const DEFAULT_RUNTIME: &str = ">=0.266.2";
 
-    let syn = crate::config::synthesize_manifest(cwd, perm_set);
+    // CLI permission flags override any config-derived permission source.
+    let (cli_dsl, cli_warns) = if perm_flags.selects() {
+        permissions::dsl(cwd, perm_flags)
+    } else {
+        (String::new(), Vec::new())
+    };
+    let cli_dsl = perm_flags.selects().then_some(cli_dsl.as_str());
+
+    let syn = crate::config::synthesize_manifest(cwd, None, cli_dsl);
     let mut bytes = syn.bytes;
+    let mut warnings = cli_warns;
+    warnings.extend(syn.warnings);
 
     // Runtime precedence: --runtime > config `inka.runtime` > default floor. The
     // floor is always embedded so an artifact can never select a runtime too old
@@ -421,7 +463,7 @@ fn resolve_manifest(
     if let Some(t) = tested_flag {
         manifest_set_key(&mut bytes, "tested-against", t);
     }
-    (bytes, syn.warnings)
+    (bytes, warnings)
 }
 
 #[cfg(feature = "bundle")]
@@ -469,13 +511,20 @@ mod tests {
         fs::write(cwd.join(name), body).unwrap();
     }
 
+    fn flags(pset: Option<&str>) -> Flags {
+        Flags {
+            permset: pset.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
     fn manifest(
         cwd: &Path,
         runtime: Option<&str>,
         tested: Option<&str>,
         pset: Option<&str>,
     ) -> String {
-        let (bytes, _) = resolve_manifest(cwd, runtime, tested, pset);
+        let (bytes, _) = resolve_manifest(cwd, runtime, tested, &flags(pset));
         String::from_utf8(bytes).unwrap()
     }
 
@@ -523,6 +572,39 @@ mod tests {
         );
         let m = manifest(&cwd, None, None, Some("server"));
         assert!(m.contains("allow-net=0.0.0.0:80"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn cli_allow_all_bakes_permissions_all() {
+        let cwd = scratch();
+        let f = Flags {
+            allow_all: true,
+            ..Default::default()
+        };
+        let (bytes, _) = resolve_manifest(&cwd, None, None, &f);
+        let m = String::from_utf8(bytes).unwrap();
+        assert!(m.contains("permissions=all"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.2"), "{m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn cli_grant_overrides_config_permissions() {
+        let cwd = scratch();
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["./data"] } } }"#,
+        );
+        let f = Flags {
+            allow: vec![("env".to_string(), "*".to_string())],
+            ..Default::default()
+        };
+        let (bytes, _) = resolve_manifest(&cwd, None, None, &f);
+        let m = String::from_utf8(bytes).unwrap();
+        assert!(m.contains("allow-env=*"), "{m}");
+        assert!(!m.contains("allow-read"), "CLI should override config: {m}");
         let _ = fs::remove_dir_all(&cwd);
     }
 

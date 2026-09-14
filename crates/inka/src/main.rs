@@ -1,7 +1,7 @@
 // inka: companion tooling for inka artifacts.
 //
 //   inka build [source] [-s|--source <file>] [-o|--output <file>]
-//               [--runtime <spec>] [--tested-against <ver>] [-P <name>]
+//               [--runtime <spec>] [--tested-against <ver>] [-P[=<set>]]
 //               [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
 //   inka run [-A] [-P[=name]] [--allow-<cat>[=list]]... <file> [args...]
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
@@ -12,6 +12,7 @@
 mod build;
 mod config;
 mod embed;
+mod permissions;
 mod run;
 mod update;
 
@@ -48,7 +49,7 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
 
 fn usage() -> ! {
     eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-P <name>] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes, project, DENO_DIR)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
+        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes, project, DENO_DIR)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
     );
     std::process::exit(2);
 }

@@ -25,8 +25,11 @@ runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
 `$INKA_RUNTIME_HOME` and `~/.local/share/inka/runtime`. If the artifact pins
 `tested-against`, a newer runtime is not selected — install one within range.
 
-**`NotCapable` / permission errors.** inka artifacts are deny-by-default. Grant
-access with `-A`, `-P`, or granular `--allow-*` (see [Permissions](permissions.md)).
+**`NotCapable` / permission errors.** inka artifacts are deny-by-default. Bake
+grants at build time (`inka build -A`, `--allow-*`, `-P=<set>`, or an
+`inka.permissions` marker) or grant them per run (`inka run -A`, `--allow-*`,
+`-P=<set>`). See [Permissions](permissions.md). `inka build` warns when no
+permission source was found.
 
 **Build fails: package not found.** `inka` is offline. Install dependencies with
 your package manager (so they are in `node_modules`), and for `jsr:` run

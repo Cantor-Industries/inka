@@ -93,12 +93,18 @@ Common tasks, one line each:
 
 ```sh
 inka run -A app.ts                 # allow everything for a dev script
-inka build -P server app.ts        # bake the `server` permission set from your config
+inka build -A app.ts               # bake allow-all into the executable
+inka build --allow-env app.ts      # bake a single grant (least privilege)
+inka build -P=server app.ts        # bake the `server` permission set from your config
 inka build --external sharp app.ts # keep `sharp` unbundled but embed it from node_modules
 inka build --minify app.ts         # minify the bundle
 ```
 
-Permissions for an artifact come from explicit config sources (`-P <set>`, `deno.json` `compile.permissions`, an `inka.permissions` marker) — see [Permissions](docs/permissions.md).
+Permissions for an artifact come from explicit build-intent sources: the CLI
+(`-A`/`--allow-*`, `-P=<set>`), `deno.json` `compile.permissions`, or an
+`inka.permissions` marker in `deno.json`/`package.json` (string set name,
+`"all"`, or an inline category map). With no source the artifact is
+deny-by-default and `build` warns. See [Permissions](docs/permissions.md).
 
 ```ts
 // dependencies come from your project's node_modules (or the Deno cache):

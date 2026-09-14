@@ -10,7 +10,7 @@
 //   -A / --allow-all                            everything (trimmed by --deny-*)
 //   -R/-W/-N/-E/-S[=list]                       deno short forms (read/write/net/
 //                                               env/sys) + long --allow-<cat>
-//   -P [<name>] / --permission-set[=<n>]        a named config permission set
+//   -P[=<name>] / --permission-set[=<n>]        a named config permission set
 //                                               (bare -P = the config `default`)
 //   --deny-<cat>[=list]                         trim an allowed category
 // `--` ends option parsing. Only -P/config/flag-grants apply — compile.permissions
@@ -22,9 +22,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
+use crate::permissions::{self, Flags, PermFlag};
 use crate::Version;
-
-const CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
 
 fn usage() -> ! {
     eprintln!(
@@ -50,58 +49,13 @@ fn usage() -> ! {
     exit(0);
 }
 
-struct Flags {
-    allow_all: bool,
-    permset: Option<String>,
-    allow: Vec<(String, String)>, // (cat, list or "*")
-    deny: Vec<(String, String)>,
-}
-
 fn fail(msg: &str) -> ! {
     eprintln!("error: {msg}");
     exit(2);
 }
 
-fn cat_for_short(short: char) -> Option<&'static str> {
-    match short {
-        'R' => Some("read"),
-        'W' => Some("write"),
-        'N' => Some("net"),
-        'E' => Some("env"),
-        'S' => Some("sys"),
-        _ => None,
-    }
-}
-
-/// Merge repeated per-category entries: `*` wins over lists; explicit lists are
-/// joined with commas (one DSL line per category).
-fn merge_cat(entries: &[(String, String)]) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for (cat, list) in entries {
-        match out.iter_mut().find(|(c, _)| c == cat) {
-            Some((_, cur)) => {
-                if list == "*" {
-                    *cur = "*".to_string();
-                } else if cur != "*" {
-                    if !cur.is_empty() {
-                        cur.push(',');
-                    }
-                    cur.push_str(list);
-                }
-            }
-            None => out.push((cat.clone(), list.clone())),
-        }
-    }
-    out
-}
-
 fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
-    let mut f = Flags {
-        allow_all: false,
-        permset: None,
-        allow: Vec::new(),
-        deny: Vec::new(),
-    };
+    let mut f = Flags::default();
     let mut file: Option<PathBuf> = None;
     let mut prog: Vec<String> = Vec::new();
     let mut i = 0;
@@ -114,8 +68,6 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
         }
         match a.as_str() {
             "-h" | "--help" => usage(),
-            "-A" | "--allow-all" => f.allow_all = true,
-            "-P" => f.permset = Some("default".to_string()),
             "--" => {
                 // end of options: the next token is the file (may start with '-')
                 if i + 1 >= args.len() {
@@ -132,99 +84,33 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
                     fail("--runtime needs a version like 0.266.0");
                 }
             }
-            _ if a.len() >= 2 && cat_for_short(a.as_bytes()[1] as char).is_some() => {
-                let short = a.as_bytes()[1] as char;
-                let cat = cat_for_short(short).unwrap().to_string();
-                let body = &a[2..];
-                let list = if body.is_empty() {
-                    "*".to_string()
-                } else if let Some(v) = body.strip_prefix('=') {
-                    if v.is_empty() {
-                        "*".to_string()
-                    } else {
-                        v.to_string()
-                    }
-                } else {
-                    fail(&format!(
-                        "option '{a}' takes an optional '=<list>' value (e.g. -{short}=./data)"
-                    ));
-                };
-                f.allow.push((cat, list));
-            }
-            _ if a.starts_with("-P=") => f.permset = Some(a["-P=".len()..].to_string()),
-            "--permission-set" => {
-                i += 1;
-                if i >= args.len() {
-                    fail("--permission-set needs a name (or use bare -P for the `default` set)");
-                }
-                f.permset = Some(args[i].clone());
-            }
-            _ if a.starts_with("--permission-set=") => {
-                f.permset = Some(a["--permission-set=".len()..].to_string());
-            }
-            _ if a.starts_with("--allow-") || a.starts_with("--deny-") => {
-                let deny = a.starts_with("--deny-");
-                let prefix = if deny { "--deny-" } else { "--allow-" };
-                let body = &a[prefix.len()..];
-                let (cat, list) = match body.split_once('=') {
-                    Some((c, v)) => (c.to_string(), v.to_string()),
-                    None => (body.to_string(), "*".to_string()),
-                };
-                if !CATEGORIES.contains(&cat.as_str()) {
-                    fail(&format!(
-                        "unknown permission category '{cat}' (expected one of {})",
-                        CATEGORIES.join(", ")
-                    ));
-                }
-                let list = if list.is_empty() {
-                    "*".to_string()
-                } else {
-                    list
-                };
-                let slot = if deny { &mut f.deny } else { &mut f.allow };
-                slot.push((cat, list));
-            }
-            _ if a.starts_with('-') => {
-                eprintln!("error: unknown option '{a}'");
-                usage();
-            }
             _ => {
-                file = Some(PathBuf::from(a));
-                prog = args[i + 1..].to_vec();
-                break;
+                match permissions::parse_perm_flag(&mut f, a) {
+                    Ok(PermFlag::Once) => {}
+                    Ok(PermFlag::ConsumeNext) => {
+                        i += 1;
+                        if i >= args.len() {
+                            fail("--permission-set needs a name (or use bare -P for the `default` set)");
+                        }
+                        f.permset = Some(args[i].clone());
+                    }
+                    Ok(PermFlag::Not) => {
+                        if a.starts_with('-') {
+                            eprintln!("error: unknown option '{a}'");
+                            usage();
+                        }
+                        file = Some(PathBuf::from(a));
+                        prog = args[i + 1..].to_vec();
+                        break;
+                    }
+                    Err(e) => fail(&e),
+                }
             }
         }
         i += 1;
     }
     let Some(file) = file else { usage() };
     (f, file, prog)
-}
-
-/// Render the permission DSL string from the parsed flags (against `root`,
-/// whose config supplies any -P-selected permission set).
-fn permission_dsl(root: &Path, f: &Flags) -> String {
-    if f.allow_all {
-        let mut lines = vec!["permissions=all".to_string()];
-        for (cat, list) in merge_cat(&f.deny) {
-            lines.push(format!("deny-{cat}={list}"));
-        }
-        return lines.join("\n");
-    }
-    if let Some(name) = &f.permset {
-        let (dsl, notes) = crate::config::permission_set_dsl(root, name);
-        for n in &notes {
-            eprintln!("warning: {n}");
-        }
-        return dsl;
-    }
-    let mut lines = Vec::new();
-    for (cat, list) in merge_cat(&f.allow) {
-        lines.push(format!("allow-{cat}={list}"));
-    }
-    for (cat, list) in merge_cat(&f.deny) {
-        lines.push(format!("deny-{cat}={list}"));
-    }
-    lines.join("\n")
 }
 
 /// Choose the runtime .so: newest installed, or an exact --runtime <ver>.
@@ -369,15 +255,6 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
     Ok((root, entry))
 }
 
-fn validate_flags(f: &Flags) {
-    if f.allow_all && (f.permset.is_some() || !f.allow.is_empty()) {
-        fail("--allow-all cannot be combined with -P/--permission-set or --allow-*");
-    }
-    if f.permset.is_some() && (!f.allow.is_empty() || !f.deny.is_empty()) {
-        fail("-P/--permission-set cannot be combined with --allow-*/--deny-*");
-    }
-}
-
 /// Load the runtime with `RTLD_GLOBAL`. Native `.node` addons are `dlopen`ed
 /// later by the runtime's `op_napi_open`; they resolve N-API/uv symbols from the
 /// global scope, which `RTLD_LOCAL` (the `Library::new` default) hides — the
@@ -398,7 +275,9 @@ fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::
 
 pub(crate) fn cmd_run(args: &[String]) {
     let (flags, file, prog) = parse_flags(args);
-    validate_flags(&flags);
+    if let Err(e) = permissions::validate(&flags) {
+        fail(&e);
+    }
     if !file.is_file() {
         fail(&format!("source file not found: {}", file.display()));
     }
@@ -410,7 +289,10 @@ pub(crate) fn cmd_run(args: &[String]) {
         Ok(r) => r,
         Err(e) => fail(&e),
     };
-    let perms = permission_dsl(&root, &flags);
+    let (perms, perm_notes) = permissions::dsl(&root, &flags);
+    for n in &perm_notes {
+        eprintln!("warning: {n}");
+    }
 
     // Informational guard: config declares build-intent or default permissions
     // but nothing was selected for this run (permissions are still
@@ -577,7 +459,7 @@ mod tests {
         ]);
         assert_eq!(file, PathBuf::from("app.js"));
         assert!(prog.is_empty());
-        let dsl = permission_dsl(Path::new("."), &f);
+        let dsl = permissions::dsl(Path::new("."), &f).0;
         assert!(dsl.contains("allow-read=data.txt"), "{dsl}");
         assert!(dsl.contains("allow-net=*"), "{dsl}");
         assert!(dsl.contains("deny-net=1.2.3.4"), "{dsl}");
@@ -601,12 +483,12 @@ mod tests {
     #[test]
     fn repeated_flags_merge_per_category() {
         let (f, _, _) = parsed(&["--allow-read=./a", "--allow-read=./b", "app.js"]);
-        let dsl = permission_dsl(Path::new("."), &f);
+        let dsl = permissions::dsl(Path::new("."), &f).0;
         assert!(dsl.contains("allow-read=./a,./b"), "{dsl}");
 
         // "*" wins over explicit lists
         let (f2, _, _) = parsed(&["--allow-net=a.com", "--allow-net", "app.js"]);
-        let dsl2 = permission_dsl(Path::new("."), &f2);
+        let dsl2 = permissions::dsl(Path::new("."), &f2).0;
         assert!(dsl2.contains("allow-net=*"), "{dsl2}");
         assert!(!dsl2.contains("a.com"), "{dsl2}");
     }
@@ -614,14 +496,14 @@ mod tests {
     #[test]
     fn allow_all_trims_by_deny() {
         let (f, _, _) = parsed(&["-A", "--deny-read=x", "app.js"]);
-        let dsl = permission_dsl(Path::new("."), &f);
+        let dsl = permissions::dsl(Path::new("."), &f).0;
         assert_eq!(dsl, "permissions=all\ndeny-read=x");
     }
 
     #[test]
     fn no_flags_is_deny_by_default() {
         let (f, _, _) = parsed(&["app.js"]);
-        assert_eq!(permission_dsl(Path::new("."), &f), "");
+        assert_eq!(permissions::dsl(Path::new("."), &f).0, "");
     }
 
     #[test]

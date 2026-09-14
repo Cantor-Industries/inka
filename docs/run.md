@@ -35,7 +35,7 @@ inka run app.ts                          # deny-by-default
 inka run -A app.ts                       # allow everything
 inka run -R=./data app.ts                # read ./data only
 inka run --allow-net=api.example.com app.ts
-inka run -P server app.ts                # the config's `server` set
+inka run -P=server app.ts                # the config's `server` set
 inka run -A --deny-read=./secrets app.ts # allow-all, minus secrets
 inka run -- app-with-dashes.js           # end options; file may start with '-'
 ```
