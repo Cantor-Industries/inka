@@ -124,42 +124,54 @@ jobs:
           body: |
             inka ${{ env.REL }} — runtime tuple ${{ env.RUNTIME }} (deno_runtime ${{ env.DENO }}).
 
-            0.5.2 makes `inka build` and `inka run` resolve dependencies
-            correctly from **any** local `node_modules` layout, and closes the
-            build/run permission-seam gap. Runtime tuple stays `0.266.2`.
+            0.5.3 makes permissions usable from **any** package manager. Deno
+            projects declare build-intent permissions in `deno.json`; npm, pnpm,
+            yarn, and bun projects previously had no equivalent, so a build was
+            deny-by-default and the executable failed at run time. `inka build`
+            now accepts the same grant flags as `inka run`, `package.json` can
+            carry an inline permission map, and a build with no permission
+            source warns instead of failing silently. Runtime tuple stays
+            `0.266.2`.
 
-            ## Fixes
+            ## What's new
 
-            - **`--external <pkg>` now embeds the dependency closure.**
-              `inka build --external` previously embedded only the package's own
-              folder, so an artifact failed at run time as soon as the package
-              required a transitive dependency. It now embeds the full runtime
-              closure, resolved with Node-style nearest-`node_modules` semantics
-              from each package's canonical realpath. Hoisted (npm, yarn, bun)
-              and symlinked isolated (pnpm `.pnpm/`, Deno `.deno/`) layouts both
-              work; conflicting versions are nested under the referring package,
-              and symlinks are followed with cycle protection.
-            - **`inka run` resolves workspace-hoisted `node_modules`.** In a
-              monorepo where dependencies are hoisted to a workspace root, `run`
-              now roots at the nearest ancestor that is a project root
-              (`package.json`/`deno.json`) and has a `node_modules`, matching
-              what `build` already did. The climb is bounded by a project marker
-              so read confinement cannot broaden to an unrelated directory.
+            - **`inka build` takes permission flags.** The full `inka run`
+              surface now works at build time and is baked into the artifact:
+              `-A`/`--allow-all`, `-R`/`-W`/`-N`/`-E`/`-S[=list]`,
+              `--allow-<cat>[=list]`, `--deny-<cat>[=list]`, and
+              `-P[=<set>]`/`--permission-set[=<set>]`. CLI flags override any
+              config-derived permissions, so `inka build -A app.ts` needs no
+              config at all and `inka build --allow-env app.ts` bakes least
+              privilege. `-A` cannot be combined with `-P`/`--allow-*`.
+            - **Manager-agnostic inline permissions.** The `inka.permissions`
+              marker (in `package.json` or `deno.json`) now accepts three
+              shapes: the string `"all"` (`permissions=all`), a named-set
+              string, or an **inline category map**. This is the no-`deno.json`
+              path for npm/pnpm/yarn/bun:
 
-            ## Permissions
+              ```json
+              { "inka": { "permissions": { "env": true, "read": ["./data"] } } }
+              ```
 
-            - **Build/run permission hint.** `inka run` now prints a note when
-              the config defines a build-intent permission source
-              (`deno.json.compile.permissions` or an `inka.permissions` marker),
-              naming the `-P=<set>` that reproduces the permissions `inka build`
-              would bake. `run` still never applies `compile.permissions`
-              implicitly (deny-by-default).
+            - **No-source build advisory.** When a build has neither CLI
+              permission flags nor a config build-intent source, `inka build`
+              now warns that the artifact is deny-by-default and points at
+              `--allow-*`/`-A`, `-P=<set>`, and `inka.permissions`, instead of
+              surfacing `NotCapable` only at run time.
+
+            ## Changed
+
+            - **Unified `-P`.** `inka build` now uses `-P[=<set>]` like
+              `inka run`: a bare `-P` selects the `default` set and `-P=<name>`
+              names one. The old space form `inka build -P <name> app.ts` is no
+              longer parsed; use `-P=<name>` or `--permission-set <name>` (a
+              clear hint is printed). This is the only CLI break.
 
             ## Docs
 
-            - `docs/packages.md`, `docs/build.md`, `docs/run.md`, and
-              `docs/permissions.md` updated for closure embedding, workspace-root
-              `node_modules` resolution, and the run hint.
+            - `README.md` and `docs/{build,permissions,run,cli,troubleshooting}.md`
+              updated for the build grant flags, the inline map, and the
+              no-source advisory.
 
             ## Upgrade
 
