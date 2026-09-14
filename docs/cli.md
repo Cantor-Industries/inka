@@ -24,7 +24,7 @@ is deny-by-default. See [Build](build.md).
 Execute a `.ts`/`.js` file through the installed runtime without building.
 Permissions are deny-by-default; `-A` allows all, `-P[=name]` applies a named
 config set, `--allow-<cat>[=list]` / `--deny-<cat>[=list]` are granular
-(`cat`: `read|write|net|env|run|sys|ffi`). `--runtime <ver>` picks a specific
+(`cat`: `read|write|net|env|run|sys|ffi|import`). `--runtime <ver>` picks a specific
 tuple; `--` ends options. See [Run](run.md).
 
 ## `update`
@@ -57,7 +57,7 @@ status (config files, `node_modules`, `DENO_DIR`, bundling capability, launcher)
 |---|---|
 | `XDG_DATA_HOME` | base for `inka/runtime` (default `~/.local/share`) |
 | `INKA_RUNTIME_HOME` | override the per-user runtime dir |
-| `DENO_DIR` | Deno cache read for `jsr:`/remote resolution (default `~/.cache/deno`) |
+| `DENO_DIR` | Deno cache read for `jsr:`/remote resolution (default `~/.cache/deno`); must be an absolute path — the cache is **trusted input** (cached remote/JS is loaded as code) |
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
 | `INKA_DEBUG` | verbose runtime/resolution logging |

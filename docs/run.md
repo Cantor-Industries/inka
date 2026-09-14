@@ -17,7 +17,7 @@ the program as its arguments, and the program's exit code is propagated.
 
 `inka run` mirrors `deno run --no-prompt`: **deny by default**, explicit grants
 only, no prompting. This table uses the runtime's categories (`read`, `write`,
-`net`, `env`, `run`, `sys`, `ffi`).
+`net`, `env`, `run`, `sys`, `ffi`, `import`).
 
 | Flag | Meaning |
 |---|---|

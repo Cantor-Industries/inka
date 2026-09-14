@@ -149,6 +149,34 @@ run "pnpm-style symlinked dep" "pnpm-ok a+b" p_pnpm.js \
 'import a from "pkg-a";
 console.log("pnpm-ok", a);'
 
+echo "== symlink escape confinement =="
+# A symlink planted inside the tree must not let a module escape the execution
+# root. ESM `import` is confined by the loader regardless of permissions; a
+# `require()`d package symlinked outside is deny-by-default (the canonical
+# containment check routes the read to the permission system).
+ESCAPE_DIR="$SECRET_DIR/escape"
+mkdir -p "$ESCAPE_DIR"
+printf 'console.log("escape-loaded");\n' > "$ESCAPE_DIR/secret.js"
+ln -sfn "$ESCAPE_DIR/secret.js" escape_link.js
+printf '%s\n' 'import "./escape_link.js";' 'console.log("escape-import-ok");' > p_escape_import.js
+out="$("$INKA" run -A p_escape_import.js 2>&1)" && {
+    echo "FAIL: symlink import escape was not denied" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"outside the execution tree"*) echo "ok: symlink import escape denied (even with -A)" ;;
+    *) echo "FAIL: symlink import escape (unexpected error)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+mkdir -p "$ESCAPE_DIR/evilpkg"
+printf '%s\n' '{"name":"evilpkg","version":"1.0.0","main":"index.js"}' > "$ESCAPE_DIR/evilpkg/package.json"
+printf 'module.exports = "escape-loaded";\n' > "$ESCAPE_DIR/evilpkg/index.js"
+ln -sfn "$ESCAPE_DIR/evilpkg" node_modules/evilpkg
+run_with "" "require symlink escape denied by default" "escape-denied" p_escape_req.js \
+'import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+try { console.log("escape-loaded", require("evilpkg")); }
+catch (e) { console.log("escape-denied", e && e.constructor && e.constructor.name); }'
+
 echo "== jsr / import map (offline Deno cache) =="
 mkdir -p jsrproj
 printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json
@@ -163,6 +191,18 @@ if out="$(cd jsrproj && DENO_DIR="${DENO_DIR:-$HOME/.cache/deno}" "$INKA" run ma
     esac
 else
     skip "jsr import map (no cached @std/assert in ${DENO_DIR:-$HOME/.cache/deno})"
+fi
+
+# `allow-import` is a first-class category. The custom loader confines module
+# reads itself, so this guards the category's end-to-end plumbing (CLI -> DSL ->
+# runtime options) against the cached jsr import.
+if out="$(cd jsrproj && DENO_DIR="${DENO_DIR:-$HOME/.cache/deno}" "$INKA" run --allow-import=* main.ts 2>&1)"; then
+    case "$out" in
+        *jsr-ok*) echo "ok: allow-import category (cached jsr)" ;;
+        *) skip "allow-import ($out)" ;;
+    esac
+else
+    skip "allow-import (no cached @std/assert in ${DENO_DIR:-$HOME/.cache/deno})"
 fi
 
 echo "== release packages + native addon (project node_modules) =="

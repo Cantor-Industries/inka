@@ -6,9 +6,10 @@ manifest says so, and prompting is disabled. You grant access at **build time**
 flags). Descriptor syntax and enforcement match Deno exactly — violations
 surface as `NotCapable`/`PermissionDenied`, and `Deno.permissions` works.
 
-Categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`. Deno's
-`import` category and the `ignore` sub-key have no inka equivalent (warned and
-skipped).
+Categories: `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`, `import`.
+`import` grants Deno's import permission for **cached** remote/`jsr:` modules
+(inka still never fetches from the network). Deno's `ignore` sub-key has no inka
+equivalent (warned and skipped).
 
 Native `.node` (N-API) addons are `dlopen`ed at run time, so they need `ffi`
 (scoped to the addon path). Addons that probe the platform also need `sys`
@@ -34,7 +35,8 @@ deny-read=./data/secret.txt        # deny overrides allow / trims permissions=al
 | `*` in a list | all of that category |
 
 Lists are comma-separated; a `deny-*` entry overrides an allow for the same
-resource.
+resource. An empty `allow-<cat>=` list is malformed and rejected — write
+`allow-<cat>=*` to allow the whole category.
 
 ## Where permissions come from (build)
 

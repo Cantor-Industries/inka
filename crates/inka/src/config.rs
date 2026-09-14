@@ -23,7 +23,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-const CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
+const CATEGORIES: [&str; 8] = ["read", "write", "net", "env", "run", "sys", "ffi", "import"];
 
 /// Strip `//` and `/* … */` comments and trailing commas from JSONC text,
 /// respecting string literals and escapes.
@@ -289,7 +289,8 @@ fn push_permission(
 }
 
 /// Apply one category map (`{ cat: bool | string | array | {allow,deny,ignore} }`)
-/// into aggregated allow/deny lists. deno has no `ignore`/`import` inka equivalent.
+/// into aggregated allow/deny lists. deno's `ignore` sub-key has no inka
+/// equivalent.
 fn apply_category_map(
     map: &Value,
     allow: &mut Vec<(String, String)>,
@@ -301,13 +302,7 @@ fn apply_category_map(
     };
     for (cat, val) in obj {
         if !CATEGORIES.contains(&cat.as_str()) {
-            if cat == "import" {
-                warns.push(
-                    "permission category 'import' has no inka equivalent; ignored".to_string(),
-                );
-            } else {
-                warns.push(format!("unknown permission category '{cat}'; ignored"));
-            }
+            warns.push(format!("unknown permission category '{cat}'; ignored"));
             continue;
         }
         match val {
@@ -951,9 +946,8 @@ mod tests {
         assert!(s.contains("allow-env=*"), "{s}");
         assert!(s.contains("allow-net=127.0.0.1"), "{s}");
         assert!(!s.contains("allow-write"), "{s}");
-        assert!(!s.contains("allow-import"), "{s}");
+        assert!(s.contains("allow-import=*"), "{s}");
         assert!(s.contains("deny-ffi=libc.so"), "{s}");
-        assert!(has_note(&warns, "no inka equivalent"), "{warns:?}");
         assert!(
             has_note(&warns, "'ignore' has no inka equivalent"),
             "{warns:?}"

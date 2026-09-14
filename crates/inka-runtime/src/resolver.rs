@@ -21,24 +21,37 @@ fn load_error(msg: String) -> deno_graph::source::LoadError {
     deno_graph::source::LoadError::Other(Arc::new(deno_error::JsErrorBox::generic(msg)))
 }
 
-/// Cache-only loader: `file:` from disk, `http(s):` from `$DENO_DIR/remote`,
-/// everything else external.
+/// Cache-only loader: `file:` from disk (confined to `root`), `http(s):` from
+/// `$DENO_DIR/remote`, everything else external.
 struct CacheLoader {
     cache: Arc<GlobalHttpCache<RealSys>>,
+    /// Canonical execution root; `file:` loads outside it are refused.
+    root: PathBuf,
 }
 
 impl Loader for CacheLoader {
     fn load(&self, specifier: &ModuleSpecifier, _options: LoadOptions) -> LoadFuture {
         let spec = specifier.clone();
         let cache = self.cache.clone();
+        let root = self.root.clone();
         Box::pin(async move {
             match spec.scheme() {
                 "file" => {
                     let path = spec
                         .to_file_path()
                         .map_err(|_| load_error(format!("not a file url: {spec}")))?;
-                    let bytes = std::fs::read(&path)
+                    // Resolve symlinks and confine to the execution tree (the
+                    // import map could otherwise point a bare specifier at any
+                    // local file).
+                    let real = std::fs::canonicalize(&path)
                         .map_err(|e| load_error(format!("read {}: {e}", path.display())))?;
+                    if !real.starts_with(&root) {
+                        return Err(load_error(format!(
+                            "refusing to load module outside the execution tree: {spec}"
+                        )));
+                    }
+                    let bytes = std::fs::read(&real)
+                        .map_err(|e| load_error(format!("read {}: {e}", real.display())))?;
                     Ok(Some(LoadResponse::Module {
                         content: bytes.into(),
                         mtime: None,
@@ -140,8 +153,10 @@ impl GraphResolverState {
     }
 }
 
-/// The Deno cache directory: `$DENO_DIR` or `~/.cache/deno`.
-pub(crate) fn deno_dir_path() -> PathBuf {
+/// The Deno cache directory: `$DENO_DIR` or `~/.cache/deno`. This may be
+/// relative when `DENO_DIR`/`HOME` are relative; callers that read the cache
+/// must go through `validate_deno_dir` first.
+fn raw_deno_dir() -> PathBuf {
     if let Ok(d) = std::env::var("DENO_DIR") {
         if !d.is_empty() {
             return PathBuf::from(d);
@@ -149,6 +164,24 @@ pub(crate) fn deno_dir_path() -> PathBuf {
     }
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     PathBuf::from(home).join(".cache/deno")
+}
+
+pub(crate) fn deno_dir_path() -> PathBuf {
+    raw_deno_dir()
+}
+
+/// Require an absolute cache directory. The Deno cache is trusted input (cached
+/// remote/JS is loaded as code), so a relative or otherwise ambiguous location
+/// is refused rather than resolved against the launch directory.
+pub(crate) fn validate_deno_dir() -> Result<PathBuf, String> {
+    let dir = raw_deno_dir();
+    if !dir.is_absolute() {
+        return Err(format!(
+            "DENO_DIR must be an absolute path (got '{}'); the Deno cache is trusted input",
+            dir.display()
+        ));
+    }
+    Ok(dir)
 }
 
 /// Build the graph for `entry` under `root`. Returns an empty state when there
@@ -173,12 +206,15 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> GraphResolverState {
         }
     };
 
-    let deno_dir = deno_dir_path();
-    if !deno_dir.is_absolute() {
-        return GraphResolverState::empty();
-    }
+    let deno_dir = match validate_deno_dir() {
+        Ok(d) => d,
+        Err(_) => return GraphResolverState::empty(),
+    };
     let cache = Arc::new(GlobalHttpCache::new(RealSys, deno_dir.join("remote")));
-    let loader = CacheLoader { cache };
+    let loader = CacheLoader {
+        cache,
+        root: root.to_path_buf(),
+    };
 
     let Ok(entry_url) = Url::from_file_path(entry) else {
         return GraphResolverState::empty();

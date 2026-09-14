@@ -38,6 +38,7 @@ mod runtime_snapshot {
 
 mod node_services;
 mod resolver;
+mod temp;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -50,11 +51,10 @@ deno_core::extension!(
     }
 );
 
-/// Module loader rooted at the execution tree. Serves:
-///   - the artifact tree (or the staged single-entry tree) — local files,
-///   - `node:`/`data:`/`file:` built-ins,
-/// and rejects network imports outright. Reading is confined to the execution
-/// tree; nothing outside it is ever served.
+/// Module loader rooted at the execution tree. Serves the artifact tree (or
+/// the staged single-entry tree) as local files, plus `node:`/`data:`/`file:`
+/// built-ins, and rejects network imports outright. Reading is confined to the
+/// execution tree's real path; nothing outside it is ever served.
 struct PkgLoader {
     /// Root of the execution tree (the artifact tree, or the staged temp tree
     /// for single-file runs).
@@ -69,7 +69,7 @@ struct PkgLoader {
 }
 
 fn precompiled_flag() -> bool {
-    std::env::var_os("INKA_PRECOMPILED").is_some()
+    std::env::var_os("INKA_PRECOMPILED").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
 impl ModuleLoader for PkgLoader {
@@ -164,11 +164,21 @@ impl ModuleLoader for PkgLoader {
                     path = p;
                 }
             }
-            if !path.starts_with(&artifact_root) {
+            // Realpath confinement: the lexical check above can be defeated by a
+            // symlink planted inside the tree, so resolve symlinks and require the
+            // real file to stay under the canonical execution root.
+            let real = std::fs::canonicalize(&path).map_err(|source| {
+                JsErrorBox::from_err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!("Cannot load module \"{specifier}\": {source}"),
+                ))
+            })?;
+            if !real.starts_with(&artifact_root) {
                 return Err(JsErrorBox::generic(format!(
                     "refusing to load module outside the execution tree: {specifier}"
                 )));
             }
+            path = real;
             let bytes = std::fs::read(&path).map_err(|source| {
                 JsErrorBox::from_err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
@@ -375,7 +385,7 @@ fn build_services(
 //                                    permissions=all); no-op + warning otherwise
 // Lists are comma/whitespace separated; `*` means "all" in that category.
 
-const PERM_CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
+const PERM_CATEGORIES: [&str; 8] = ["read", "write", "net", "env", "run", "sys", "ffi", "import"];
 
 #[derive(Default)]
 struct PermSpec {
@@ -428,6 +438,14 @@ fn parse_perm_dsl(dsl: &str) -> Result<PermSpec, String> {
             .map(|s| s.to_string())
             .collect();
         if kind == "allow" {
+            // An empty allow list would otherwise widen to "allow all" at the
+            // options layer. Reject it: use `*` (or `permissions=all`) to mean
+            // all. This is defence in depth beyond the CLI/config checks.
+            if items.is_empty() {
+                return Err(format!(
+                    "empty allow list in '{key}' (use '*' or 'permissions=all' to allow all)"
+                ));
+            }
             spec.allow.push((cat.to_string(), items));
         } else {
             spec.deny.push((cat.to_string(), items));
@@ -505,11 +523,10 @@ fn build_options_permissions(
         deny_sys: cat_deny("sys"),
         allow_ffi: cat_allow("ffi"),
         deny_ffi: cat_deny("ffi"),
-        // `import` is not part of the manifest DSL (inka rejects http(s) imports
-        // outright), but `permissions=all` must still match `Permissions::allow_all()`
-        // across every kind. Without this, `all` + any `deny-*` would leave import
-        // denied while plain `all` allows it.
-        allow_import: if spec.all { Some(Vec::new()) } else { None },
+        // `import` grants Deno's import permission for cached remote/jsr modules;
+        // network fetch stays disabled (see `resolve_specifier`).
+        allow_import: cat_allow("import"),
+        deny_import: cat_deny("import"),
         ..Default::default()
     };
 
@@ -603,12 +620,19 @@ fn run_tree(
     if entry.is_empty() || entry.contains("..") || Path::new(entry).is_absolute() {
         return Err(format!("invalid entry path '{entry}'"));
     }
+    // Canonicalize once: the module loader and node services confine every read
+    // to this real path (symlinks inside the tree must not escape it).
+    let root = std::fs::canonicalize(&root)
+        .map_err(|e| format!("cannot resolve execution tree {}: {e}", root.display()))?;
     let file = root.join(entry);
     if !file.is_file() {
         return Err(format!("entry module not found in artifact tree: {entry}"));
     }
 
     let permissions = permissions_from_dsl(perm_dsl.unwrap_or(""))?;
+    // The Deno cache is trusted input (cached remote/JS is loaded as code);
+    // require an absolute location before any module can be served from it.
+    resolver::validate_deno_dir()?;
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -638,13 +662,12 @@ fn run_inner(
     args: &[String],
     perm_dsl: Option<&str>,
 ) -> Result<i32, String> {
-    let nonce = format!("{}-{}", std::process::id(), args.len());
-
     // Stage the single entry as its own one-file tree so it goes through the
     // same loader path as multi-file artifacts. TS entries are transpiled to JS
-    // first.
-    let dir = std::env::temp_dir().join(format!("inka-{nonce}"));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to stage module tree: {e}"))?;
+    // first. The tree is random, exclusive, 0700, and removed on drop (plus an
+    // `atexit` guard for an `exit()` from inside the runtime).
+    let tree = temp::TempTree::create()?;
+    let dir = tree.path().to_path_buf();
 
     let entry = "main.js";
     let bytes = if ts_family(module) {
@@ -655,14 +678,11 @@ fn run_inner(
     } else {
         source.to_vec()
     };
-    if let Err(e) = std::fs::write(dir.join(entry), &bytes) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err(format!("failed to stage module: {e}"));
-    }
+    std::fs::write(dir.join(entry), &bytes).map_err(|e| format!("failed to stage module: {e}"))?;
 
     let dir_str = dir.to_string_lossy().into_owned();
     let result = run_tree(&dir_str, entry, args, perm_dsl);
-    let _ = std::fs::remove_dir_all(&dir);
+    drop(tree);
     result
 }
 
@@ -688,20 +708,41 @@ fn version_cstr() -> &'static CStr {
 
 #[no_mangle]
 pub extern "C" fn inka_runtime_version() -> *const c_char {
-    version_cstr().as_ptr()
+    std::panic::catch_unwind(|| version_cstr().as_ptr()).unwrap_or(std::ptr::null())
 }
 
 // ---- handle ----------------------------------------------------------------
 
 #[no_mangle]
 pub extern "C" fn inka_runtime_create() -> *mut c_void {
-    Box::into_raw(Box::new(())) as *mut c_void
+    std::panic::catch_unwind(|| Box::into_raw(Box::new(())) as *mut c_void)
+        .unwrap_or(std::ptr::null_mut())
 }
 
+/// Destroy a runtime handle returned by `inka_runtime_create`.
+///
+/// # Safety
+/// `rt` must be null or a pointer previously returned by
+/// `inka_runtime_create` and not already destroyed.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_destroy(rt: *mut c_void) {
-    if !rt.is_null() {
-        drop(Box::from_raw(rt as *mut ()));
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        if !rt.is_null() {
+            drop(Box::from_raw(rt as *mut ()));
+        }
+    }));
+}
+
+/// Free a string the runtime handed back through `err_msg` (allocated by the
+/// runtime's allocator, so it must be freed here, not by the caller).
+///
+/// # Safety
+/// `ptr` must be null or a pointer previously returned by the runtime as an
+/// `err_msg` string and not already freed.
+#[no_mangle]
+pub unsafe extern "C" fn inka_runtime_free_string(ptr: *mut c_char) {
+    if !ptr.is_null() {
+        drop(CString::from_raw(ptr));
     }
 }
 
@@ -715,6 +756,32 @@ unsafe fn set_err_msg(out: *mut *mut c_char, msg: String) {
     *out = Box::into_raw(c.into_boxed_c_str()) as *mut c_char;
 }
 
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&str>() {
+        format!("runtime panicked: {s}")
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        format!("runtime panicked: {s}")
+    } else {
+        "runtime panicked".to_string()
+    }
+}
+
+/// Run an exported ABI body, turning a panic into an error code + message
+/// instead of unwinding across the C boundary (or aborting the host).
+unsafe fn abi_guard<F>(err_msg: *mut *mut c_char, body: F) -> c_int
+where
+    F: FnOnce() -> c_int,
+{
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(rc) => rc,
+        Err(payload) => {
+            set_err_msg(err_msg, panic_message(payload.as_ref()));
+            1
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 unsafe fn run_from_raw(
     specifier: *const c_char,
     source: *const c_char,
@@ -777,6 +844,10 @@ unsafe fn run_from_raw(
 
 /// Permission-aware single-file run entry point. `perms` is a newline-joined
 /// string of manifest permission lines (or null/empty for deny-by-default).
+///
+/// # Safety
+/// All pointers must be null or valid for the described lengths for the
+/// duration of the call; `exit_code`/`err_msg` must be valid writable pointers.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_run_module_perm(
     _rt: *mut c_void,
@@ -789,14 +860,20 @@ pub unsafe extern "C" fn inka_runtime_run_module_perm(
     err_msg: *mut *mut c_char,
     perms: *const c_char,
 ) -> c_int {
-    run_from_raw(
-        specifier, source, source_len, argc, argv, exit_code, err_msg, perms,
-    )
+    abi_guard(err_msg, || unsafe {
+        run_from_raw(
+            specifier, source, source_len, argc, argv, exit_code, err_msg, perms,
+        )
+    })
 }
 
 /// Multi-file run entry point: executes `entry` (a path relative to the
 /// extracted `dir_path`) from a staged artifact tree, resolving its relative
 /// imports. `perms` behaves like `inka_runtime_run_module_perm`.
+///
+/// # Safety
+/// All pointers must be null or valid C strings for the duration of the call;
+/// `exit_code`/`err_msg` must be valid writable pointers.
 #[no_mangle]
 pub unsafe extern "C" fn inka_runtime_run_module_dir(
     _rt: *mut c_void,
@@ -808,52 +885,54 @@ pub unsafe extern "C" fn inka_runtime_run_module_dir(
     err_msg: *mut *mut c_char,
     perms: *const c_char,
 ) -> c_int {
-    if exit_code.is_null() {
-        return -1;
-    }
-    *exit_code = 0;
-    if !err_msg.is_null() {
-        *err_msg = std::ptr::null_mut();
-    }
+    abi_guard(err_msg, || unsafe {
+        if exit_code.is_null() {
+            return -1;
+        }
+        *exit_code = 0;
+        if !err_msg.is_null() {
+            *err_msg = std::ptr::null_mut();
+        }
 
-    let dir = if dir_path.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(dir_path).to_string_lossy().into_owned()
-    };
-    let entry = if entry.is_null() {
-        String::new()
-    } else {
-        CStr::from_ptr(entry).to_string_lossy().into_owned()
-    };
+        let dir = if dir_path.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(dir_path).to_string_lossy().into_owned()
+        };
+        let entry = if entry.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr(entry).to_string_lossy().into_owned()
+        };
 
-    let mut args = Vec::new();
-    if !argv.is_null() {
-        for i in 0..argc {
-            let p = *argv.add(i as usize);
-            if p.is_null() {
-                break;
+        let mut args = Vec::new();
+        if !argv.is_null() {
+            for i in 0..argc {
+                let p = *argv.add(i as usize);
+                if p.is_null() {
+                    break;
+                }
+                args.push(CStr::from_ptr(p).to_string_lossy().into_owned());
             }
-            args.push(CStr::from_ptr(p).to_string_lossy().into_owned());
         }
-    }
-    let dsl = if perms.is_null() {
-        None
-    } else {
-        Some(CStr::from_ptr(perms).to_string_lossy().into_owned())
-    };
+        let dsl = if perms.is_null() {
+            None
+        } else {
+            Some(CStr::from_ptr(perms).to_string_lossy().into_owned())
+        };
 
-    match run_dir_inner(&dir, &entry, &args, dsl.as_deref()) {
-        Ok(code) => {
-            *exit_code = code;
-            0
+        match run_dir_inner(&dir, &entry, &args, dsl.as_deref()) {
+            Ok(code) => {
+                *exit_code = code;
+                0
+            }
+            Err(e) => {
+                *exit_code = 1;
+                set_err_msg(err_msg, e);
+                1
+            }
         }
-        Err(e) => {
-            *exit_code = 1;
-            set_err_msg(err_msg, e);
-            1
-        }
-    }
+    })
 }
 
 #[cfg(test)]
@@ -898,5 +977,23 @@ mod tests {
     fn deny_without_allow_is_deny_by_default() {
         // A lone deny cannot grant anything.
         assert!(!import_allowed("deny-read=./secrets"));
+    }
+
+    #[test]
+    fn empty_allow_list_is_rejected() {
+        assert!(parse_perm_dsl("allow-read=").is_err());
+        assert!(parse_perm_dsl("allow-read=,,").is_err());
+        assert!(parse_perm_dsl("allow-read=   ").is_err());
+        // `*` is the explicit "all in this category" form.
+        assert!(parse_perm_dsl("allow-read=*").is_ok());
+    }
+
+    #[test]
+    fn allow_import_grants_import_only() {
+        assert!(import_allowed("allow-import=*"));
+        // A non-import allow does not grant import.
+        assert!(!import_allowed("allow-read=/etc"));
+        // `permissions=all` trimmed by deny-import denies import.
+        assert!(!import_allowed("permissions=all\ndeny-import=*"));
     }
 }

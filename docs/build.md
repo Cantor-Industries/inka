@@ -74,7 +74,7 @@ permissions:
 |---|---|
 | `-A`, `--allow-all` | `permissions=all` (trimmed by any `--deny-*`) |
 | `-R`, `-W`, `-N`, `-E`, `-S[=list]` | grant read/write/net/env/sys (whole category, or scoped) |
-| `--allow-<cat>[=list]` | grant `read\|write\|net\|env\|run\|sys\|ffi` |
+| `--allow-<cat>[=list]` | grant `read\|write\|net\|env\|run\|sys\|ffi\|import` |
 | `--deny-<cat>[=list]` | deny within an allowed category; **requires** an allow source (`-A` or `--allow-*`) |
 | `-P[=<set>]`, `--permission-set <set>` | a named set from config (bare `-P` = `default`) |
 

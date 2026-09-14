@@ -13,7 +13,11 @@ best matching installed tuple.
 - `inka_runtime_create()` / `inka_runtime_destroy()` — session lifecycle,
 - `inka_runtime_run_module_perm()` — permission-aware single-file entry,
 - `inka_runtime_run_module_dir()` — multi-file: a `dir` root + `entry` path,
-  resolving relative imports, with runtime TS transpile per file.
+  resolving relative imports, with runtime TS transpile per file,
+- `inka_runtime_free_string()` — free an `err_msg` string the runtime returned.
+
+The run entry points are wrapped in `catch_unwind`, so a panic surfaces as an
+error code + message rather than aborting the host.
 
 There is no permission-less entry point. A runtime missing `_perm`/`_dir`
 causes the launcher to fail closed (exit 4) rather than run with wrong
@@ -23,9 +27,13 @@ permissions.
 
 Deny-by-default. The manifest/`inka run` DSL (`permissions=all|none`,
 `allow-<cat>`, `deny-<cat>`) maps onto the Deno permission model; prompts are
-disabled. Reads `INKA_PRECOMPILED` (serve an archive's already-transpiled TS as
-JS). Resolution is rooted at the execution tree; `DENO_DIR` is read for `jsr:`
-and other cached remote modules.
+disabled. Categories are `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`,
+`import` (`import` covers cached remote/`jsr:` modules; the network stays
+disabled). Reads `INKA_PRECOMPILED` (must be exactly `1` to serve an archive's
+already-transpiled TS as JS). Resolution is rooted at the execution tree, and
+every `file:` load is confined to its realpath (symlinks cannot escape).
+`DENO_DIR` is read for `jsr:` and other cached remote modules; it must be an
+absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 
 ## Resolution
 

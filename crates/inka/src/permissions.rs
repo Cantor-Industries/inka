@@ -16,7 +16,8 @@
 
 use std::path::Path;
 
-pub(crate) const CATEGORIES: [&str; 7] = ["read", "write", "net", "env", "run", "sys", "ffi"];
+pub(crate) const CATEGORIES: [&str; 8] =
+    ["read", "write", "net", "env", "run", "sys", "ffi", "import"];
 
 /// Parsed permission flags, shared by `build` and `run`.
 #[derive(Default)]

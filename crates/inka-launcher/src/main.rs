@@ -506,6 +506,7 @@ fn load_and_run(
         *const c_char,
     ) -> c_int;
     type FnDestroy = unsafe extern "C" fn(*mut c_void);
+    type FnFreeString = unsafe extern "C" fn(*mut c_char);
 
     unsafe {
         let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
@@ -588,11 +589,20 @@ fn load_and_run(
             perms_c.as_ptr(),
         );
 
+        // Optional: free the runtime-allocated error string. Older runtimes
+        // lack this symbol, in which case the string is leaked (as before).
+        let free_string = library
+            .get::<FnFreeString>(b"inka_runtime_free_string")
+            .ok();
+
         if !err_msg.is_null() {
             eprintln!(
                 "[inka] runtime error message: {}",
                 CStr::from_ptr(err_msg).to_string_lossy()
             );
+            if let Some(free) = free_string {
+                free(err_msg);
+            }
         }
         destroy(rt);
 
@@ -631,6 +641,7 @@ fn load_and_run_dir(
         *mut *mut c_char,
         *const c_char,
     ) -> c_int;
+    type FnFreeString = unsafe extern "C" fn(*mut c_char);
 
     unsafe {
         let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
@@ -707,11 +718,18 @@ fn load_and_run_dir(
             perms_c.as_ptr(),
         );
 
+        let free_string = library
+            .get::<FnFreeString>(b"inka_runtime_free_string")
+            .ok();
+
         if !err_msg.is_null() {
             eprintln!(
                 "[inka] runtime error message: {}",
                 CStr::from_ptr(err_msg).to_string_lossy()
             );
+            if let Some(free) = free_string {
+                free(err_msg);
+            }
         }
         destroy(rt);
 

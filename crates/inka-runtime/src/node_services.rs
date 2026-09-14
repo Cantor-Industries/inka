@@ -58,9 +58,16 @@ pub(crate) struct ExecutionRoots {
 
 impl ExecutionRoots {
     fn contains(&self, path: &Path) -> bool {
-        self.root
-            .as_ref()
-            .is_some_and(|root| path.starts_with(root))
+        let Some(root) = self.root.as_ref() else {
+            return false;
+        };
+        // Compare real paths: a lexical prefix check is defeated by a symlink
+        // inside the tree pointing outside it. Fall back to the lexical check
+        // only when the path does not exist (nothing to resolve yet).
+        match std::fs::canonicalize(path) {
+            Ok(real) => real.starts_with(root),
+            Err(_) => path.starts_with(root),
+        }
     }
 
     /// The execution tree's `node_modules` (bring-your-own-node_modules).
@@ -150,6 +157,28 @@ fn package_candidates(spec: &str) -> Vec<String> {
     out
 }
 
+/// Validate an npm package identity: `name` or `@scope/name`. Rejects empty,
+/// traversal (`.`/`..`), separators, and absolute paths so a name can never
+/// escape the `node_modules` it is joined to.
+fn valid_package_name(name: &str) -> bool {
+    if name.is_empty()
+        || name.contains('\\')
+        || name.contains('\0')
+        || Path::new(name).is_absolute()
+    {
+        return false;
+    }
+    let component_ok = |s: &str| !s.is_empty() && s != "." && s != "..";
+    if let Some(rest) = name.strip_prefix('@') {
+        match rest.split_once('/') {
+            Some((scope, pkg)) => component_ok(scope) && component_ok(pkg) && !pkg.contains('/'),
+            None => false,
+        }
+    } else {
+        component_ok(name) && !name.contains('/')
+    }
+}
+
 /// One parsed `npm:`/`jsr:` specifier, normalized to its npm identity.
 struct PkgSpec {
     /// npm package name, e.g. `zod` or `@jsr/std__assert`.
@@ -209,6 +238,9 @@ fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
         sub = s;
     } else if let Some(s) = rest.strip_prefix('/') {
         sub = Some(s.to_string());
+    }
+    if !valid_package_name(&name) {
+        return Err(format!("invalid package name '{name}'"));
     }
     Ok(PkgSpec { name, req, sub })
 }
@@ -286,13 +318,19 @@ impl NpmPackageFolderResolver for ExecutionFolderResolver {
         if let Some(nm) = self.roots.node_modules() {
             let root = NodeModulesRoot::new(nm);
             for name in &candidates {
+                // Never join a name that could traverse out of `node_modules`.
+                if !valid_package_name(name) {
+                    continue;
+                }
                 let found = match ref_path.as_deref() {
                     Some(p) => root.nearest(p, name).or_else(|| root.hoisted(name)),
                     None => root.hoisted(name),
                 };
                 if let Some(f) = found {
                     // Return the realpath so the package's own deps resolve from
-                    // its real location too.
+                    // its real location too. A symlink whose realpath leaves the
+                    // execution tree stays gated by `ExecutionRoots::contains`
+                    // (canonical) on the require read path.
                     return Ok(std::fs::canonicalize(&f).unwrap_or(f));
                 }
             }
@@ -636,5 +674,52 @@ impl NodeServices {
                 Ok(Some(out.into_owned()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_name_validation() {
+        for ok in ["ms", "@scope/name", "a-b.c", "@jsr/std__assert"] {
+            assert!(valid_package_name(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "", ".", "..", "a/b", "a\\b", "/abs", "@scope", "@scope/", "@/x", "@a/b/c", "@./x",
+            "@a/..",
+        ] {
+            assert!(!valid_package_name(bad), "{bad} should be invalid");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contains_rejects_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let base = std::env::temp_dir().join(format!("inka-rt-contain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.js"), b"x").unwrap();
+        std::fs::write(root.join("real.js"), b"x").unwrap();
+        symlink(outside.join("secret.js"), root.join("link.js")).unwrap();
+
+        let roots = ExecutionRoots {
+            root: Some(std::fs::canonicalize(&root).unwrap()),
+        };
+        assert!(
+            roots.contains(&root.join("real.js")),
+            "in-tree file allowed"
+        );
+        assert!(
+            !roots.contains(&root.join("link.js")),
+            "symlink escaping the tree must be rejected"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

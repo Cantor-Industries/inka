@@ -379,6 +379,7 @@ pub(crate) fn cmd_run(args: &[String]) {
             *mut *mut std::ffi::c_char,
             *const std::ffi::c_char,
         ) -> std::ffi::c_int;
+        type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
         let run_dir: libloading::Symbol<FnRunDir> = match library
             .get(b"inka_runtime_run_module_dir")
         {
@@ -427,6 +428,11 @@ pub(crate) fn cmd_run(args: &[String]) {
                 "[inka] runtime error message: {}",
                 CStr::from_ptr(err_msg).to_string_lossy()
             );
+            // Optional: free the runtime-allocated string (older runtimes lack
+            // this symbol; the string is then leaked, as before).
+            if let Ok(free) = library.get::<FnFreeString>(b"inka_runtime_free_string") {
+                free(err_msg);
+            }
         }
         destroy(rt);
         if rc != 0 {
