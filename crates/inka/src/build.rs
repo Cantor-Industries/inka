@@ -31,42 +31,77 @@ const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
 #[cfg(feature = "bundle")]
 const LAUNCHER_BIN: &str = "inka-launcher";
 
+fn usage_text() -> &'static str {
+    "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
+     \n\
+     bundles <source> (import maps + npm:/jsr:/node_modules) into one self-contained\n\
+     module and packs it onto the launcher. The manifest is always derived from\n\
+     package.json / deno.json(.jsonc) permissions and embedded; there is no on-disk\n\
+     manifest input.\n\
+     \n\
+     options:\n\
+     \x20 -s, --source <file>   source file (default: the positional argument)\n\
+     \x20 -o, --output <file>   output executable (default: source without its extension)\n\
+     \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.2' or '==0.266.2' (overrides config)\n\
+     \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
+     \x20 -A, --allow-all       bake permissions=all (trimmed by any --deny-*)\n\
+     \x20 -R, -W, -N, -E, -S    bake read/write/net/env/sys (whole category); -R=<list> scopes it\n\
+     \x20     --allow-<cat>[=list]   bake a grant for read|write|net|env|run|sys|ffi\n\
+     \x20     --deny-<cat>[=list]    deny within an allowed category\n\
+     \x20 -P[=<name>], --permission-set[=<name>]  bake a named config set (bare -P = `default`)\n\
+     \x20     --minify          minify the bundle\n\
+     \x20     --sourcemap       embed an inline source map\n\
+     \x20     --external <pkg>  leave a package unbundled and embed it from node_modules (repeatable)\n\
+     \x20     --embed-dir       also embed the whole current-directory tree (for assets)\n\
+     \x20 -h, --help            show this help\n\
+     \n\
+     CLI permission flags override config-derived permissions. Without any source\n\
+     the artifact is deny-by-default.\n\
+     \n\
+     launcher is found at $INKA_LAUNCHER or next to the inka binary."
+}
+
 fn help() -> ! {
-    println!(
-        "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
-         \n\
-         bundles <source> (import maps + npm:/jsr:/node_modules) into one self-contained\n\
-         module and packs it onto the launcher. The manifest is always derived from\n\
-         package.json / deno.json(.jsonc) permissions and embedded; there is no on-disk\n\
-         manifest input.\n\
-         \n\
-         options:\n\
-         \x20 -s, --source <file>   source file (default: the positional argument)\n\
-         \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-         \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.2' or '==0.266.2' (overrides config)\n\
-         \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
-         \x20 -A, --allow-all       bake permissions=all (trimmed by any --deny-*)\n\
-         \x20 -R, -W, -N, -E, -S    bake read/write/net/env/sys (whole category); -R=<list> scopes it\n\
-         \x20     --allow-<cat>[=list]   bake a grant for read|write|net|env|run|sys|ffi\n\
-         \x20     --deny-<cat>[=list]    deny within an allowed category\n\
-         \x20 -P[=<name>], --permission-set[=<name>]  bake a named config set (bare -P = `default`)\n\
-         \x20     --minify          minify the bundle\n\
-         \x20     --sourcemap       embed an inline source map\n\
-         \x20     --external <pkg>  leave a package unbundled and embed it from node_modules (repeatable)\n\
-         \x20     --embed-dir       also embed the whole current-directory tree (for assets)\n\
-         \x20 -h, --help            show this help\n\
-         \n\
-         CLI permission flags override config-derived permissions. Without any source\n\
-         the artifact is deny-by-default.\n\
-         \n\
-         launcher is found at $INKA_LAUNCHER or next to the inka binary."
-    );
+    println!("{}", usage_text());
     std::process::exit(0);
+}
+
+/// A usage error (bad/unknown option, missing argument): print to stderr and
+/// exit 2, so CI and callers do not mistake it for success.
+fn usage_err(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("{}", usage_text());
+    std::process::exit(2);
 }
 
 fn err(msg: &str) -> ! {
     eprintln!("error: {msg}");
     std::process::exit(1);
+}
+
+/// Reject an output path that would clobber the source or follow a symlink.
+/// Uses canonical identity when the paths exist, so `./app.ts` and `app.ts`
+/// (or a symlink to the source) are caught, not just exact string equality.
+fn check_output(source: &Path, output: &Path) -> Result<(), String> {
+    if let Ok(md) = std::fs::symlink_metadata(output) {
+        if md.file_type().is_symlink() {
+            return Err(format!(
+                "output '{}' is a symlink; refusing to overwrite it",
+                output.display()
+            ));
+        }
+    }
+    let same = match (std::fs::canonicalize(source), std::fs::canonicalize(output)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => output == source,
+    };
+    if same {
+        return Err(format!(
+            "output '{}' would overwrite the source file; pass a different -o",
+            output.display()
+        ));
+    }
+    Ok(())
 }
 
 pub fn cmd_build(args: &[String]) {
@@ -102,14 +137,8 @@ pub fn cmd_build(args: &[String]) {
                     Ok(PermFlag::ConsumeNext) => {
                         perm_flags.permset = Some(next_str(&mut it, other));
                     }
-                    Ok(PermFlag::Not) => {
-                        eprintln!("error: unknown option '{other}'");
-                        help();
-                    }
-                    Err(e) => {
-                        eprintln!("error: {e}");
-                        std::process::exit(2);
-                    }
+                    Ok(PermFlag::Not) => usage_err(&format!("unknown option '{other}'")),
+                    Err(e) => usage_err(&e),
                 }
             }
             other => positional.push(PathBuf::from(other)),
@@ -169,11 +198,8 @@ pub fn cmd_build(args: &[String]) {
         }),
     };
 
-    if output == source {
-        err(&format!(
-            "output '{}' would overwrite the source file; pass a different -o",
-            output.display()
-        ));
+    if let Err(e) = check_output(&source, &output) {
+        err(&e);
     }
 
     let cwd = env::current_dir()
@@ -281,10 +307,8 @@ fn pack(
         out.extend_from_slice(&(archive.len() as u64).to_le_bytes());
         out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
 
-        fs::write(output, &out)
+        write_executable(output, &out)
             .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
-        fs::set_permissions(output, fs::Permissions::from_mode(0o755))
-            .unwrap_or_else(|e| err(&format!("cannot chmod {}: {e}", output.display())));
 
         println!(
             "packed {} ({}) <- launcher {} ({}) + bundle ({}) + {} embedded file(s) ({}) + manifest ({})",
@@ -306,6 +330,46 @@ fn push_unique(files: &mut Vec<(String, Vec<u8>)>, rel: String, bytes: Vec<u8>) 
     if !files.iter().any(|(r, _)| r == &rel) {
         files.push((rel, bytes));
     }
+}
+
+/// Write an executable atomically: a `create_new` temp file in the output
+/// directory (a pre-planted symlink fails rather than being followed), chmod
+/// 0755, then rename into place. A failed build never leaves a partial output.
+#[cfg(feature = "bundle")]
+fn write_executable(output: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let dir = match output.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    };
+    let name = output
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "out".to_string());
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(".{name}.tmp{}-{nanos}", std::process::id()));
+
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp)?;
+    if let Err(e) = f.write_all(bytes) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    drop(f);
+    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = fs::rename(&tmp, output) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
@@ -352,20 +416,14 @@ fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
 fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
     match it.next() {
         Some(v) => PathBuf::from(v),
-        None => {
-            eprintln!("error: {flag} requires a value");
-            std::process::exit(2);
-        }
+        None => usage_err(&format!("{flag} requires a value")),
     }
 }
 
 fn next_str(it: &mut std::slice::Iter<'_, String>, flag: &str) -> String {
     match it.next() {
         Some(v) => v.clone(),
-        None => {
-            eprintln!("error: {flag} requires a value");
-            std::process::exit(2);
-        }
+        None => usage_err(&format!("{flag} requires a value")),
     }
 }
 
@@ -605,6 +663,23 @@ mod tests {
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("allow-env=*"), "{m}");
         assert!(!m.contains("allow-read"), "CLI should override config: {m}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn check_output_rejects_source_and_symlink() {
+        let cwd = scratch();
+        write(&cwd, "app.ts", "console.log(1);\n");
+        let src = cwd.join("app.ts");
+        // Exact and `./`-prefixed self-overwrite.
+        assert!(check_output(&src, &src).is_err());
+        assert!(check_output(&src, &cwd.join("./app.ts")).is_err());
+        // A distinct output is fine.
+        assert!(check_output(&src, &cwd.join("app")).is_ok());
+        // A symlink pointing at the source must be refused.
+        let link = cwd.join("link");
+        std::os::unix::fs::symlink(&src, &link).unwrap();
+        assert!(check_output(&src, &link).is_err());
         let _ = fs::remove_dir_all(&cwd);
     }
 

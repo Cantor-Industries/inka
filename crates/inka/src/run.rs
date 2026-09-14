@@ -25,28 +25,37 @@ use std::process::exit;
 use crate::permissions::{self, Flags, PermFlag};
 use crate::Version;
 
+fn usage_text() -> &'static str {
+    "usage: inka run [options] <file> [args...]\n\
+     \n\
+     executes <file> (.ts/.js/...) via the installed runtime. Options must precede the\n\
+     file; anything after <file> (or after `--`) is passed to the program as its\n\
+     arguments.\n\
+     \n\
+     permissions (deny by default; no prompting):\n\
+     \x20 -A, --allow-all            allow everything (trimmed by any --deny-*)\n\
+     \x20 -R, -W, -N, -E, -S         allow read/write/net/env/sys (whole category)\n\
+     \x20 -R=<list>, -N=<list>, ...   same, scoped to the given list\n\
+     \x20     --allow-<cat>[=list]    grant category read|write|net|env|run|sys|ffi\n\
+     \x20     --deny-<cat>[=list]     deny within an allowed category\n\
+     \x20 -P[=<name>], --permission-set[=<name>]\n\
+     \x20                             apply a named permission set from the config\n\
+     \x20                             (bare -P uses the `default` set)\n\
+     \x20     --runtime <ver>        use a specific installed runtime tuple\n\
+     \x20     --                     end of options (file may start with '-')\n\
+     \x20 -h, --help                  show this help"
+}
+
 fn usage() -> ! {
-    eprintln!(
-        "usage: inka run [options] <file> [args...]\n\
-         \n\
-         executes <file> (.ts/.js/...) via the installed runtime. Options must precede the\n\
-         file; anything after <file> (or after `--`) is passed to the program as its\n\
-         arguments.\n\
-         \n\
-         permissions (deny by default; no prompting):\n\
-         \x20 -A, --allow-all            allow everything (trimmed by any --deny-*)\n\
-         \x20 -R, -W, -N, -E, -S         allow read/write/net/env/sys (whole category)\n\
-         \x20 -R=<list>, -N=<list>, ...   same, scoped to the given list\n\
-         \x20     --allow-<cat>[=list]    grant category read|write|net|env|run|sys|ffi\n\
-         \x20     --deny-<cat>[=list]     deny within an allowed category\n\
-         \x20 -P[=<name>], --permission-set[=<name>]\n\
-         \x20                             apply a named permission set from the config\n\
-         \x20                             (bare -P uses the `default` set)\n\
-         \x20     --runtime <ver>        use a specific installed runtime tuple\n\
-         \x20     --                     end of options (file may start with '-')\n\
-         \x20 -h, --help                  show this help"
-    );
+    println!("{}", usage_text());
     exit(0);
+}
+
+/// A usage error (unknown option, missing file): print to stderr and exit 2.
+fn usage_err(msg: &str) -> ! {
+    eprintln!("error: {msg}");
+    eprintln!("{}", usage_text());
+    exit(2);
 }
 
 fn fail(msg: &str) -> ! {
@@ -71,7 +80,7 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
             "--" => {
                 // end of options: the next token is the file (may start with '-')
                 if i + 1 >= args.len() {
-                    usage();
+                    usage_err("`--` must be followed by a file");
                 }
                 file = Some(PathBuf::from(&args[i + 1]));
                 prog = args[i + 2..].to_vec();
@@ -96,8 +105,7 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
                     }
                     Ok(PermFlag::Not) => {
                         if a.starts_with('-') {
-                            eprintln!("error: unknown option '{a}'");
-                            usage();
+                            usage_err(&format!("unknown option '{a}'"));
                         }
                         file = Some(PathBuf::from(a));
                         prog = args[i + 1..].to_vec();
@@ -109,7 +117,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
         }
         i += 1;
     }
-    let Some(file) = file else { usage() };
+    let Some(file) = file else {
+        usage_err("no file given");
+    };
     (f, file, prog)
 }
 

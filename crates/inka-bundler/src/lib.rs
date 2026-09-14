@@ -85,7 +85,9 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         // than split into sibling files the artifact would not carry.
         code_splitting: Some(CodeSplittingMode::Bool(false)),
         minify: opts.minify.then_some(RawMinifyOptions::Bool(true)),
-        sourcemap: opts.sourcemap.then_some(SourceMapType::File),
+        // Inline (data-URL) maps keep the artifact self-contained: the caller
+        // only carries `chunk.code`, so a `File` map would be silently dropped.
+        sourcemap: opts.sourcemap.then_some(SourceMapType::Inline),
         ..Default::default()
     };
 
@@ -456,6 +458,26 @@ mod tests {
         assert!(
             !b.code.contains("./lazy"),
             "expected no sibling chunk import:\n{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn sourcemap_is_inline() {
+        let cwd = scratch();
+        mk(&cwd, "entry.js", "console.log(\"map-me\");\n");
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: true,
+        };
+        let b = bundle(opts).unwrap();
+        assert!(
+            b.code.contains("sourceMappingURL=data:"),
+            "expected an inline data-URL source map:\n{}",
             b.code
         );
         let _ = std::fs::remove_dir_all(&cwd);

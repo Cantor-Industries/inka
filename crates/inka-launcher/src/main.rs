@@ -108,18 +108,23 @@ fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         if rest.len() < 16 {
             return Err("malformed archive entry header".into());
         }
-        let path_len = u64::from_le_bytes(rest[0..8].try_into().unwrap()) as usize;
-        let data_len = u64::from_le_bytes(rest[8..16].try_into().unwrap()) as usize;
+        let path_len = usize::try_from(u64::from_le_bytes(rest[0..8].try_into().unwrap()))
+            .map_err(|_| "archive entry path length out of range".to_string())?;
+        let data_len = usize::try_from(u64::from_le_bytes(rest[8..16].try_into().unwrap()))
+            .map_err(|_| "archive entry data length out of range".to_string())?;
         rest = &rest[16..];
-        if path_len == 0 || path_len + data_len > rest.len() {
+        let end = path_len
+            .checked_add(data_len)
+            .ok_or_else(|| "archive entry lengths overflow".to_string())?;
+        if path_len == 0 || end > rest.len() {
             return Err("malformed archive entry lengths".into());
         }
         let path_bytes = &rest[..path_len];
         let path = std::str::from_utf8(path_bytes)
             .map_err(|_| "archive entry path is not valid UTF-8".to_string())?;
         validate_rel_path(path)?;
-        let data = rest[path_len..path_len + data_len].to_vec();
-        rest = &rest[path_len + data_len..];
+        let data = rest[path_len..end].to_vec();
+        rest = &rest[end..];
         files.push((path.to_string(), data));
     }
     Ok(files)
@@ -548,4 +553,46 @@ fn main() {
         }
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        v.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        v.extend_from_slice(path.as_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    #[test]
+    fn archive_roundtrip() {
+        let mut blob = entry("main.js", b"hi");
+        blob.extend_from_slice(&entry("node_modules/x/index.js", b"x"));
+        let files = parse_archive(&blob).unwrap();
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0], ("main.js".to_string(), b"hi".to_vec()));
+        assert_eq!(
+            files[1],
+            ("node_modules/x/index.js".to_string(), b"x".to_vec())
+        );
+    }
+
+    #[test]
+    fn archive_overflow_header_is_rejected() {
+        // path_len = u64::MAX, data_len = 1: `path_len + data_len` must not wrap.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&u64::MAX.to_le_bytes());
+        blob.extend_from_slice(&1u64.to_le_bytes());
+        assert!(parse_archive(&blob).is_err());
+    }
+
+    #[test]
+    fn archive_rejects_parent_dir() {
+        assert!(parse_archive(&entry("../evil", b"x")).is_err());
+        assert!(parse_archive(&entry("/abs", b"x")).is_err());
+    }
 }
