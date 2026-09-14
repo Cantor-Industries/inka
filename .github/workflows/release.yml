@@ -103,9 +103,15 @@ jobs:
           # Engine asset (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$RUNTIME.so"
 
-          # The bootstrap script and the curated release notes.
+          # The bootstrap script and the curated release notes. The notes carry
+          # {{REL}}/{{RUNTIME}} placeholders (substituted here) and a leading
+          # maintainer comment block that is stripped from the published body.
+          # Both values are validated to [0-9A-Za-z.+~-] (version.sh), so they
+          # are safe as sed replacement text.
           cp install.sh "$STAGE/install.sh"
-          cp RELEASE_NOTES.md "$STAGE/RELEASE_NOTES.md"
+          sed -e "s/{{REL}}/$REL/g" -e "s/{{RUNTIME}}/$RUNTIME/g" \
+            RELEASE_NOTES.md \
+            | sed '1,/^-->$/d' > "$STAGE/RELEASE_NOTES.md"
 
           # sha256 sidecars (bare hex, as the installer/update expect).
           for f in "$TC" "libinka_runtime-$RUNTIME.so"; do
