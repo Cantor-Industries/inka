@@ -8,7 +8,7 @@ inka build [source] [-s|--source <file>] [-o|--output <file>]
            [--runtime <spec>] [--tested-against <ver>]
            [-A|--allow-all] [-R|-W|-N|-E|-S[=list]]
            [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]]
-           [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]
+           [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir]
 ```
 
 ## Defaults
@@ -28,12 +28,14 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
 
 - `--minify` — minify the bundle.
 - `--sourcemap` — embed an inline source map.
-- `--external <pkg>` — leave a package **unbundled** but embed its files from
-  `node_modules` (repeatable). Use it for native `.node` addons and packages that
-  cannot be statically bundled. The package's transitive dependency closure is
-  embedded as well (hoisted and symlinked isolated layouts included).
+- `--external <pkg>` (or `--external=<pkg>`) — leave a package **unbundled** but
+  embed its files from `node_modules` (repeatable). Use it for native `.node`
+  addons and packages that cannot be statically bundled. The package's
+  transitive dependency closure is embedded as well (hoisted and symlinked
+  isolated layouts included).
 - `--embed-dir` — also embed the whole current-directory tree (minus `.git`,
-  `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files.
+  `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files. Every
+  dot-prefixed file/dir is skipped, and the ignore names apply at any depth.
 
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
@@ -44,11 +46,18 @@ needs no `node_modules` or Deno cache at run time.
 embeds it. It tells the runtime what the artifact needs and may do:
 
 ```
-runtime=inka_runtime>=0.266.2     # minimum engine floor
-tested-against=0.266.2            # optional cap: never auto-run on something newer
-module=main.js                    # entry name (always derived from the build)
-allow-read=./data,/etc            # permissions
+# runtime floor; also >, ==, or a bare exact version
+runtime=inka_runtime>=0.266.2
+# optional cap: never auto-run on something newer
+tested-against=0.266.2
+# entry name (always derived from the build)
+module=main.js
+# permissions
+allow-read=./data,/etc
 ```
+
+The manifest is line-oriented; a `#` comment must be on its own line (trailing
+text after a value is not stripped).
 
 There is **no on-disk manifest input**: `module=` is always the packed entry, and
 the runtime requirement comes from `inka.runtime` (or `--runtime`) with a default
@@ -66,8 +75,11 @@ permissions:
 | `-A`, `--allow-all` | `permissions=all` (trimmed by any `--deny-*`) |
 | `-R`, `-W`, `-N`, `-E`, `-S[=list]` | grant read/write/net/env/sys (whole category, or scoped) |
 | `--allow-<cat>[=list]` | grant `read\|write\|net\|env\|run\|sys\|ffi` |
-| `--deny-<cat>[=list]` | deny within an allowed category |
-| `-P[=<set>]`, `--permission-set[=<set>]` | a named set from config (bare `-P` = `default`) |
+| `--deny-<cat>[=list]` | deny within an allowed category; **requires** an allow source (`-A` or `--allow-*`) |
+| `-P[=<set>]`, `--permission-set <set>` | a named set from config (bare `-P` = `default`) |
+
+A `--deny-*` with no allow source is an error (it would otherwise be silently
+ignored). The same applies to `inka run`.
 
 Without CLI flags, the build-intent source is chosen in this order:
 

@@ -97,6 +97,7 @@ takes ~10–15 minutes and wants a roomy disk:
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
+mkdir -p ~/.local/share/inka/runtime
 cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
 ```

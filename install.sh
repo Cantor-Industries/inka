@@ -257,10 +257,10 @@ CURRENT=""
 [ -f "$PREFIX/lib/inka/VERSION" ] && CURRENT=$(cat "$PREFIX/lib/inka/VERSION" 2>/dev/null || true)
 
 # ---- previous-generation reset ----------------------------------------------
-# 0.4.0 is a clean break: the resolver was retired and the runtime tuple moved.
-# Detect a pre-0.4.0 install (toolchain VERSION not 0.4.x, or the retired
-# resolver .so present) and remove the old toolchain + engine so the new
-# release installs fresh. Fresh machines and later 0.4.x upgrades skip this.
+# 0.5.0 is a clean break: the package store and vendoring were removed and the
+# runtime tuple moved. Detect a pre-0.5.0 install (toolchain VERSION not 0.5.x)
+# and remove the old toolchain + engine so the new release installs fresh.
+# Fresh machines and later 0.5.x upgrades skip this.
 engine_dir="${INKA_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/runtime}"
 reset=0
 case "$CURRENT" in

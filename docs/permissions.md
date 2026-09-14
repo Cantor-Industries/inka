@@ -30,7 +30,7 @@ deny-read=./data/secret.txt        # deny overrides allow / trims permissions=al
 | *(none)* or `permissions=none` | **deny everything** |
 | `permissions=all` | allow everything (trimmed by `deny-*`) |
 | `allow-<cat>=…` | grant that category only; unmentioned categories denied |
-| `deny-<cat>=…` | trims an allowed category; otherwise a no-op that warns |
+| `deny-<cat>=…` | trims an allowed category; at the DSL level a deny with no allow is a no-op that warns (the `inka` CLI rejects `--deny-*` with no allow source) |
 | `*` in a list | all of that category |
 
 Lists are comma-separated; a `deny-*` entry overrides an allow for the same
@@ -100,8 +100,13 @@ semantics) — not the project dir at build time. Copying an exe to another
 directory changes which paths a relative grant covers. This is convenient in
 dev but easy to misread for a portable artifact. To pin grants to the build
 layout, write **absolute paths** in your config; the trade-off is that absolute
-paths tie the artifact to a machine's path layout. `inka build` warns when it
-bakes a relative `read`/`write` grant.
+paths tie the artifact to a machine's path layout. `inka build` warns when a
+**config-sourced** set bakes a relative `read`/`write` grant; grants passed
+directly on the CLI (`--allow-read=./x`) are not checked.
+
+A permission item containing a raw newline (or a comma inside an array item) is
+rejected at build time, as is an invalid `inka.runtime`/`--runtime` version
+spec — malformed values never silently weaken the manifest.
 
 ## Hardening notes
 

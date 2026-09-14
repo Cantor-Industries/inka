@@ -25,7 +25,7 @@ only, no prompting. This table uses the runtime's categories (`read`, `write`,
 | `-R` `-W` `-N` `-E` `-S` | allow read/write/net/env/sys (whole category); `-R=./data` etc. scopes it |
 | `--allow-<cat>[=list]` | grant a category (no value = whole category) |
 | `--deny-<cat>[=list]` | deny within an allowed category |
-| `-P`, `-P=<name>`, `--permission-set[=<name>]` | apply a named permission set from the config (bare `-P` = the `default` set) |
+| `-P`, `-P=<name>`, `--permission-set <name>` | apply a named permission set from the config (bare `-P` = the `default` set) |
 | `--runtime <ver>` | use a specific installed runtime tuple instead of the newest |
 
 Examples:
@@ -44,6 +44,8 @@ Rules:
 
 - `-A` cannot combine with `-P` or `--allow-*` (deny-* may trim it); `-P`
   cannot combine with granular flags.
+- `--deny-*` requires an allow source (`-A` or `--allow-*`); a deny with no
+  allow is an error.
 - Only `-P` is honored for `run` — `compile.permissions` and auto-defaults are
   never applied (that's a *build* concept). If the config has
   `compile.permissions` or an `inka.permissions` marker, `run` prints a hint
@@ -60,6 +62,10 @@ The entry resolves like a build: a file under the current directory is rooted at
 the current directory; an **outside-cwd file** is rooted at its nearest ancestor
 project (a `package.json` or `deno.json`) or its own directory otherwise.
 Relative imports stay bounded by that root.
+
+When the current directory has no `node_modules` but an ancestor workspace root
+does (a monorepo with hoisted dependencies), `run` roots at that ancestor so
+imports resolve as they do in `inka build`.
 
 ## See also
 

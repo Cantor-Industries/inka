@@ -2,8 +2,8 @@
 
 **Build one-file JavaScript/TypeScript executables that run on a shared, tuple-versioned Deno runtime.**
 
-- **Tiny artifacts** — a bundled module + a ~5 MB launcher, not a ~100 MB engine in every binary.
-- **Shared runtime** — the engine is installed once per machine; inka executables load it at run time.
+- **Tiny artifacts** — a bundled module + a ~380 KB launcher, not a ~100 MB engine in every binary.
+- **Shared runtime** — the engine is installed once per user; inka executables load it at run time.
 - **Offline builds** — `inka build` resolves and bundles imports (import maps, `npm:`, `jsr:`, `node_modules`) into one self-contained module.
 
 The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment](#acknowledgments--deno).
@@ -30,7 +30,8 @@ inka doctor
 ```
 
 `doctor` shows your installed runtimes plus project status (`package.json`/
-`deno.json`, `node_modules`, `DENO_DIR`, launcher). If it's clean, you're ready.
+`deno.json`/`deno.jsonc`, `node_modules`, `DENO_DIR`, bundling capability,
+launcher). If it's clean, you're ready.
 
 > Newer runtime versions are fine — inka rolls forward to the newest installed
 > tuple that satisfies each executable's manifest. Keep current with `inka
@@ -50,6 +51,7 @@ The **runtime** is the heavy part (a Deno/V8 build, ~10–15 min on a roomy disk
 
 ```sh
 CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
+mkdir -p ~/.local/share/inka/runtime
 cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
 ```

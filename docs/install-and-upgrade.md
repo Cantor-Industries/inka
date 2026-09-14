@@ -40,10 +40,15 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 | `--version <tag>` | pin the release (assets fetched from that tag) |
 | `--from <dir-or-url>` | release base override (mirror / local staging) |
 | `--prefix <dir>` | toolchain prefix (default `$HOME/.local`) |
+| `-y`, `--yes` | non-interactive (accepted for compatibility) |
 | `--no-modify-path` | do not edit shell rc files |
 | `--no-engine` | skip the runtime |
 | `--no-runtime` | skip the runtime `.so` |
+| `--force` | reinstall the toolchain even if current |
 | `--uninstall` | remove the toolchain (and engine) |
+
+Environment overrides: `INKA_REPO` (default `Cantor-Industries/inka`),
+`INKA_PREFIX` (default `$HOME/.local`), and `INKA_RELEASE_BASE`.
 
 To pin **both** the script and the assets, fetch the script from the tag rather
 than `latest`:

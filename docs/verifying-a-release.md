@@ -14,7 +14,7 @@ A GitHub Release exists for the tag (`v0.5.0`, …) with these assets:
 
 `versions.json` records the release, a `toolchain` block (version/target/archive/
 sha256), the `runtime` tuple + its `deno_runtime` base, and the runtime `sha256`
-— `inka doctor` prints the installed identities, which should match.
+— cross-check these against the published assets.
 
 ## 2. The release download base
 

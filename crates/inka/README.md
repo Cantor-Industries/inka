@@ -1,7 +1,7 @@
 # inka (CLI)
 
 The inka command-line toolchain: bundles a JS/TS project into a single-file
-executable (launcher + bundle + manifest) that loads a shared per-machine Deno
+executable (launcher + bundle + manifest) that loads a shared per-user Deno
 runtime tuple, and manages that runtime.
 
 See the [repository README](../../README.md) for the full architecture and
@@ -12,9 +12,12 @@ See the [repository README](../../README.md) for the full architecture and
 - `inka build` — bundle a `.ts`/`.js` entry (import maps + `npm:`/`jsr:` +
   `node_modules`) into one self-contained module and pack it onto
   `inka-launcher`. `--minify`, `--sourcemap`, `--external <pkg>`, and
-  `--embed-dir` control the bundle. Permission lines are baked only from
-  explicit build-intent sources (`-P <set>`, `deno.json compile.permissions`, an
-  `inka.permissions` marker); otherwise the artifact is deny-by-default.
+  `--embed-dir` control the bundle. Permission lines bake from explicit
+  build-intent sources, in precedence order: CLI grant flags
+  (`-A`/`--allow-*`, which override config), `deno.json compile.permissions`,
+  or an `inka.permissions` marker (a set name, `"all"`, or an inline category
+  map — usable in `package.json`). With no source the artifact is
+  deny-by-default and `build` warns.
 - `inka run` — execute a `.ts`/`.js` file directly through the installed
   runtime (deno-run-style permission flags, `-A`/`-P`/granular `--allow-*`),
   resolving import maps, `npm:` (node_modules), and `jsr:` (Deno cache, offline).

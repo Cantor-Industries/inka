@@ -1,5 +1,9 @@
 # Phase 2 attempt — vendored built-in packages, offline npm/jsr, code caches
 
+> **HISTORICAL / SUPERSEDED — do not follow.** This is a retrospective of
+> abandoned Phase-2 experiments (store/vendoring/resolver). Current behavior is
+> in `README.md`, `docs/`, and `plan.md`.
+
 Status: **historical.** The repo on `master` has moved far beyond the reset
 point (`8c467cc`) this file was written against; the architecture described in
 §1–§9 was abandoned and the work has since landed in a different form (see the

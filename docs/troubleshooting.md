@@ -11,13 +11,17 @@ Built artifacts (launcher):
 | Code | Meaning |
 |---|---|
 | `2` | not an inka artifact / corrupt trailer |
-| `3` | no compatible runtime installed for the manifest |
-| `4` | installed runtime is too old for the ABI the artifact needs |
+| `3` | no compatible runtime installed, or an unparseable manifest version constraint |
+| `4` | installed runtime is too old for the ABI, is missing a required symbol, or reports a version that contradicts its filename |
 | other | the program's own exit code (propagated) |
 
 `inka run` uses `2` for bad flags/usage, `1` for load failures, and `4` for a
-runtime missing `inka_runtime_create` / `inka_runtime_run_module_perm` /
-`inka_runtime_run_module_dir`.
+runtime missing `inka_runtime_create` / `inka_runtime_run_module_dir` (or whose
+reported version does not match its filename). `inka build` also exits `2` on
+usage errors.
+
+Runtime selection searches `$INKA_RUNTIME_HOME` and the per-user XDG runtime
+dir; there is no per-invocation runtime override.
 
 ## Common problems
 

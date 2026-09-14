@@ -75,9 +75,12 @@ inka run --allow-sys --allow-ffi app.ts   # or bake the grants at build time
 
 ## Declaring dependencies
 
-inka reads `package.json` (`dependencies`) and `deno.json` (`imports`) only for
-the **permission/runtime manifest** — it does not install anything. Declare and
-install dependencies with your package manager as usual:
+inka does **not** read `package.json` `dependencies` or `deno.json` `imports`
+for the manifest — the bundler/resolver consume those to build the module graph.
+For the **permission/runtime manifest** it reads only the permission config
+(top-level `permissions`, `deno.json` `compile.permissions`, and the `inka`
+block). It never installs anything. Declare and install dependencies with your
+package manager as usual:
 
 ```sh
 npm install zod

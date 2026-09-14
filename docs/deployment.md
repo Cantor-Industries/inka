@@ -39,24 +39,26 @@ Each `v*` tag publishes:
 
 `versions.json` records the release, the toolchain block (version/target/archive/
 sha256), the runtime tuple and its base `deno_runtime`, and the runtime `sha256`.
-`inka doctor` prints the installed identities.
+`inka doctor` prints the runtime dirs/versions and project status (it does not
+print a release identity).
 
 ## Release CI (tags → GitHub Release assets)
 
 `.github/workflows/release.yml` runs on a self-hosted runner whenever a `v*`
-tag is pushed:
+tag is pushed. It is split so that only the publish step has `contents: write`:
 
-1. **Build** the toolchain (`inka --features bundle`, `inka-launcher`) and the
-   runtime `.so`. The tuple version comes from
-   `crates/inka-runtime/runtime-version`.
-2. **Stage + package**: the toolchain tarball, runtime `.so`, `install.sh`,
-   `versions.json`, and `.sha256` sidecars.
-3. **Smoke** the staged release in a throwaway prefix by running
-   `install.sh --from <stage>` and then doctor, a simple run + build, permission
-   enforcement, an `--external` artifact, an import-map→jsr artifact (offline at
-   run time), and the runtime matrix. Any failure aborts before publishing.
-4. **Publish** the assets to the GitHub Release for the tag (refuses to
-   re-publish a tag that already has a release).
+1. **`build`** (`contents: read`): builds the toolchain (`inka --features bundle`,
+   `inka-launcher`) and the runtime `.so` (tuple from
+   `crates/inka-runtime/runtime-version`), stages the toolchain tarball, runtime
+   `.so`, `install.sh`, `versions.json`, `.sha256` sidecars, and
+   `RELEASE_NOTES.md`, then smoke-tests the staged release in a throwaway prefix
+   (`install.sh --from <stage>`, doctor, run + build, permission enforcement, an
+   `--external` artifact, an import-map→jsr artifact offline, and the runtime
+   matrix). Any failure aborts before publishing.
+2. **`publish`** (`contents: write`): a separate job that runs only the release
+   action; it carries no package-manager code. The stage is handed off via
+   `/tmp/inka-release-<run_id>` on the single self-hosted runner. The release
+   body is `RELEASE_NOTES.md`.
 
 Runner setup: register a self-hosted runner (label `self-hosted`) and give its
 environment `CARGO_HOME` and `CARGO_TARGET_DIR` pointing at a roomy disk (the
