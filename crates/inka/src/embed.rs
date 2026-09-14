@@ -70,6 +70,9 @@ pub fn collect_directory(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec
 /// (`node_modules/<pkg>/node_modules/<name>`) so nearest-wins still holds.
 #[cfg(feature = "bundle")]
 pub fn collect_package(cwd: &Path, pkg: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
+    if !valid_package_name(pkg) {
+        return Err(format!("invalid external package name '{pkg}'"));
+    }
     let project_nm = cwd.join("node_modules");
     let root = project_nm.join(pkg);
     if !root.is_dir() {
@@ -78,8 +81,15 @@ pub fn collect_package(cwd: &Path, pkg: &str) -> Result<Vec<(String, Vec<u8>)>, 
             root.display()
         ));
     }
-    let project_nm = fs::canonicalize(&project_nm).unwrap_or(project_nm);
+    // Confine every walked realpath to the project tree (workspace symlinks and
+    // isolated stores stay inside it; a malicious dep cannot pull in /etc).
+    let tree_real = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     let root_real = fs::canonicalize(&root).unwrap_or(root);
+    if !root_real.starts_with(&tree_real) {
+        return Err(format!(
+            "external package '{pkg}' resolves outside the project tree"
+        ));
+    }
 
     let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
     let mut name_to_folder: HashMap<String, PathBuf> = HashMap::new();
@@ -93,9 +103,9 @@ pub fn collect_package(cwd: &Path, pkg: &str) -> Result<Vec<(String, Vec<u8>)>, 
         if !visited.insert((folder.clone(), prefix.clone())) {
             continue;
         }
-        walk_package(&folder, Path::new(&prefix), &mut files)?;
+        walk_package(&folder, Path::new(&prefix), &mut files, &tree_real)?;
         for dep in package_dep_names(&folder) {
-            let Some(dep_folder) = resolve_dep(&project_nm, &folder, &dep) else {
+            let Some(dep_folder) = resolve_dep(&tree_real, &folder, &dep) else {
                 continue;
             };
             let dep_real = fs::canonicalize(&dep_folder).unwrap_or(dep_folder);
@@ -114,8 +124,35 @@ pub fn collect_package(cwd: &Path, pkg: &str) -> Result<Vec<(String, Vec<u8>)>, 
     Ok(files.into_iter().collect())
 }
 
+/// A valid npm package name: `name` or `@scope/name`, with no path separators,
+/// no `.`/`..`, and no backslash. Guards `node_modules/<name>` joins against
+/// traversal via an attacker-controlled `dependencies` key or `--external`.
+#[cfg(feature = "bundle")]
+fn valid_package_name(name: &str) -> bool {
+    if name.is_empty() || name == "." || name == ".." || name.contains('\\') || name.contains('\0')
+    {
+        return false;
+    }
+    match name.strip_prefix('@') {
+        Some(rest) => match rest.split_once('/') {
+            Some((scope, pkg)) => {
+                !scope.is_empty()
+                    && !pkg.is_empty()
+                    && !pkg.contains('/')
+                    && scope != "."
+                    && scope != ".."
+                    && pkg != "."
+                    && pkg != ".."
+            }
+            None => false,
+        },
+        None => !name.contains('/'),
+    }
+}
+
 /// Runtime dependency names declared by a package (`dependencies`,
-/// `optionalDependencies`, `peerDependencies`), in a stable order.
+/// `optionalDependencies`, `peerDependencies`), in a stable order. Names that
+/// fail `valid_package_name` are skipped.
 #[cfg(feature = "bundle")]
 fn package_dep_names(folder: &Path) -> Vec<String> {
     let Ok(text) = fs::read_to_string(folder.join("package.json")) else {
@@ -128,7 +165,7 @@ fn package_dep_names(folder: &Path) -> Vec<String> {
     for key in ["dependencies", "optionalDependencies", "peerDependencies"] {
         if let Some(obj) = value.get(key).and_then(|v| v.as_object()) {
             for name in obj.keys() {
-                if !names.contains(name) {
+                if valid_package_name(name) && !names.contains(name) {
                     names.push(name.clone());
                 }
             }
@@ -138,10 +175,10 @@ fn package_dep_names(folder: &Path) -> Vec<String> {
 }
 
 /// Node-style nearest-`node_modules/<name>` lookup from `referrer`'s realpath,
-/// climbing to the project root (`project_nm`'s parent) and no further.
+/// climbing to the project root (`tree`) and no further. A candidate whose
+/// realpath escapes the project tree is rejected (symlinked dep escape).
 #[cfg(feature = "bundle")]
-fn resolve_dep(project_nm: &Path, referrer: &Path, name: &str) -> Option<PathBuf> {
-    let tree = project_nm.parent()?;
+fn resolve_dep(tree: &Path, referrer: &Path, name: &str) -> Option<PathBuf> {
     let mut dir = referrer.to_path_buf();
     loop {
         if !dir.starts_with(tree) {
@@ -149,7 +186,8 @@ fn resolve_dep(project_nm: &Path, referrer: &Path, name: &str) -> Option<PathBuf
         }
         let candidate = dir.join("node_modules").join(name);
         if candidate.join("package.json").is_file() {
-            return Some(candidate);
+            let real = fs::canonicalize(&candidate).ok()?;
+            return real.starts_with(tree).then_some(real);
         }
         if dir == tree {
             return None;
@@ -184,14 +222,16 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
 
 /// Walk a package directory, mapping each file under `prefix`. A nested
 /// `node_modules` keeps its `node_modules/<pkg>/…` layout. Symlinks are
-/// followed (pnpm/yarn isolated stores), with canonical-path cycle detection.
+/// followed (pnpm/yarn isolated stores) only when their realpath stays under
+/// `allowed`, with canonical-path cycle detection.
 #[cfg(feature = "bundle")]
 fn walk_package(
     dir: &Path,
     prefix: &Path,
     files: &mut BTreeMap<String, Vec<u8>>,
+    allowed: &Path,
 ) -> Result<(), String> {
-    walk_package_inner(dir, prefix, files, &mut HashSet::new())
+    walk_package_inner(dir, prefix, files, &mut HashSet::new(), allowed)
 }
 
 #[cfg(feature = "bundle")]
@@ -200,9 +240,10 @@ fn walk_package_inner(
     prefix: &Path,
     files: &mut BTreeMap<String, Vec<u8>>,
     visited: &mut HashSet<PathBuf>,
+    allowed: &Path,
 ) -> Result<(), String> {
     let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    if !visited.insert(canon) {
+    if !canon.starts_with(allowed) || !visited.insert(canon) {
         return Ok(());
     }
     let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
@@ -212,11 +253,22 @@ fn walk_package_inner(
             continue;
         }
         let path = ent.path();
-        // `metadata` follows symlinks so isolated-store entries are included.
+        // `metadata` follows symlinks so isolated-store entries are included;
+        // `canonicalize` then keeps them inside the project tree.
         let md = fs::metadata(&path).map_err(|e| e.to_string())?;
         if md.is_dir() {
-            walk_package_inner(&path, &prefix.join(&name), files, visited)?;
+            if let Ok(real) = fs::canonicalize(&path) {
+                if !real.starts_with(allowed) {
+                    continue;
+                }
+            }
+            walk_package_inner(&path, &prefix.join(&name), files, visited, allowed)?;
         } else if md.is_file() {
+            if let Ok(real) = fs::canonicalize(&path) {
+                if !real.starts_with(allowed) {
+                    continue;
+                }
+            }
             if let Ok(bytes) = fs::read(&path) {
                 files.insert(normalize_rel(&prefix.join(&name)), bytes);
             }
@@ -284,6 +336,80 @@ mod tests {
             "{rels:?}"
         );
         let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn valid_package_name_cases() {
+        for ok in ["ms", "debug", "@scope/pkg", "@parcel/watcher"] {
+            assert!(valid_package_name(ok), "{ok} should be valid");
+        }
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "@scope",
+            "@scope/",
+            "@scope/../x",
+            "a\\b",
+            "@",
+        ] {
+            assert!(!valid_package_name(bad), "{bad} should be invalid");
+        }
+    }
+
+    #[test]
+    fn collect_package_rejects_bad_external_name() {
+        let cwd = scratch();
+        mk(&cwd, "node_modules/pkg/package.json", r#"{"name":"pkg"}"#);
+        assert!(collect_package(&cwd, "../etc").is_err());
+        assert!(collect_package(&cwd, "a/b").is_err());
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_package_skips_out_of_tree_symlinks() {
+        let cwd = scratch();
+        let outside = scratch();
+        // An out-of-tree package that a malicious dependency name points at.
+        mk(
+            &outside,
+            "evil/package.json",
+            r#"{"name":"evil","main":"index.js"}"#,
+        );
+        mk(&outside, "evil/index.js", "LEAK\n");
+        // A package whose dependency resolves, via symlink, outside the tree.
+        mk(
+            &cwd,
+            "node_modules/pkg/package.json",
+            r#"{"name":"pkg","main":"index.js","dependencies":{"evil":"1.0.0"}}"#,
+        );
+        mk(&cwd, "node_modules/pkg/index.js", "module.exports = 1;\n");
+        std::os::unix::fs::symlink(outside.join("evil"), cwd.join("node_modules/evil")).unwrap();
+        // A symlinked file inside the package escaping the tree.
+        mk(&outside, "secret.js", "SECRET\n");
+        std::os::unix::fs::symlink(
+            outside.join("secret.js"),
+            cwd.join("node_modules/pkg/leak.js"),
+        )
+        .unwrap();
+
+        let files = collect_package(&cwd, "pkg").unwrap();
+        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        assert!(
+            rels.contains(&"node_modules/pkg/index.js".to_string()),
+            "{rels:?}"
+        );
+        assert!(
+            !rels.iter().any(|r| r.contains("evil")),
+            "out-of-tree dep embedded: {rels:?}"
+        );
+        assert!(
+            !rels.contains(&"node_modules/pkg/leak.js".to_string()),
+            "out-of-tree file embedded: {rels:?}"
+        );
+        let _ = fs::remove_dir_all(&cwd);
+        let _ = fs::remove_dir_all(&outside);
     }
 
     #[test]
