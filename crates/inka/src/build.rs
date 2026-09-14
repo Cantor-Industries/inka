@@ -512,7 +512,7 @@ fn resolve_manifest(
 ) -> Result<(Vec<u8>, Vec<String>), String> {
     // Must track `crates/inka-runtime/runtime-version`: an older runtime needs
     // the retired resolver, which this toolchain no longer installs.
-    const DEFAULT_RUNTIME: &str = ">=0.266.2";
+    const DEFAULT_RUNTIME: &str = ">=0.266.3";
 
     // CLI permission flags override any config-derived permission source.
     let (cli_dsl, cli_warns) = if perm_flags.selects() {
@@ -609,7 +609,7 @@ mod tests {
     fn default_runtime_floor_always_embedded() {
         let cwd = scratch();
         let m = manifest(&cwd, None, None, None);
-        assert!(m.contains("runtime=inka_runtime>=0.266.2"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.3"), "{m}");
         assert!(!m.contains("allow-"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
@@ -662,7 +662,7 @@ mod tests {
         let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("permissions=all"), "{m}");
-        assert!(m.contains("runtime=inka_runtime>=0.266.2"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.3"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
 

@@ -45,9 +45,9 @@ Recognized keys (line-oriented; `#` comments must be on their own line):
 
 ```
 # floor (also >, ==, or bare exact)
-runtime=inka_runtime>=0.266.2
+runtime=inka_runtime>=0.266.3
 # cap: do not roll forward past this
-tested-against=0.266.2
+tested-against=0.266.3
 # entry file inside the payload
 module=main.js
 # or allow-<cat>=… / deny-<cat>=…
