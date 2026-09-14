@@ -39,6 +39,19 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// A remote-supplied asset name must be a plain basename: non-empty, no
+/// directory separators, no `..`, no NUL. Guards `base.join(name)` and
+/// `target_dir.join(name)` against traversal from a hostile `versions.json`.
+fn valid_asset_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && Path::new(name).components().count() == 1
+}
+
 /// Removes a temp directory on drop, so failures don't leave junk behind.
 struct TempDir(PathBuf);
 impl Drop for TempDir {
@@ -195,6 +208,11 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     let (Some(latest), Some(archive)) = (latest, archive) else {
         return Ok(false);
     };
+    if !valid_asset_name(archive) {
+        return Err(format!(
+            "versions.json names an invalid toolchain archive '{archive}'"
+        ));
+    }
 
     if let (Some(i), Some(l)) = (parse_version(&installed), parse_version(latest)) {
         if i >= l {
@@ -241,11 +259,20 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     let tmp = TempDir(env::temp_dir().join(format!("inka-toolchain-{}", std::process::id())));
     let _ = fs::remove_dir_all(&tmp.0);
     fs::create_dir_all(&tmp.0).map_err(|e| format!("cannot create {}: {e}", tmp.0.display()))?;
-    let archive_path = tmp.0.join(archive);
+    // Fixed staging name: the remote name is only used for the fetch URL.
+    let archive_path = tmp.0.join("toolchain.tar.gz");
     fs::write(&archive_path, &bytes)
         .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
     let mut cmd = Command::new("tar");
-    cmd.args(["-xzf"]).arg(&archive_path).arg("-C").arg(&tmp.0);
+    cmd.args(["-xzf"])
+        .arg(&archive_path)
+        .args([
+            "--no-same-owner",
+            "--no-same-permissions",
+            "--no-absolute-filenames",
+            "-C",
+        ])
+        .arg(&tmp.0);
     run_ok(&mut cmd, "tar extract")?;
     replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
@@ -410,6 +437,9 @@ fn install_file(
     insecure: bool,
     label: &str,
 ) -> Result<(), String> {
+    if !valid_asset_name(name) {
+        return Err(format!("invalid asset name '{name}'"));
+    }
     let (bytes, sidecar_sha) = fetch_with_sidecar(base, name)
         .map_err(|e| format!("failed to fetch {name} from {base}: {e}"))?;
 
@@ -541,5 +571,18 @@ mod tests {
         // The base tuple (0.266.0) is behind an inka revision (0.266.1).
         let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
         assert!(a.runtime);
+    }
+
+    #[test]
+    fn valid_asset_name_cases() {
+        for ok in [
+            "libinka_runtime-0.266.2.so",
+            "inka-toolchain-0.5.3-x86_64-unknown-linux-gnu.tar.gz",
+        ] {
+            assert!(valid_asset_name(ok), "{ok} should be valid");
+        }
+        for bad in ["", ".", "..", "../evil", "/abs", "a/b", "a\\b", "dir/../x"] {
+            assert!(!valid_asset_name(bad), "{bad} should be invalid");
+        }
     }
 }

@@ -23,6 +23,12 @@ CRATE="$(sed -n 's/^version = "\([0-9][0-9.]*\)"$/\1/p' "$ROOT/crates/inka/Cargo
 # The runtime tuple version (deno_runtime base + inka revision), e.g. 0.266.4.
 RUNTIME="$(tr -d '[:space:]' < "$ROOT/crates/inka-runtime/runtime-version" 2>/dev/null || true)"
 [ -n "$RUNTIME" ] || { echo "error: could not read crates/inka-runtime/runtime-version" >&2; exit 1; }
+# This value is emitted into the release workflow; keep it to a dotted numeric
+# version so it can never carry shell metacharacters (the workflow no longer
+# `eval`s it, but the invariant is worth enforcing at the source).
+case "$RUNTIME" in
+    *[!0-9.]*) echo "error: runtime-version '$RUNTIME' is not a dotted numeric version" >&2; exit 1 ;;
+esac
 
 # deno_runtime is pinned exactly: deno_runtime = { version = "=0.266.0", ...
 DENO="$(sed -n 's/.*deno_runtime = { version = "=\([0-9][0-9.]*\)".*/\1/p' \

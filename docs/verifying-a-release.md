@@ -45,6 +45,14 @@ done
 jq -r .runtime_sha256 versions.json   # == sha256sum of libinka_runtime-*.so
 ```
 
+> **Integrity, not authenticity.** The sha256 sidecars and `versions.json`
+> hashes are fetched from the same release base as the assets, so they detect
+> corruption but not a compromised release/mirror that can serve both a payload
+> and a matching hash. Downloads are HTTPS with redirect protocols pinned, and
+> `inka update` refuses to install a runtime with no checksum unless
+> `--insecure` is passed. Publisher signing is a tracked follow-up; until it
+> lands, verify the release assets out-of-band if you need a trust anchor.
+
 ## 4. Clean install test
 
 Use a throwaway prefix and engine dir so the host's own install is never

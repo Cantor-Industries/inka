@@ -61,9 +61,17 @@ fetch() {
     case "$_base" in
         http://*|https://*)
             if have curl; then
-                curl --proto '=https' --tlsv1.2 -fsSL "$_base/$_file" -o "$_dest"
+                if [ "${_base#https://}" != "$_base" ]; then
+                    curl --proto '=https' --tlsv1.2 -fsSL "$_base/$_file" -o "$_dest"
+                else
+                    curl -fsSL "$_base/$_file" -o "$_dest"
+                fi
             elif have wget; then
-                wget -qO "$_dest" "$_base/$_file"
+                if [ "${_base#https://}" != "$_base" ]; then
+                    wget --https-only -qO "$_dest" "$_base/$_file"
+                else
+                    wget -qO "$_dest" "$_base/$_file"
+                fi
             else
                 die "need curl or wget to download over HTTP"
             fi
@@ -78,9 +86,17 @@ fetch_text() {
     case "$_base" in
         http://*|https://*)
             if have curl; then
-                curl --proto '=https' --tlsv1.2 -fsSL "$_base/$_file"
+                if [ "${_base#https://}" != "$_base" ]; then
+                    curl --proto '=https' --tlsv1.2 -fsSL "$_base/$_file"
+                else
+                    curl -fsSL "$_base/$_file"
+                fi
             elif have wget; then
-                wget -qO- "$_base/$_file"
+                if [ "${_base#https://}" != "$_base" ]; then
+                    wget --https-only -qO- "$_base/$_file"
+                else
+                    wget -qO- "$_base/$_file"
+                fi
             else
                 die "need curl or wget to download over HTTP"
             fi
@@ -197,9 +213,13 @@ if [ -n "$FROM" ]; then
     BASE="$FROM"
 elif [ -n "$VERSION" ]; then
     case "$VERSION" in
-        v*) ;;
-        [0-9]*) VERSION="v$VERSION" ;;
+        v*) _ver="${VERSION#v}" ;;
+        *) _ver="$VERSION" ;;
     esac
+    case "$_ver" in
+        ""|*[!0-9A-Za-z.+~-]*) die "invalid --version '$VERSION'" ;;
+    esac
+    VERSION="v$_ver"
     BASE="https://github.com/$REPO/releases/download/$VERSION"
 elif [ -n "${INKA_RELEASE_BASE:-}" ]; then
     BASE="$INKA_RELEASE_BASE"
@@ -211,7 +231,7 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/inka-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # ---- read versions.json -----------------------------------------------------
-fetch_text "$BASE" versions.json > "$TMP/versions.json" 2>/dev/null \
+fetch_text "$BASE" versions.json > "$TMP/versions.json" \
     || die "cannot read versions.json from $BASE"
 VERSIONS=$(cat "$TMP/versions.json")
 
@@ -225,6 +245,12 @@ if [ -z "$TC_ARCHIVE" ]; then
     TC_ARCHIVE="inka-toolchain-$REL-$TARGET.tar.gz"
 fi
 [ -n "$TC_VER" ] || TC_VER="$REL"
+
+# The archive name comes from (possibly untrusted) release metadata; require a
+# plain basename so `$TMP/$TC_ARCHIVE` cannot escape the staging dir.
+case "$TC_ARCHIVE" in
+    */*|*\\*|..) die "versions.json names an invalid toolchain archive '$TC_ARCHIVE'" ;;
+esac
 
 # ---- install toolchain ------------------------------------------------------
 CURRENT=""
@@ -258,7 +284,8 @@ else
     fetch "$BASE" "$TC_ARCHIVE.sha256" "$TMP/$TC_ARCHIVE.sha256"
     verify_sha "$TMP/$TC_ARCHIVE" "$TMP/$TC_ARCHIVE.sha256"
     mkdir -p "$PREFIX/lib/inka"
-    tar -xzf "$TMP/$TC_ARCHIVE" -C "$PREFIX/lib/inka"
+    tar -xzf "$TMP/$TC_ARCHIVE" --no-same-owner --no-same-permissions \
+        --no-absolute-filenames -C "$PREFIX/lib/inka"
     chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher"
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi

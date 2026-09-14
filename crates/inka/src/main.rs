@@ -192,6 +192,8 @@ fn http_get_optional(url: &str) -> Result<Option<Vec<u8>>, String> {
     let mut cmd = Command::new("curl");
     if url.starts_with("https://") {
         cmd.args(["--proto", "=https", "--tlsv1.2"]);
+        // Pin redirect protocols too: `--proto` alone does not guarantee it.
+        cmd.args(["--proto-redir", "=https", "--max-redirs", "5"]);
     }
     match cmd
         .args(["-fsSL", "--connect-timeout", "30", "--max-time", "900", url])
@@ -202,10 +204,11 @@ fn http_get_optional(url: &str) -> Result<Option<Vec<u8>>, String> {
         Ok(_) => {}                                                  // try wget
         Err(_) => {}                                                 // curl missing
     }
-    match Command::new("wget")
-        .args(["-qO-", "--timeout=30", url])
-        .output()
-    {
+    let mut wcmd = Command::new("wget");
+    if url.starts_with("https://") {
+        wcmd.arg("--https-only");
+    }
+    match wcmd.args(["-qO-", "--timeout=30", url]).output() {
         Ok(out) if out.status.success() => Ok(Some(out.stdout)),
         Ok(out) if out.status.code() == Some(8) => Ok(None), // server error
         Ok(out) => Err(format!(
@@ -234,6 +237,8 @@ fn curl_get(url: &str) -> Result<Vec<u8>, String> {
     // Pin TLS for https (avoid downgrade); allow plain http for local mirrors.
     if url.starts_with("https://") {
         cmd.args(["--proto", "=https", "--tlsv1.2"]);
+        // `--proto` does not necessarily cover redirects; pin those explicitly.
+        cmd.args(["--proto-redir", "=https", "--max-redirs", "5"]);
     }
     let out = cmd
         .args(["-fsSL", "--connect-timeout", "30", "--max-time", "900", url])
@@ -246,7 +251,11 @@ fn curl_get(url: &str) -> Result<Vec<u8>, String> {
 }
 
 fn wget_get(url: &str) -> Result<Vec<u8>, String> {
-    let out = Command::new("wget")
+    let mut cmd = Command::new("wget");
+    if url.starts_with("https://") {
+        cmd.arg("--https-only");
+    }
+    let out = cmd
         .args(["-qO-", "--timeout=30", url])
         .output()
         .map_err(|e| format!("wget not available ({e})"))?;
