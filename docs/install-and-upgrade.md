@@ -123,6 +123,11 @@ The base defaults to the GitHub latest-release URL and is overridable with
 
 ## Building from source
 
+Building needs a Rust toolchain and a C toolchain plus development headers (and,
+for the runtime, its C dependencies). See
+[Building from source](getting-started.md#5-building-from-source) for the
+per-distribution package list — and build on the oldest glibc you must support.
+
 ```sh
 git clone https://github.com/Cantor-Industries/inka
 cd inka

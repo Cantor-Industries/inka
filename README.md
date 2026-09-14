@@ -39,6 +39,45 @@ launcher). If it's clean, you're ready.
 
 ### Building from source (macOS and other platforms)
 
+**System prerequisites.** You need a Rust toolchain
+([rustup](https://rustup.rs)) plus a C toolchain and development headers.
+
+Debian / Ubuntu:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y build-essential libc6-dev pkg-config cmake \
+  python3 perl curl git ca-certificates
+# the runtime's C dependencies; add any the build reports as missing
+sudo apt-get install -y libffi-dev zlib1g-dev liblzma-dev libuv1-dev
+```
+
+Fedora / RHEL:
+
+```sh
+sudo dnf groupinstall -y "Development Tools"
+sudo dnf install -y glibc-devel pkgconf-pkg-config cmake python3 perl \
+  git curl libffi-devel zlib-devel xz-devel libuv-devel
+```
+
+Arch:
+
+```sh
+sudo pacman -S --needed base-devel cmake python perl git curl
+```
+
+macOS: `xcode-select --install` (Xcode Command Line Tools).
+
+`build-essential` pulls in `gcc`/`g++`/`make`/`libc6-dev`. The runtime links
+`libuv` and `libffi` (with `zlib`/`xz` fallbacks); `bzip2` is not needed (a
+pure-Rust backend is used). If a build error names another `-dev` package,
+install that one.
+
+> **glibc is forward-compatible, not backward.** A binary built on a newer
+> distribution needs that glibc (or newer) at run time — a release built on
+> Ubuntu 24.04 fails on 22.04 with `GLIBC_2.39 not found`. Build on the
+> **oldest** distribution you need to support, or in a matching container.
+
 The toolchain is a normal Rust workspace — clone the repo and build (bundling is
 behind a feature, so enable it):
 
