@@ -36,13 +36,13 @@ use node_resolver::analyze::{
 };
 use node_resolver::cache::NodeResolutionSys;
 use node_resolver::errors::{
-    PackageFolderResolveError, PackageFolderResolveErrorKind, PackageJsonLoadError,
-    PackageNotFoundError,
+    NodeResolveError, PackageFolderResolveError, PackageFolderResolveErrorKind,
+    PackageJsonLoadError, PackageNotFoundError,
 };
 use node_resolver::{
     DenoIsBuiltInNodeModuleChecker, InNpmPackageChecker, NodeConditionOptions, NodeResolutionKind,
     NodeResolverOptions, NpmPackageFolderResolver, PackageJsonResolver, PackageJsonResolverRc,
-    ResolutionMode, UrlOrPathRef,
+    ResolutionMode, UrlOrPath, UrlOrPathRef,
 };
 use sys_traits::impls::RealSys;
 
@@ -589,16 +589,44 @@ impl NodeServices {
     }
 
     fn resolve_with_node(&self, spec: &str, referrer: &Url) -> Result<Url, String> {
-        self.node_resolver
-            .resolve(
-                spec,
-                referrer,
-                ResolutionMode::Import,
-                NodeResolutionKind::Execution,
-            )
-            .map_err(|e| e.to_string())?
-            .into_url()
-            .map_err(|e| e.to_string())
+        match self.node_resolver.resolve(
+            spec,
+            referrer,
+            ResolutionMode::Import,
+            NodeResolutionKind::Execution,
+        ) {
+            Ok(res) => res.into_url().map_err(|e| e.to_string()),
+            Err(err) => {
+                if let Some(url) = self.recover_ts_specifier(&err) {
+                    Ok(url)
+                } else {
+                    Err(err.to_string())
+                }
+            }
+        }
+    }
+
+    /// `node_resolver` treats a `.js`/`.mjs`/`.cjs` specifier literally and
+    /// raises `ModuleNotFound` when only the `.ts` source exists (the TS
+    /// "write .js, ship .ts" convention). Recover by rewriting the failed
+    /// specifier to its TypeScript sibling when that file exists in-tree.
+    fn recover_ts_specifier(&self, err: &NodeResolveError) -> Option<Url> {
+        let spec = err.maybe_specifier()?;
+        let path = match spec.as_ref() {
+            UrlOrPath::Path(p) => p.to_path_buf(),
+            UrlOrPath::Url(u) => u.to_file_path().ok()?,
+        };
+        for cand in crate::ts_rewrite_candidates(&path) {
+            if !cand.is_file() {
+                continue;
+            }
+            let real = std::fs::canonicalize(&cand).ok()?;
+            if !self.roots.contains(&real) {
+                continue;
+            }
+            return Url::from_file_path(&real).ok();
+        }
+        None
     }
 
     /// Enforce an `npm:`/`jsr:` version pin against the installed package.

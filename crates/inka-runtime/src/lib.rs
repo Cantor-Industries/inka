@@ -163,7 +163,7 @@ impl ModuleLoader for PkgLoader {
             // Deno-style resolution: an extensionless specifier like "./math"
             // may point at math.ts / math.js / ...
             if !path.is_file() && path.extension().is_none() {
-                const EXTS: [&str; 6] = ["ts", "mts", "cts", "js", "mjs", "json"];
+                const EXTS: [&str; 8] = ["ts", "tsx", "mts", "cts", "js", "jsx", "mjs", "json"];
                 let mut found = None;
                 for ext in EXTS {
                     let cand = PathBuf::from(format!("{}.{ext}", path.to_string_lossy()));
@@ -174,6 +174,17 @@ impl ModuleLoader for PkgLoader {
                 }
                 if let Some(p) = found {
                     path = p;
+                }
+            }
+            // TS "write .js, ship .ts": a package `exports`/`main` (or any
+            // `.js`-suffixed specifier) may resolve to a `.ts` source file that
+            // doesn't have a `.js` sibling. Try the TypeScript equivalents.
+            if !path.is_file() {
+                for cand in ts_rewrite_candidates(&path) {
+                    if cand.is_file() {
+                        path = cand;
+                        break;
+                    }
                 }
             }
             // Realpath confinement: the lexical check above can be defeated by a
@@ -298,6 +309,25 @@ fn module_url_to_path(specifier: &ModuleSpecifier) -> Result<PathBuf, JsErrorBox
     specifier
         .to_file_path()
         .map_err(|_| JsErrorBox::type_error(format!("not a file URL module: {specifier}")))
+}
+
+/// TypeScript's "write `.js`, ship `.ts`" convention: a `.js`/`.jsx`/`.mjs`/
+/// `.cjs` specifier resolves to its TypeScript source sibling when the script
+/// file itself does not exist. Mirrors rolldown's default `extension_alias`
+/// table so `inka run` and `inka build` agree.
+pub(crate) fn ts_rewrite_candidates(path: &Path) -> Vec<PathBuf> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+    let rewrites: &[&str] = match ext.as_deref() {
+        Some("js") => &["ts", "tsx"],
+        Some("jsx") => &["tsx", "ts"],
+        Some("mjs") => &["mts"],
+        Some("cjs") => &["cts"],
+        _ => &[],
+    };
+    rewrites.iter().map(|r| path.with_extension(r)).collect()
 }
 
 /// Serve an `https:`/`http:` module from the Deno remote cache (offline). TS
@@ -960,6 +990,24 @@ mod tests {
         perms
             .check_specifier(&url, CheckSpecifierKind::Static)
             .is_ok()
+    }
+
+    #[test]
+    fn ts_rewrite_candidates_map_script_extensions() {
+        let exts = |p: &str| {
+            ts_rewrite_candidates(Path::new(p))
+                .into_iter()
+                .map(|c| c.extension().unwrap().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(exts("src/index.js"), vec!["ts", "tsx"]);
+        assert_eq!(exts("src/index.jsx"), vec!["tsx", "ts"]);
+        assert_eq!(exts("src/index.mjs"), vec!["mts"]);
+        assert_eq!(exts("src/index.cjs"), vec!["cts"]);
+        // Non-script extensions and extensionless paths are untouched.
+        assert!(ts_rewrite_candidates(Path::new("src/index.ts")).is_empty());
+        assert!(ts_rewrite_candidates(Path::new("src/index.json")).is_empty());
+        assert!(ts_rewrite_candidates(Path::new("src/index")).is_empty());
     }
 
     #[test]

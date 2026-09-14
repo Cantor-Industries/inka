@@ -236,6 +236,18 @@ else
     skip "monorepo build parity (no inka-launcher next to $INKA)"
 fi
 
+echo "== package entry .js -> .ts (exports rewrite) =="
+# A package whose `exports` points at a `.js` entry but whose real source is
+# `.ts` (the TS "write .js, ship .ts" convention). `inka run` must rewrite the
+# `.js` to the `.ts` source when loading it.
+mkdir -p node_modules/@scope/rewrite/src
+printf '%s\n' '{"name":"@scope/rewrite","version":"1.0.0","type":"module","exports":{".":"./src/index.js"}}' \
+    > node_modules/@scope/rewrite/package.json
+printf '%s\n' 'export const value = () => "rewrite-ok";' > node_modules/@scope/rewrite/src/index.ts
+run "package entry .js -> .ts" "rewrite rewrite-ok" p_rewrite.js \
+'import { value } from "@scope/rewrite";
+console.log("rewrite", value());'
+
 echo "== jsr / import map (offline Deno cache) =="
 mkdir -p jsrproj
 printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json
