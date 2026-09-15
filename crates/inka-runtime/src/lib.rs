@@ -23,7 +23,14 @@ use deno_runtime::transpile::maybe_transpile_source;
 use deno_runtime::worker::{MainWorker, WorkerOptions, WorkerServiceOptions};
 use deno_runtime::{FeatureChecker, WorkerLogLevel};
 
+use deno_config::workspace::{
+    WorkspaceDirectory, WorkspaceDiscoverOptions, WorkspaceDiscoverStart,
+};
 use deno_error::JsErrorBox;
+use deno_resolver::workspace::{
+    CreateResolverOptions, MappedResolution, ResolutionKind as WorkspaceResolutionKind,
+    WorkspaceResolver,
+};
 use sys_traits::impls::RealSys;
 
 /// Runtime tuple version, set by `build.rs` from `runtime-version`: the
@@ -39,7 +46,6 @@ mod runtime_snapshot {
 mod node_services;
 mod resolver;
 mod temp;
-mod tsconfig;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -65,10 +71,12 @@ struct PkgLoader {
     precompiled: bool,
     /// CJS/Node services used to serve an ESM facade for CommonJS modules.
     node_services: node_services::NodeServices,
-    /// Offline module-graph/import-map resolution (`inka run`).
+    /// Offline module-graph resolution (`inka run`): the cached `jsr:`/remote
+    /// module graph, fed by the workspace import map.
     resolver: Rc<resolver::GraphResolverState>,
-    /// Nearest `tsconfig.json`/`jsconfig.json` `baseUrl`/`paths` resolution.
-    tsconfig: tsconfig::Resolver,
+    /// Deno's workspace resolver: the authoritative import map +
+    /// package.json/workspace mapping (the same policy Deno applies).
+    workspace: Rc<deno_resolver::workspace::WorkspaceResolver<RealSys>>,
 }
 
 fn precompiled_flag() -> bool {
@@ -86,22 +94,29 @@ impl ModuleLoader for PkgLoader {
             && !specifier.starts_with("./")
             && !specifier.starts_with("../")
             && !specifier.starts_with('/');
-        // A `deno.json` import map may remap a bare specifier (to jsr:/npm:/https).
+        // Deno's workspace resolver maps a bare specifier through the
+        // `deno.json` import map, package.json `#imports`, and workspace
+        // members — the same policy Deno applies. `tsconfig`
+        // `baseUrl`/`paths` are intentionally NOT applied at run time (Deno
+        // resolves those for type-checking only).
         let mapped = if bare {
-            self.resolver.map_specifier(specifier, referrer)
+            url::Url::parse(referrer).ok().and_then(|referrer_url| {
+                match self.workspace.resolve(
+                    specifier,
+                    &referrer_url,
+                    WorkspaceResolutionKind::Execution,
+                ) {
+                    Ok(MappedResolution::Normal { specifier, .. })
+                    | Ok(MappedResolution::WorkspaceJsrPackage { specifier, .. }) => {
+                        Some(specifier)
+                    }
+                    _ => None,
+                }
+            })
         } else {
             None
         };
-        // A `tsconfig.json` `baseUrl`/`paths` alias (e.g. `src/util`). Import maps
-        // take precedence; tsconfig applies to otherwise-unmapped bare names.
-        if bare && mapped.is_none() {
-            if let Ok(referrer_url) = url::Url::parse(referrer) {
-                if let Some(u) = self.tsconfig.resolve(specifier, &referrer_url) {
-                    return Ok(u);
-                }
-            }
-        }
-        let spec = mapped.as_deref().unwrap_or(specifier);
+        let spec = mapped.as_ref().map(|u| u.as_str()).unwrap_or(specifier);
 
         if spec.starts_with("npm:") {
             return self
@@ -687,13 +702,42 @@ fn run_tree(
             root: Some(root.clone()),
         };
         let (node_services, ext_services) = node_services::NodeServices::new(roots);
-        let resolver_state = resolver::build(&root, &file).await;
+
+        // Deno's workspace resolver owns the import map and the
+        // package.json/workspace mapping. Discovery and construction are
+        // deterministic and offline.
+        let workspace_directory = WorkspaceDirectory::discover(
+            &RealSys,
+            WorkspaceDiscoverStart::Paths(std::slice::from_ref(&root)),
+            &WorkspaceDiscoverOptions {
+                // Read package.json too, so `workspaces` members (and their
+                // own `deno.json` import maps) are discovered.
+                discover_pkg_json: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("failed to discover workspace config: {e}"))?;
+        let workspace = WorkspaceResolver::from_workspace(
+            &workspace_directory.workspace,
+            RealSys,
+            CreateResolverOptions {
+                // inka resolves npm from the execution tree's `node_modules`
+                // (BYONM): don't map package.json deps to registry requests.
+                pkg_json_dep_resolution:
+                    deno_resolver::workspace::PackageJsonDepResolution::Disabled,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("invalid deno.json/import map: {e}"))?;
+        let import_map = workspace.maybe_import_map().cloned();
+
+        let resolver_state = resolver::build(&root, &file, import_map).await;
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root.clone(),
             precompiled: precompiled_flag(),
             node_services,
             resolver: Rc::new(resolver_state),
-            tsconfig: tsconfig::Resolver::new(root),
+            workspace: Rc::new(workspace),
         });
         run_module_async(&url, args, permissions, loader, ext_services).await
     })

@@ -1,9 +1,10 @@
 //! Offline resolution for the bundler.
 //!
 //! Builds a `deno_graph::ModuleGraph` over the entry using only the local Deno
-//! cache (`$DENO_DIR`): a `deno.json` import map maps bare specifiers, and
-//! `jsr:` (plus remote `https:`) modules are read from `$DENO_DIR/remote`.
-//! `npm:` is resolved later by rolldown against `node_modules`.
+//! cache (`$DENO_DIR`): the workspace import map (resolved by
+//! `deno_resolver`) maps bare specifiers, and `jsr:` (plus remote `https:`)
+//! modules are read from `$DENO_DIR/remote`. `npm:` is resolved later by
+//! rolldown against `node_modules`.
 //!
 //! The graph is reduced to `Send + Sync` lookup maps so it can live inside the
 //! rolldown plugin.
@@ -13,10 +14,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use deno_cache_dir::{GlobalHttpCache, HttpCache};
+use deno_config::workspace::{
+    WorkspaceDirectory, WorkspaceDiscoverOptions, WorkspaceDiscoverStart,
+};
 use deno_graph::source::{
     LoadFuture, LoadOptions, LoadResponse, Loader, ResolutionKind, Resolver as GraphResolver,
 };
 use deno_graph::{BuildOptions, GraphKind, ModuleGraph, ModuleSpecifier, Range, Resolution};
+use deno_resolver::workspace::{CreateResolverOptions, WorkspaceResolver};
 use sys_traits::impls::RealSys;
 use url::Url;
 
@@ -146,12 +151,7 @@ pub(crate) fn deno_dir() -> PathBuf {
 /// Build the resolver state for `entry` under `root`.
 pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
     let deno_dir = deno_dir();
-    let deno_json = ["deno.json", "deno.jsonc"]
-        .iter()
-        .map(|f| root.join(f))
-        .find(|p| p.is_file());
-
-    let import_map = deno_json.as_deref().and_then(|p| load_import_map(p).ok());
+    let import_map = workspace_import_map(root);
     let mut state = ResolverState {
         edges: HashMap::new(),
         jsr_redirects: HashMap::new(),
@@ -221,22 +221,25 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
     state
 }
 
-fn load_import_map(path: &Path) -> Result<import_map::ImportMap, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    // `deno.jsonc` allows comments/trailing commas; parse it as JSONC.
-    let value: serde_json::Value = jsonc_parser::parse_to_serde_value(&text, &Default::default())
-        .map_err(|e| e.to_string())?;
-    let mut map_value = serde_json::Map::new();
-    if let Some(v) = value.get("imports") {
-        map_value.insert("imports".to_string(), v.clone());
-    }
-    if let Some(v) = value.get("scopes") {
-        map_value.insert("scopes".to_string(), v.clone());
-    }
-    let base = Url::from_file_path(path).map_err(|_| "bad config path".to_string())?;
-    Ok(
-        import_map::parse_from_value(base, serde_json::Value::Object(map_value))
-            .map_err(|e| e.to_string())?
-            .import_map,
+/// The workspace import map (workspace root plus member `deno.json` import
+/// maps), resolved by Deno's resolver — the same map `inka run` uses, so build
+/// and run agree.
+fn workspace_import_map(root: &Path) -> Option<import_map::ImportMap> {
+    let root_buf = root.to_path_buf();
+    let workspace_directory = WorkspaceDirectory::discover(
+        &RealSys,
+        WorkspaceDiscoverStart::Paths(std::slice::from_ref(&root_buf)),
+        &WorkspaceDiscoverOptions {
+            discover_pkg_json: true,
+            ..Default::default()
+        },
     )
+    .ok()?;
+    let workspace = WorkspaceResolver::from_workspace(
+        &workspace_directory.workspace,
+        RealSys,
+        CreateResolverOptions::default(),
+    )
+    .ok()?;
+    workspace.maybe_import_map().cloned()
 }

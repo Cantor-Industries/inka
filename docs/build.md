@@ -37,6 +37,9 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
   `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files. Every
   dot-prefixed file/dir is skipped, and the ignore names apply at any depth.
 
+`npm:` version pins are **enforced**: if the version in `node_modules` does not
+satisfy an `npm:pkg@<req>` specifier, the build fails (mirroring `inka run`).
+
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
 

@@ -112,11 +112,11 @@ impl GraphResolver for ImportMapGraphResolver {
     }
 }
 
-/// A pre-built module graph plus import map, used for synchronous resolution at
-/// module-load time.
+/// A pre-built offline module graph, used for synchronous resolution at
+/// module-load time (following `jsr:` → `https:` redirects and serving cached
+/// sources).
 pub(crate) struct GraphResolverState {
     graph: ModuleGraph,
-    import_map: Option<import_map::ImportMap>,
     deno_dir: PathBuf,
 }
 
@@ -124,22 +124,12 @@ impl GraphResolverState {
     pub(crate) fn empty() -> Self {
         Self {
             graph: ModuleGraph::new(GraphKind::All),
-            import_map: None,
             deno_dir: deno_dir_path(),
         }
     }
 
     pub(crate) fn deno_dir(&self) -> &Path {
         &self.deno_dir
-    }
-
-    /// Apply the `deno.json` import map to a specifier (if one is configured).
-    pub(crate) fn map_specifier(&self, specifier: &str, referrer: &str) -> Option<String> {
-        let map = self.import_map.as_ref()?;
-        let referrer = Url::parse(referrer).ok()?;
-        map.resolve(specifier, &referrer)
-            .ok()
-            .map(|u| u.to_string())
     }
 
     /// Resolve a specifier against the graph, following `jsr:` → `https:`
@@ -186,28 +176,14 @@ pub(crate) fn validate_deno_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// Build the graph for `entry` under `root`. Returns an empty state when there
-/// is no `deno.json`/`deno.jsonc` (nothing to map) or on any error.
-pub(crate) async fn build(root: &Path, entry: &Path) -> GraphResolverState {
-    let deno_json = ["deno.json", "deno.jsonc"]
-        .iter()
-        .map(|f| root.join(f))
-        .find(|p| p.is_file());
-    let Some(deno_json) = deno_json else {
-        return GraphResolverState::empty();
-    };
-
-    let import_map = match load_import_map(&deno_json) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!(
-                "[inka] warning: ignoring import map from {}: {e}",
-                deno_json.display()
-            );
-            return GraphResolverState::empty();
-        }
-    };
-
+/// Build the offline module graph for `entry` under `root`, using the
+/// workspace import map (when present) to resolve bare/`jsr:` specifiers.
+/// Returns an empty state when the Deno cache location is unusable.
+pub(crate) async fn build(
+    root: &Path,
+    entry: &Path,
+    import_map: Option<import_map::ImportMap>,
+) -> GraphResolverState {
     let deno_dir = match validate_deno_dir() {
         Ok(d) => d,
         Err(_) => return GraphResolverState::empty(),
@@ -221,9 +197,7 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> GraphResolverState {
     let Ok(entry_url) = Url::from_file_path(entry) else {
         return GraphResolverState::empty();
     };
-    let resolver = ImportMapGraphResolver {
-        map: import_map.clone(),
-    };
+    let resolver = import_map.map(|map| ImportMapGraphResolver { map });
     let mut graph = ModuleGraph::new(GraphKind::All);
     graph
         .build(
@@ -232,35 +206,11 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> GraphResolverState {
             &loader,
             BuildOptions {
                 prefer_cached_jsr_versions: true,
-                resolver: Some(&resolver),
+                resolver: resolver.as_ref().map(|r| r as &dyn GraphResolver),
                 ..Default::default()
             },
         )
         .await;
 
-    GraphResolverState {
-        graph,
-        import_map: Some(import_map),
-        deno_dir,
-    }
-}
-
-fn load_import_map(path: &Path) -> Result<import_map::ImportMap, String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    // `deno.jsonc` allows comments/trailing commas; parse it as JSONC.
-    let value: serde_json::Value = jsonc_parser::parse_to_serde_value(&text, &Default::default())
-        .map_err(|e| e.to_string())?;
-    // Keep only the import-map keys; deno.json carries unrelated config too.
-    let mut map_value = serde_json::Map::new();
-    if let Some(v) = value.get("imports") {
-        map_value.insert("imports".to_string(), v.clone());
-    }
-    if let Some(v) = value.get("scopes") {
-        map_value.insert("scopes".to_string(), v.clone());
-    }
-    let base = Url::from_file_path(path).map_err(|_| "bad config path".to_string())?;
-    let map = import_map::parse_from_value(base, serde_json::Value::Object(map_value))
-        .map_err(|e| e.to_string())?
-        .import_map;
-    Ok(map)
+    GraphResolverState { graph, deno_dir }
 }

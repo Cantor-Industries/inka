@@ -177,20 +177,20 @@ const require = createRequire(import.meta.url);
 try { console.log("escape-loaded", require("evilpkg")); }
 catch (e) { console.log("escape-denied", e && e.constructor && e.constructor.name); }'
 
-echo "== workspace monorepo (tsconfig baseUrl/paths, #imports, workspace climb) =="
+echo "== workspace monorepo (import map, #imports, workspace climb) =="
 MONO="$SCRATCH/mono"
 mkdir -p "$MONO/packages/other/src" "$MONO/packages/app/src"
 printf '%s\n' '{"name":"mono","private":true,"workspaces":["packages/*"]}' > "$MONO/package.json"
 printf '%s\n' '{"name":"@scope/other","type":"module","exports":{".":"./src/index.ts"}}' \
     > "$MONO/packages/other/package.json"
-printf '%s\n' '{ "compilerOptions": { "baseUrl": "." } }' > "$MONO/packages/other/tsconfig.json"
 printf '%s\n' 'export const util = () => "mono-util";' > "$MONO/packages/other/src/util.ts"
-printf '%s\n' 'import { util } from "src/util";' \
+printf '%s\n' 'import { util } from "./util.ts";' \
     'export const hello = () => `hello+${util()}`;' > "$MONO/packages/other/src/index.ts"
 printf '%s\n' '{"name":"@scope/app","type":"module","bin":"src/index.ts","imports":{"#hash":"./src/hash.ts"},"dependencies":{"@scope/other":"workspace:*"}}' \
     > "$MONO/packages/app/package.json"
-printf '%s\n' '{ "compilerOptions": { "baseUrl": ".", "paths": { "@/*": ["src/*"] } } }' \
-    > "$MONO/packages/app/tsconfig.json"
+# Run-time aliases come from the deno.json import map (Deno semantics:
+# tsconfig baseUrl/paths are resolved for types only, not at run time).
+printf '%s\n' '{"imports":{"@/lib":"./src/lib.ts"}}' > "$MONO/packages/app/deno.json"
 printf '%s\n' 'export const viaHash = () => "mono-hash";' > "$MONO/packages/app/src/hash.ts"
 printf '%s\n' 'export const helper = () => "mono-helper";' > "$MONO/packages/app/src/lib.ts"
 printf '%s\n' 'import { hello } from "@scope/other";' \
@@ -235,6 +235,19 @@ if [ -x "$LAUNCHER" ]; then
 else
     skip "monorepo build parity (no inka-launcher next to $INKA)"
 fi
+
+echo "== tsconfig baseUrl/paths are not applied at run time (Deno semantics) =="
+NODENTS="$SCRATCH/nodents"
+mkdir -p "$NODENTS/src"
+printf '%s\n' '{ "compilerOptions": { "baseUrl": "." } }' > "$NODENTS/tsconfig.json"
+printf '%s\n' 'export const u = 1;' > "$NODENTS/src/util.ts"
+printf '%s\n' 'import { u } from "src/util";' 'console.log(u);' > "$NODENTS/main.ts"
+if out="$(cd "$NODENTS" && "$INKA" run -A main.ts 2>&1)"; then
+    echo "FAIL: tsconfig baseUrl import unexpectedly resolved at run time" >&2
+    printf '%s\n' "$out" >&2
+    exit 1
+fi
+echo "ok: tsconfig baseUrl/paths rejected at run time"
 
 echo "== package entry .js -> .ts (exports rewrite) =="
 # A package whose `exports` points at a `.js` entry but whose real source is

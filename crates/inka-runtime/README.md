@@ -38,12 +38,13 @@ absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 ## Resolution
 
 `resolver.rs` builds an offline `deno_graph::ModuleGraph` for the entry from
-`$DENO_DIR` (a `GlobalHttpCache` loader + an `import_map` resolver), then exposes
-synchronous lookups. `tsconfig.rs` resolves bare `baseUrl`/`paths` aliases
-(e.g. `src/util` under `"baseUrl": "."`, or `@/*`) from the importing file's
-nearest `tsconfig.json`/`jsconfig.json`, honoring `extends` and JSONC, and
-confines results to the execution tree. `node_services.rs` is the CJS/`require()`
-seam over Deno's `deno_node`/`node_resolver` machinery:
+`$DENO_DIR` (a `GlobalHttpCache` loader), fed by the workspace import map, then
+exposes synchronous lookups. Bare specifiers are mapped by Deno's
+`deno_resolver::workspace::WorkspaceResolver` (import map, package.json
+`#imports`, workspace members, and the filesystem's `node_modules`); `tsconfig`
+`baseUrl`/`paths` are resolved for types only, not at run time (Deno semantics).
+`node_services.rs` is the CJS/`require()` seam over Deno's
+`deno_node`/`node_resolver` machinery:
 
 - `require()` runs natively (CJS→CJS, Node builtins, nested deps, cycles),
 - ESM `import` of a CJS package is served as an ESM facade (default plus
@@ -81,7 +82,8 @@ Authors).
 ## Acknowledgments — Deno
 
 This crate embeds the Deno runtime: `deno_core`, `deno_runtime`, `deno_error`,
-`deno_semver`, `deno_graph`, `deno_cache_dir`, `import_map` (and `deno_ast` for
-build-time snapshot generation). Deno is the work of the Deno authors,
+`deno_semver`, `deno_graph`, `deno_cache_dir`, `deno_config`, `deno_resolver`,
+`import_map` (and `deno_ast` for build-time snapshot generation). Deno is the
+work of the Deno authors,
 Copyright (c) the Deno authors, distributed under the MIT license (portions
 Apache-2.0); see <https://github.com/denoland/deno>.

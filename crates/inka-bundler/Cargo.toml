@@ -8,12 +8,13 @@ publish = false
 [dependencies]
 anyhow = "1"
 deno_cache_dir = "=0.50.0"
+deno_config = "=0.108.0"
 deno_error = "=0.7.1"
 deno_graph = "=0.111.0"
+deno_resolver = "=0.89.0"
 deno_semver = "=0.10.1"
 futures = "0.3"
 import_map = "=0.25.0"
-jsonc-parser = { version = "=0.32.4", features = ["serde"] }
 rolldown = "=1.2.7"
 rolldown_common = "=1.2.7"
 rolldown_ecmascript = "=1.2.7"
