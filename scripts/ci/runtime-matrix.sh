@@ -406,10 +406,12 @@ else
     skip "verbatim-type cycle (no inka-launcher next to $INKA)"
 fi
 
-echo "== bundling TypeScript used at run time (lib files embedded) =="
+echo "== bundling TypeScript used at run time (package auto-embedded) =="
 # An app that runs TypeScript itself (language service / createProgram) needs
-# TypeScript's `lib.*.d.ts` next to the bundle at run time; without them the
-# compiler reports "Cannot find name 'Promise'/'Record'".
+# the compiler's `lib.*.d.ts` at run time. Inlining TypeScript cannot provide
+# them (`ts.sys` looks for the libs next to `typescript.js`, not the bundle), so
+# the bundler keeps `typescript` external and the build auto-embeds the package
+# from `node_modules` — with no `--external` flag.
 TSRUN="$SCRATCH/tsrun"
 mkdir -p "$TSRUN"
 printf '%s\n' 'import ts from "typescript";' \
@@ -418,18 +420,31 @@ printf '%s\n' 'import ts from "typescript";' \
     'const sf = ts.createSourceFile("x.ts", "const a: Record<string, number> = {};", ts.ScriptTarget.ESNext, true);' \
     'console.log("tsdefaultlib", existsSync(p), sf.statements.length > 0);' > "$TSRUN/entry.ts"
 if [ -x "$LAUNCHER" ]; then
-    (cd "$TSRUN" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A entry.ts -o "$TSRUN/app" >/dev/null 2>&1) || {
-        echo "FAIL: typescript-lib build" >&2; exit 1
+    # Build from the project root so the nearest-node_modules walk finds
+    # `$SCRATCH/node_modules/typescript` (as a real project would).
+    (cd "$SCRATCH" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A tsrun/entry.ts -o "$TSRUN/app" >/dev/null 2>&1) || {
+        echo "FAIL: typescript auto-embed build" >&2; exit 1
     }
     out="$("$TSRUN/app" 2>&1)" || {
-        echo "FAIL: typescript-lib artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+        echo "FAIL: typescript auto-embed artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
     }
     case "$out" in
-        *"tsdefaultlib true true"*) echo "ok: TypeScript default lib embedded (build parity)" ;;
-        *) echo "FAIL: typescript-lib output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+        *"tsdefaultlib true true"*) echo "ok: TypeScript package auto-embedded (build parity)" ;;
+        *) echo "FAIL: typescript auto-embed output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+    # Explicit `--external typescript` must stay equivalent.
+    (cd "$SCRATCH" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A --external typescript tsrun/entry.ts -o "$TSRUN/app-ext" >/dev/null 2>&1) || {
+        echo "FAIL: typescript --external build" >&2; exit 1
+    }
+    out="$("$TSRUN/app-ext" 2>&1)" || {
+        echo "FAIL: typescript --external artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"tsdefaultlib true true"*) echo "ok: TypeScript --external parity (build parity)" ;;
+        *) echo "FAIL: typescript --external output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
     esac
 else
-    skip "typescript default lib (no inka-launcher next to $INKA)"
+    skip "typescript auto-embed (no inka-launcher next to $INKA)"
 fi
 
 echo "== package entry .js -> .ts (exports rewrite) =="

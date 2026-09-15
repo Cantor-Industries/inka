@@ -35,7 +35,9 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
   asset-dependent packages). The package's transitive dependency closure is
   embedded as well (hoisted and symlinked isolated layouts included), and the
   lookup climbs to the workspace root, so a member can externalize a dependency
-  hoisted to `<workspace>/node_modules`.
+  hoisted to `<workspace>/node_modules`. `typescript` is externalized this way
+  automatically when the bundle imports it (see [TypeScript](#typescript)); no
+  flag is needed.
 - `--embed-dir` — also embed the whole current-directory tree (minus `.git`,
   `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files. Every
   dot-prefixed file/dir is skipped, and the ignore names apply at any depth.
@@ -60,9 +62,14 @@ cycles that break `class extends` at module init; this matches how Bun and Deno
 execute the source. Side-effect-only imports (`import "./x"`) are preserved.
 
 Apps that run the **TypeScript compiler at run time** (a language service,
-`ts.createProgram`, …) get TypeScript's `lib.*.d.ts` files embedded into the
-artifact next to `main.js`, because `ts.sys` resolves its default libs relative
-to the executing file. This adds a few MB only when `typescript` is bundled.
+`ts.createProgram`, …) work with no extra steps: `typescript` is kept external
+and the package is embedded into the artifact (at `node_modules/typescript`)
+whenever the bundle imports it. This is required because `ts.sys` resolves its
+`lib.*.d.ts` relative to `typescript.js` — an inlined copy would look next to
+`main.js` and find nothing. Embedding the whole installed package means any
+installed TypeScript version works, with no version-specific lib list. It adds
+~20 MB only when `typescript` is imported at run time; type-only usage is
+transpiled away and unaffected.
 
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
@@ -146,6 +153,13 @@ inka build app.ts        # -> ./app
 ```
 
 `.tsx`/`.jsx` are supported by the bundler.
+
+If the app itself runs the TypeScript compiler at run time (a language service,
+`ts.createProgram`, …), `typescript` is kept external and its package is
+embedded into the artifact automatically when the bundle imports it (see
+[What gets bundled](#what-gets-bundled)). This carries the `lib.*.d.ts` files
+the compiler needs, and it works with whatever `typescript` version is installed
+in your workspace.
 
 ## See also
 

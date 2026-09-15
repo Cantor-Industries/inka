@@ -264,7 +264,12 @@ fn pack(
 
     #[cfg(feature = "bundle")]
     {
-        let bundle = inka_bundler::bundle(inka_bundler::BundleOptions {
+        let inka_bundler::Bundle {
+            code,
+            embedded,
+            warnings,
+            auto_embed,
+        } = inka_bundler::bundle(inka_bundler::BundleOptions {
             cwd,
             entry: entry_rel,
             external,
@@ -273,18 +278,28 @@ fn pack(
         })
         .unwrap_or_else(|e| err(&e));
 
-        for w in &bundle.warnings {
+        for w in &warnings {
             eprintln!("warning: {w}");
         }
 
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        files.push(("main.js".to_string(), bundle.code.into_bytes()));
-        for (rel, bytes) in bundle.embedded {
+        files.push(("main.js".to_string(), code.into_bytes()));
+        for (rel, bytes) in embedded {
             push_unique(&mut files, rel, bytes);
         }
         let entry_dir = cwd.join(entry_rel);
         let entry_dir = entry_dir.parent().unwrap_or(cwd);
-        for pkg in external {
+        // Embed user `--external` packages plus any default-external package the
+        // bundle actually imports (e.g. `typescript`), found via the workspace
+        // node_modules (hoisted or nested). Dedup so an explicit `--external
+        // typescript` is not collected twice.
+        let mut embed_pkgs: Vec<String> = external.to_vec();
+        for pkg in auto_embed {
+            if !embed_pkgs.contains(&pkg) {
+                embed_pkgs.push(pkg);
+            }
+        }
+        for pkg in &embed_pkgs {
             for (rel, bytes) in
                 crate::embed::collect_package(cwd, entry_dir, pkg).unwrap_or_else(|e| err(&e))
             {

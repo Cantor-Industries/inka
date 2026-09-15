@@ -36,11 +36,40 @@ pub struct BundleOptions<'a> {
     pub sourcemap: bool,
 }
 
+/// Package names this bundler keeps external by default (without a CLI
+/// `--external`). They are embedded as packages rather than inlined because
+/// they resolve companion files relative to their own install path at run
+/// time; inlining breaks that. TypeScript is the canonical case: `ts.sys`
+/// finds `lib.*.d.ts` next to `typescript.js`, so it must travel as a package.
+const DEFAULT_EXTERNAL: &[&str] = &["typescript"];
+
+/// External matcher: a specifier is external when it equals a package name or
+/// is a subpath of one (`pkg` or `pkg/sub`), so `--external typescript` also
+/// covers `typescript/lib/tsserverlibrary`.
+fn external_matcher(packages: Vec<String>) -> IsExternal {
+    let f = move |spec: &str, _importer: Option<&str>, _is_resolved: bool| {
+        let packages = packages.clone();
+        let spec = spec.to_string();
+        let fut: std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<bool>> + Send>> =
+            Box::pin(async move {
+                Ok(packages
+                    .iter()
+                    .any(|p| spec == *p || spec.starts_with(&format!("{p}/"))))
+            });
+        fut
+    };
+    IsExternal::Fn(Some(Arc::new(f)))
+}
+
 /// A produced bundle plus any files the caller should embed alongside it.
 pub struct Bundle {
     pub code: String,
     pub embedded: Vec<(String, Vec<u8>)>,
     pub warnings: Vec<String>,
+    /// Default-external packages the emitted chunk actually imports. The caller
+    /// embeds these (as `--external` packages) so the artifact stays
+    /// self-contained. Empty when the chunk does not reference them.
+    pub auto_embed: Vec<String>,
 }
 
 /// Bundle `entry` into a single ESM module. Owns its own tokio runtime.
@@ -71,9 +100,6 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         }
     }
 
-    // Kept to inspect which packages rolldown resolved after the build.
-    let resolved_files = state.resolved_files.clone();
-
     let plugin = Arc::new(DenoResolvePlugin { state });
     let shared: Arc<dyn Pluginable> = plugin.clone();
 
@@ -86,6 +112,16 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     define.insert("__filename".to_string(), "import.meta.filename".to_string());
     define.insert("__dirname".to_string(), "import.meta.dirname".to_string());
 
+    // User `--external` plus the packages we keep external by default (so they
+    // are embedded as packages, not inlined). Only those actually imported by
+    // the emitted chunk are reported back in `auto_embed`.
+    let mut external_list: Vec<String> = opts.external.to_vec();
+    for pkg in DEFAULT_EXTERNAL {
+        if !external_list.iter().any(|e| e == pkg) {
+            external_list.push((*pkg).to_string());
+        }
+    }
+
     let options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some("chunk".to_string()),
@@ -94,7 +130,7 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         cwd: Some(opts.cwd.to_path_buf()),
         platform: Some(Platform::Node),
         format: Some(OutputFormat::Esm),
-        external: Some(IsExternal::from(opts.external.to_vec())),
+        external: Some(external_matcher(external_list)),
         treeshake: TreeshakeOptions::default(),
         // A single self-contained chunk: dynamic imports are inlined rather
         // than split into sibling files the artifact would not carry.
@@ -145,9 +181,15 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         .map_err(|e| format!("rolldown generate failed: {e}"))?;
 
     let mut chunks = Vec::new();
+    // External specifiers the emitted chunk imports (static + dynamic). Used to
+    // decide which default-external packages the caller must embed.
+    let mut external_imports: Vec<String> = Vec::new();
     for asset in &output.assets {
         if let Output::Chunk(chunk) = asset {
             chunks.push(chunk.code.clone());
+            for spec in chunk.imports.iter().chain(chunk.dynamic_imports.iter()) {
+                external_imports.push(spec.to_string());
+            }
         }
     }
     if chunks.len() != 1 {
@@ -158,15 +200,15 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     }
     let code = chunks.into_iter().next().unwrap();
 
-    // Packages that resolve assets at run time need those files in the artifact.
-    // TypeScript is the notable case: its `ts.sys` looks up the default
-    // `lib.*.d.ts` next to the executing file (the bundle), so an inlined
-    // TypeScript reports "Cannot find name 'Promise'/'Record'" unless the libs
-    // travel with it.
-    let resolved = resolved_files.lock().map(|v| v.clone()).unwrap_or_default();
-    for (name, bytes) in typescript_libs(&resolved) {
-        if !embedded.iter().any(|(r, _)| r == &name) {
-            embedded.push((name, bytes));
+    // Report default-external packages the chunk imports (including subpath
+    // imports like `typescript/lib/tsserverlibrary`) so the caller embeds them.
+    let mut auto_embed: Vec<String> = Vec::new();
+    for pkg in DEFAULT_EXTERNAL {
+        let imported = external_imports
+            .iter()
+            .any(|spec| spec == pkg || spec.starts_with(&format!("{pkg}/")));
+        if imported && !auto_embed.iter().any(|p| p == pkg) {
+            auto_embed.push((*pkg).to_string());
         }
     }
 
@@ -185,51 +227,8 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         code,
         embedded,
         warnings,
+        auto_embed,
     })
-}
-
-/// `lib.*.d.ts` files for any bundled TypeScript compiler, keyed by the file
-/// name alone so they land next to `main.js` in the artifact root.
-fn typescript_libs(resolved: &[String]) -> Vec<(String, Vec<u8>)> {
-    use std::collections::HashSet;
-    let mut seen_dirs: HashSet<std::path::PathBuf> = HashSet::new();
-    let mut out = Vec::new();
-    for id in resolved {
-        let path = match Url::parse(id) {
-            Ok(u) => match u.to_file_path() {
-                Ok(p) => p,
-                Err(_) => continue,
-            },
-            Err(_) => std::path::PathBuf::from(id),
-        };
-        let Some(dir) = path.parent() else { continue };
-        if dir.file_name().and_then(|n| n.to_str()) != Some("lib")
-            || !dir.to_string_lossy().contains("typescript")
-        {
-            continue;
-        }
-        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        if !matches!(
-            stem,
-            "typescript" | "tsserverlibrary" | "typescriptServices"
-        ) {
-            continue;
-        }
-        if !seen_dirs.insert(dir.to_path_buf()) {
-            continue;
-        }
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with("lib.") && name.ends_with(".d.ts") {
-                    if let Ok(bytes) = std::fs::read(entry.path()) {
-                        out.push((name, bytes));
-                    }
-                }
-            }
-        }
-    }
-    out
 }
 
 /// rolldown plugin that resolves import maps, `npm:`, `jsr:`, and serves cached
@@ -311,7 +310,6 @@ impl Plugin for DenoResolvePlugin {
                 if let Some(req_ref) = &req {
                     check_npm_pin(&resolved, req_ref)?;
                 }
-                self.state.record_resolved(resolved.id.as_str());
                 return Ok(Some(HookResolveIdOutput::from_resolved_id(resolved)));
             }
         }
@@ -757,6 +755,121 @@ mod tests {
             !b.code.contains("__filename") && !b.code.contains("__dirname"),
             "ambient names must be rewritten:\n{}",
             b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn typescript_is_default_external_and_reported_for_embedding() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/typescript/package.json",
+            r#"{"name":"typescript","version":"5.9.3","main":"lib/typescript.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/typescript/lib/typescript.js",
+            "module.exports = { marker: \"ts-inlined-marker\" };\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import ts from \"typescript\";\nconsole.log(ts.marker);\n",
+        );
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert_eq!(
+            b.auto_embed,
+            vec!["typescript".to_string()],
+            "{:?}",
+            b.auto_embed
+        );
+        assert!(
+            !b.code.contains("ts-inlined-marker"),
+            "default-external typescript must not be inlined:\n{}",
+            b.code
+        );
+        assert!(
+            b.code.contains("\"typescript\""),
+            "expected an external import of typescript:\n{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn typescript_subpath_import_is_default_external() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/typescript/package.json",
+            r#"{"name":"typescript","version":"5.9.3","main":"lib/typescript.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/typescript/lib/tsserverlibrary.js",
+            "module.exports = { marker: \"tsserver-inlined-marker\" };\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import tss from \"typescript/lib/tsserverlibrary.js\";\nconsole.log(tss.marker);\n",
+        );
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert_eq!(
+            b.auto_embed,
+            vec!["typescript".to_string()],
+            "{:?}",
+            b.auto_embed
+        );
+        assert!(
+            !b.code.contains("tsserver-inlined-marker"),
+            "default-external typescript subpath must not be inlined:\n{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn typescript_not_imported_is_not_auto_embedded() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/typescript/package.json",
+            r#"{"name":"typescript","version":"5.9.3","main":"lib/typescript.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/typescript/lib/typescript.js",
+            "module.exports = {};\n",
+        );
+        mk(&cwd, "entry.js", "console.log(\"no ts here\");\n");
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert!(
+            b.auto_embed.is_empty(),
+            "unused typescript must not be auto-embedded: {:?}",
+            b.auto_embed
         );
         let _ = std::fs::remove_dir_all(&cwd);
     }

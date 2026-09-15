@@ -44,6 +44,9 @@ is on. Options:
   The package's **transitive dependency closure** is embedded too, so hoisted
   (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, Deno `.deno/`) layouts
   both work; conflicting versions are nested under the referring package.
+  `typescript` is externalized this way automatically when the bundle imports
+  it (it resolves `lib.*.d.ts` relative to itself), so the installed version is
+  embedded and no flag is needed.
 - `--embed-dir` — also embed the whole current-directory tree (for assets).
 
 Everything else (import maps, `npm:`, `jsr:`, `node_modules`) is inlined, so the
