@@ -529,8 +529,8 @@ fn resolve_manifest(
     tested_flag: Option<&str>,
     perm_flags: &Flags,
 ) -> Result<(Vec<u8>, Vec<String>), String> {
-    // Must track `crates/inka-runtime/runtime-version`: an older runtime needs
-    // the retired resolver, which this toolchain no longer installs.
+    // Must track `crates/inka-runtime/runtime-version`: an artifact must never
+    // select a runtime too old to enforce its permission DSL or resolution.
     const DEFAULT_RUNTIME: &str = ">=0.266.5";
 
     // CLI permission flags override any config-derived permission source.

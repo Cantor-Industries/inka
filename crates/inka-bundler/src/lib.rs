@@ -506,10 +506,8 @@ mod tests {
             minify: false,
             sourcemap: false,
         };
-        match bundle(opts) {
-            Ok(b) => assert!(b.code.contains("assert"), "expected inlined assert code"),
-            Err(e) => eprintln!("skip: jsr bundle unavailable: {e}"),
-        }
+        let b = bundle(opts).expect("jsr bundle must succeed when the cache is present");
+        assert!(b.code.contains("assert"), "expected inlined assert code");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

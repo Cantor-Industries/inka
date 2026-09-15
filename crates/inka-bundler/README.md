@@ -13,11 +13,16 @@ with [rolldown](https://rolldown.rs). Used by `inka build`.
 2. runs rolldown with a `DenoResolvePlugin` that applies the import map, routes
    `npm:` to `node_modules`, resolves `jsr:` to its cached `https://jsr.io/…`
    source, and serves those sources (`ModuleType::Ts`);
-3. returns `{ code, embedded, warnings }`, where `embedded` are native `.node`
-   candidates for the caller to pack.
+3. returns `{ code, embedded, warnings, auto_embed }`, where `embedded` are
+   native `.node` candidates for the caller to pack and `auto_embed` names the
+   default-external packages the emitted chunk imports.
 
 `external` packages are left unbundled (the caller embeds them from
 `node_modules`); `node:` built-ins stay external (the engine provides them).
+
+`typescript` is kept external by default (`DEFAULT_EXTERNAL`) and reported via
+`auto_embed` when the chunk imports it, so the caller embeds the installed
+package — an inlined TypeScript cannot resolve its `lib.*.d.ts` at run time.
 
 ## Notes
 

@@ -755,6 +755,15 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// A per-process-unique scratch dir under the system temp dir, emptied
+    /// first so tests cannot collide across concurrent runs.
+    fn scratch_dir(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("inkaconf-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
     fn write(cwd: &Path, name: &str, content: &str) {
         std::fs::create_dir_all(cwd).unwrap();
         std::fs::write(cwd.join(name), content).unwrap();
@@ -798,7 +807,7 @@ mod tests {
 
     #[test]
     fn empty_config_emits_nothing_but_advisory() {
-        let cwd = PathBuf::from("/tmp/inkaconf-empty");
+        let cwd = scratch_dir("empty");
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
         let (s, warns) = read_synth(&cwd, None);
@@ -811,7 +820,7 @@ mod tests {
     // it must NOT be baked, and an informational note is produced.
     #[test]
     fn plain_default_set_is_ignored_with_note() {
-        let cwd = PathBuf::from("/tmp/inkaconf-default-only");
+        let cwd = scratch_dir("default-only");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -845,7 +854,7 @@ mod tests {
     // when the map is an explicit compile.permissions source.
     #[test]
     fn compile_permissions_map_applies_category_shapes() {
-        let cwd = PathBuf::from("/tmp/inkaconf-compile-map");
+        let cwd = scratch_dir("compile-map");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -884,7 +893,7 @@ mod tests {
     // be baked, not silently dropped. A relative read path now also warns.
     #[test]
     fn scalar_string_permission_value_is_an_allow_entry() {
-        let cwd = PathBuf::from("/tmp/inkaconf-scalar");
+        let cwd = scratch_dir("scalar");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -909,7 +918,7 @@ mod tests {
     // -P=<name> selects it with deno.json winning per-category.
     #[test]
     fn named_set_selection_and_per_key_merge() {
-        let cwd = PathBuf::from("/tmp/inkaconf-both");
+        let cwd = scratch_dir("both");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -959,7 +968,7 @@ mod tests {
 
     #[test]
     fn compile_permissions_beat_default_and_runtime_exact() {
-        let cwd = PathBuf::from("/tmp/inkaconf-compile");
+        let cwd = scratch_dir("compile");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -982,7 +991,7 @@ mod tests {
 
     #[test]
     fn inka_permissions_marker_selects_set() {
-        let cwd = PathBuf::from("/tmp/inkaconf-marker");
+        let cwd = scratch_dir("marker");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1005,7 +1014,7 @@ mod tests {
     // A marker living in package.json may select a set defined in deno.json.
     #[test]
     fn marker_in_package_json_selects_deno_set() {
-        let cwd = PathBuf::from("/tmp/inkaconf-marker-pkg");
+        let cwd = scratch_dir("marker-pkg");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1032,7 +1041,7 @@ mod tests {
     // NOT a silent fall-back to the default set.
     #[test]
     fn unknown_compile_permissions_set_warns_and_denies_all() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badname");
+        let cwd = scratch_dir("badname");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1054,7 +1063,7 @@ mod tests {
     // An explicit -P selecting the default set still bakes it (marker present).
     #[test]
     fn explicit_p_default_bakes_the_default_set() {
-        let cwd = PathBuf::from("/tmp/inkaconf-p-default");
+        let cwd = scratch_dir("p-default");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1073,7 +1082,7 @@ mod tests {
     // Unknown -P name -> warning + deny-by-default.
     #[test]
     fn p_unknown_set_warns_and_denies_all() {
-        let cwd = PathBuf::from("/tmp/inkaconf-p-nope");
+        let cwd = scratch_dir("p-nope");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1094,7 +1103,7 @@ mod tests {
     // Malformed explicit sources warn and yield a deny-by-default artifact.
     #[test]
     fn malformed_compile_permissions_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badcompile");
+        let cwd = scratch_dir("badcompile");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1115,7 +1124,7 @@ mod tests {
 
     #[test]
     fn malformed_inka_marker_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badmarker");
+        let cwd = scratch_dir("badmarker");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1132,7 +1141,7 @@ mod tests {
     // (the no-source advisory is still emitted).
     #[test]
     fn empty_default_set_produces_no_drop_note() {
-        let cwd = PathBuf::from("/tmp/inkaconf-emptyd");
+        let cwd = scratch_dir("emptyd");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "deno.json", r#"{ "permissions": { "default": {} } }"#);
         let (s, warns) = read_synth(&cwd, None);
@@ -1145,7 +1154,7 @@ mod tests {
     // A deny-only/allow-false default set grants nothing -> no note either.
     #[test]
     fn deny_only_default_set_produces_no_note() {
-        let cwd = PathBuf::from("/tmp/inkaconf-denyonly");
+        let cwd = scratch_dir("denyonly");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1170,7 +1179,7 @@ mod tests {
     // still falls back to a deny-by-default manifest.
     #[test]
     fn malformed_deno_json_warns_and_yields_empty() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badjson");
+        let cwd = scratch_dir("badjson");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "deno.json", r#"{ "permissions":"#);
         let (s, warns) = read_synth(&cwd, None);
@@ -1183,7 +1192,7 @@ mod tests {
     // A bad package.json warns but a valid deno.json is still honored.
     #[test]
     fn malformed_package_json_warns_but_deno_still_used() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badpkg");
+        let cwd = scratch_dir("badpkg");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "package.json", r#"{ "permissions": "#);
         write(
@@ -1200,7 +1209,7 @@ mod tests {
     // A malformed deno.json falls through to a valid deno.jsonc, loudly.
     #[test]
     fn deno_jsonc_fallback_used_when_deno_json_malformed() {
-        let cwd = PathBuf::from("/tmp/inkaconf-jsoncfallback");
+        let cwd = scratch_dir("jsoncfallback");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "deno.json", r#"{ "compile": "#);
         write(
@@ -1221,7 +1230,7 @@ mod tests {
     // package.json) is a warning, not "no config".
     #[test]
     fn unreadable_config_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-unreadable");
+        let cwd = scratch_dir("unreadable");
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
         std::fs::create_dir_all(cwd.join("package.json")).unwrap();
@@ -1236,7 +1245,7 @@ mod tests {
     // would actually grant something.
     #[test]
     fn config_has_default_grants_detects_nonempty_default() {
-        let cwd = PathBuf::from("/tmp/inkaconf-rungrants");
+        let cwd = scratch_dir("rungrants");
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
         assert!(!config_has_default_grants(&cwd));
@@ -1256,7 +1265,7 @@ mod tests {
 
     #[test]
     fn relative_read_path_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-relpath");
+        let cwd = scratch_dir("relpath");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1279,7 +1288,7 @@ mod tests {
 
     #[test]
     fn deny_without_allow_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-denyonlywarn");
+        let cwd = scratch_dir("denyonlywarn");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1294,7 +1303,7 @@ mod tests {
 
     #[test]
     fn comma_in_permission_item_warns() {
-        let cwd = PathBuf::from("/tmp/inkaconf-commaitem");
+        let cwd = scratch_dir("commaitem");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1310,7 +1319,7 @@ mod tests {
     // empty list as "all" — an over-grant, incl. run/ffi).
     #[test]
     fn empty_allow_list_is_ignored_with_warning() {
-        let cwd = PathBuf::from("/tmp/inkaconf-emptyallow");
+        let cwd = scratch_dir("emptyallow");
         let _ = std::fs::remove_dir_all(&cwd);
 
         for body in [
@@ -1340,7 +1349,7 @@ mod tests {
     // A raw newline in a permission item would inject a manifest line.
     #[test]
     fn newline_in_permission_item_is_rejected() {
-        let cwd = PathBuf::from("/tmp/inkaconf-injectitem");
+        let cwd = scratch_dir("injectitem");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1356,7 +1365,7 @@ mod tests {
 
     #[test]
     fn newline_in_runtime_is_rejected() {
-        let cwd = PathBuf::from("/tmp/inkaconf-injectrt");
+        let cwd = scratch_dir("injectrt");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1369,7 +1378,7 @@ mod tests {
 
     #[test]
     fn malformed_runtime_spec_is_rejected() {
-        let cwd = PathBuf::from("/tmp/inkaconf-badrt");
+        let cwd = scratch_dir("badrt");
         let _ = std::fs::remove_dir_all(&cwd);
         write(&cwd, "deno.json", r#"{ "inka": { "runtime": ">=abc" } }"#);
         let err = synthesize_manifest(&cwd, None, None)
@@ -1390,7 +1399,7 @@ mod tests {
     // A non-object deno.json set is authoritative; package.json must not win.
     #[test]
     fn deno_non_object_set_is_authoritative() {
-        let cwd = PathBuf::from("/tmp/inkaconf-nonobjset");
+        let cwd = scratch_dir("nonobjset");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1411,7 +1420,7 @@ mod tests {
     // it names a set, the `-P=<name>` that reproduces a build's permissions.
     #[test]
     fn build_intent_hint_reports_named_and_map_sources() {
-        let cwd = PathBuf::from("/tmp/inkaconf-buildintent");
+        let cwd = scratch_dir("buildintent");
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
 
@@ -1451,7 +1460,7 @@ mod tests {
     // build-intent permissions inline via the `inka.permissions` marker.
     #[test]
     fn package_json_inline_permission_map_is_baked() {
-        let cwd = PathBuf::from("/tmp/inkaconf-pkgmap");
+        let cwd = scratch_dir("pkgmap");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1467,7 +1476,7 @@ mod tests {
 
     #[test]
     fn package_json_inline_all_is_baked() {
-        let cwd = PathBuf::from("/tmp/inkaconf-pkgall");
+        let cwd = scratch_dir("pkgall");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1481,7 +1490,7 @@ mod tests {
 
     #[test]
     fn package_json_inline_set_name_is_baked() {
-        let cwd = PathBuf::from("/tmp/inkaconf-pkgset");
+        let cwd = scratch_dir("pkgset");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,
@@ -1496,7 +1505,7 @@ mod tests {
     // deno.json wins over package.json when both carry an inka.permissions marker.
     #[test]
     fn deno_json_marker_wins_over_package_json() {
-        let cwd = PathBuf::from("/tmp/inkaconf-markerprecedence");
+        let cwd = scratch_dir("markerprecedence");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
             &cwd,

@@ -599,12 +599,6 @@ mod tests {
 
     #[test]
     fn plan_installs_when_stale() {
-        let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
-        assert_eq!(a, Actions { runtime: true });
-    }
-
-    #[test]
-    fn runtime_tuple_revision_is_newer_than_base() {
         // The base tuple (0.266.0) is behind an inka revision (0.266.1).
         let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
         assert!(a.runtime);

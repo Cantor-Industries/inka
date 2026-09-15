@@ -30,8 +30,8 @@ All Deno API surface is confined so a bump stays contained:
    `crates/inka-runtime/Cargo.toml` and `crates/inka-bundler/Cargo.toml`
    (`deno_core`, `deno_runtime`, `deno_node` if named, `node_resolver`,
    `deno_semver`, `deno_error`, `sys_traits`, `deno_ast`, `deno_graph`,
-   `deno_cache_dir`, `deno_lockfile`, `deno_npm`, `import_map`) to the versions
-   from the target Deno tag's `Cargo.lock`. `deno_runtime` re-exports `deno_node`,
+   `deno_cache_dir`, `import_map`) to the versions from the target Deno tag's
+   `Cargo.lock`. `deno_runtime` re-exports `deno_node`,
    so prefer `deno_runtime::deno_node` over a direct `deno_node` pin.
 2. **Reconcile the seam.** Build; fix `node_services.rs` / `resolver.rs` for any
    trait/struct signature changes (`NodeRequireLoader`,

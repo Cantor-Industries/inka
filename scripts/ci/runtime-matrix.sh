@@ -188,8 +188,8 @@ printf '%s\n' 'import { util } from "./util.ts";' \
     'export const hello = () => `hello+${util()}`;' > "$MONO/packages/other/src/index.ts"
 printf '%s\n' '{"name":"@scope/app","type":"module","bin":"src/index.ts","imports":{"#hash":"./src/hash.ts"},"dependencies":{"@scope/other":"workspace:*"}}' \
     > "$MONO/packages/app/package.json"
-# Run-time aliases come from the deno.json import map (Deno semantics:
-# tsconfig baseUrl/paths are resolved for types only, not at run time).
+# Run-time aliases come from the deno.json import map. tsconfig
+# baseUrl/paths are covered by their own case below.
 printf '%s\n' '{"imports":{"@/lib":"./src/lib.ts"}}' > "$MONO/packages/app/deno.json"
 printf '%s\n' 'export const viaHash = () => "mono-hash";' > "$MONO/packages/app/src/hash.ts"
 printf '%s\n' 'export const helper = () => "mono-helper";' > "$MONO/packages/app/src/lib.ts"

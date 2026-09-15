@@ -76,6 +76,8 @@ The launcher `dlopen`s the runtime and calls a frozen C ABI:
 - `inka_runtime_run_module_perm(rt, name, payload, len, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_run_module_dir(rt, dir, entry, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_destroy(rt)`
+- `inka_runtime_free_string(ptr)` — optional; frees an error string the runtime
+  allocated. A runtime without it is still usable (the string leaks until exit).
 
 The runtime is loaded **`RTLD_GLOBAL`** (not the `RTLD_LOCAL` default) so native
 `.node` addons `dlopen`ed later by the runtime can resolve the N-API/uv symbols
