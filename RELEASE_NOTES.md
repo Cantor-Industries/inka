@@ -3,16 +3,16 @@
   published body by the release workflow (`.github/workflows/release.yml`), so
   it is safe to keep internal guidance here.
 
-  The body uses `{{REL}}` (tag minus `v`, e.g. `0.6.1`) and `{{RUNTIME}}`
+  The body uses `{{REL}}` (tag minus `v`, e.g. `0.7.0`) and `{{RUNTIME}}`
   (`crates/inka-runtime/runtime-version`, e.g. `0.266.6`) placeholders; the
   workflow substitutes them when staging the release. Do not hardcode versions.
 -->
 # inka {{REL}} — runtime tuple {{RUNTIME}}
 
-Follow-up to the 0.6 runtime series. Resolution is unified on Deno's workspace
-resolver (with run-time `tsconfig` `baseUrl`/`paths` via `oxc_resolver`), the
-bundler gains correctness fixes for CJS/TypeScript graphs, and TypeScript is now
-carried as an embedded package instead of a version-specific lib patch.
+A cleanup-and-hardening release. The engine tuple moves to `{{RUNTIME}}`, the
+long-dead pre-0.6 artifact formats are removed (a breaking change — rebuild
+existing artifacts), extracted trees now clean up after crashed runs, and
+re-running `install.sh` on a 0.5.0+ machine upgrades in place again.
 
 ## Upgrade
 
@@ -25,70 +25,60 @@ Then keep the toolchain and runtime current with `inka update`.
 
 Artifacts built by `{{REL}}` embed a `runtime>={{RUNTIME}}` floor, so run
 `inka update` (or re-run `install.sh`) to install the new tuple before running
-them. Older artifacts keep working on the new runtime.
+them. Older (0.6-era) artifacts keep working on the new runtime.
+
+## Breaking changes
+
+- **Pre-0.6 artifacts no longer run.** The legacy `INKFOOT2`/`INKFOOT3`/
+  `INKFOOT4` payload formats — the single-file entry and the pre-transpiled
+  TypeScript archive — are gone. `inka build` has emitted only `INKFOOT5` since
+  0.5.0; rebuild any older executable with this release. The launcher refuses an
+  unknown trailer instead of guessing.
+- **C ABI reduced to one run entry point.** `inka_runtime_run_module_dir` is the
+  only run export; `inka_runtime_run_module_perm` (single-file) was removed, and
+  the `INKA_PRECOMPILED` environment flag with it. `inka_runtime_version`,
+  `inka_runtime_create`/`destroy`, and the optional `inka_runtime_free_string`
+  are unchanged. A runtime that lacks `_dir` still fails closed (exit 4).
 
 ## Behaviour changes
 
-- **Runtime tuple `0.266.3` → `{{RUNTIME}}`.** New artifacts require
+- **Runtime tuple `0.266.5` → `{{RUNTIME}}`.** New artifacts require
   `>={{RUNTIME}}` by default; existing artifacts roll forward to the new tuple.
-- **`tsconfig.json`/`jsconfig.json` `baseUrl`/`paths` resolve at run time**
-  (nearest config per importing file, `extends` and JSONC comments honored, via
-  the same `oxc_resolver` the bundler uses). A bare `src/util` or `@/*` alias no
-  longer fails with `Could not find package 'src'` in a `src/`-layout npm
-  workspace.
-- **Resolution is unified on Deno's workspace resolver.** Bare specifiers go
-  through the workspace import map, `#imports`, and workspace members;
-  `deno.jsonc` import maps parse with comments and trailing commas; `npm:`
-  version pins are enforced at build to match `inka run`.
-- **`.js` specifiers rewrite to their `.ts` sibling** when the script file is
-  absent (`exports: ./src/index.js` that really ships `.ts`, and relative
-  `.js` → `.ts`), matching rolldown so `run` and `build` agree.
-- **TypeScript is embedded as a package** when the bundle imports it at run
-  time (see Bundling). It works with whatever `typescript` version is installed,
-  with no flag and no per-version lib list.
-- **Usage errors exit `2`** (from 0.5.4; restated for anyone skipping a release).
+- **`install.sh` upgrades in place again.** The previous-generation reset only
+  whitelisted `0.5.x`, so re-running the installer on a 0.6.x machine deleted
+  the toolchain and every runtime `.so` and re-downloaded them. Only a clearly
+  pre-0.5.0 toolchain (`0.0`–`0.4`) is reset now.
+- **Extracted trees reap themselves.** Each artifact tree is stamped with an
+  `.inka-owner` pid marker; before staging, the launcher sweeps `inka-*` temp
+  dirs whose owner pid is no longer alive (real directories this user owns;
+  never symlinks). Trees with a live pid — a running artifact — are never
+  touched, and legacy marker-less trees are only reaped once older than a day.
+  `inka update` stamps its staging trees the same way.
 
-## Bundling
+## Under the hood
 
-- **TypeScript is kept external and auto-embedded** whenever the emitted bundle
-  imports it. The compiler resolves its `lib.*.d.ts` relative to
-  `typescript.js`, so an inlined copy cannot find them; carrying the installed
-  package works for every version. Type-only usage (transpiled away) is
-  unaffected.
-- **CJS `__filename`/`__dirname` are shimmed** to
-  `import.meta.filename`/`import.meta.dirname`, so bundled CommonJS deps (e.g.
-  `@effect/platform-node`) no longer throw `ReferenceError: __filename is not
-  defined`.
-- **Module execution order is preserved** (strict execution order plus
-  on-demand wrapping), fixing `Class extends value undefined` from scope
-  hoisting while keeping re-export/barrel cycles correct.
-- **Type-only imports are elided** even under `verbatimModuleSyntax: true`,
-  avoiding runtime cycles that break `class extends` at module init (matches
-  Bun and Deno).
-- **`--external` finds workspace-hoisted dependencies** and matches package
-  subpaths; it remains the escape hatch for native addons and any
-  asset-dependent package.
-- **Bundler warnings are surfaced** (notably direct `eval`, which a
-  scope-hoisted bundle cannot represent correctly).
+- Removed 12 unused dependencies (nine `rolldown_*` crates and `futures` from the
+  bundler; `futures`/`serde_json` from the runtime; `url` from the CLI).
+- In-crate de-duplication: one `runtime_value` helper, one manifest
+  `key=value` writer, and one TS-extension predicate.
+- CI now lints `inka-runtime` (`cargo clippy -D warnings`) so cdylib dead code
+  cannot accumulate; the historical `attempt.md` was dropped.
 
 ## Security and hardening
 
-The 0.6.0 guarantees still hold; the engine tuple changes only resolution.
+These guarantees continue from 0.6, unchanged by this release:
 
 - **Realpath module confinement.** The execution root is canonicalized once and
   every module read (ESM loader, `require()`, the graph/cache loader) must
-  resolve under it — a symlink planted inside the tree can no longer escape it.
-- **Temp-tree hardening.** Single-file staging and artifact extraction use
-  unpredictable, exclusive, `0700` directories with cleanup on drop and on an
-  in-process `exit()` (e.g. `Deno.exit`).
+  resolve under it — a symlink planted inside the tree cannot escape it.
+- **Temp-tree hardening.** Extraction uses unpredictable, exclusive, `0700`
+  directories with cleanup on drop, on an in-process `exit()` (e.g.
+  `Deno.exit`), and now on a later run after an abnormal exit.
 - **C ABI lifecycle.** Exported entry points are wrapped in `catch_unwind`, and
-  `inka_runtime_free_string` frees the runtime-allocated error string. The
-  release profile uses `panic = "unwind"` so a panic returns an error code
-  instead of aborting the host.
-- **Defence-in-depth permissions.** Empty allow lists are rejected at the
-  runtime DSL layer; `permissions=all` still maps to every category, including
-  `import`. Manifest validation continues to reject newline injection, bad
-  package names, and out-of-tree dependency symlinks.
+  `inka_runtime_free_string` frees runtime-allocated error strings.
+- **Deny-by-default permissions.** Empty allow lists are rejected; malformed
+  manifests (newline injection, bad package names, out-of-tree symlinks) are
+  rejected at build time; a runtime missing `_dir` fails closed.
 
 ## Resolution
 
@@ -96,16 +86,15 @@ The 0.6.0 guarantees still hold; the engine tuple changes only resolution.
 map, the importing file's nearest `tsconfig`/`jsconfig` `baseUrl`/`paths`, the
 project/workspace `node_modules` (hoisted, nested, and symlinked pnpm/Deno
 layouts), the Deno cache for `jsr:`/cached remote, then built-ins. `inka` remains
-offline.
+offline. `typescript` is kept external and its package is embedded automatically
+when the bundle imports it at run time, so any installed version works.
 
 Known limitations:
 
 - `require("src/util")` (CommonJS) of a `baseUrl` path is not resolved — Deno's
-  CommonJS loader searches `node_modules` paths only. Use an ESM import for
-  `baseUrl`/`paths` aliases.
+  CommonJS loader searches `node_modules` paths only. Use an ESM import.
 - `npm:typescript` (a Deno-cache `npm:` specifier rather than a `node_modules`
-  install) is not auto-embedded; install `typescript` in the project so it is
-  found in `node_modules`.
+  install) is not auto-embedded; install `typescript` in the project.
 
 ## Assets
 

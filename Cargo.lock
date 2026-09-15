@@ -4592,7 +4592,7 @@ checksum = "f4200d433cbd5178df7797c9c2e75b348b728e39631cf14520d1e2fc424201f4"
 
 [[package]]
 name = "inka"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "inka-bundler",
  "jsonc-parser",
@@ -4604,7 +4604,7 @@ dependencies = [
 
 [[package]]
 name = "inka-bundler"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "deno_cache_dir",
@@ -4625,14 +4625,14 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "libloading 0.8.9",
 ]
 
 [[package]]
 name = "inka-runtime"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4654,7 +4654,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.6.1"
+version = "0.7.0"
 
 [[package]]
 name = "inotify"
