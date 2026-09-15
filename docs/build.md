@@ -40,6 +40,11 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
 `npm:` version pins are **enforced**: if the version in `node_modules` does not
 satisfy an `npm:pkg@<req>` specifier, the build fails (mirroring `inka run`).
 
+CommonJS dependencies that use the Node ambient `__filename`/`__dirname` are
+shimmed to `import.meta.filename`/`import.meta.dirname` (the bundle's path): a
+single-file ESM artifact has no per-module filenames, and the wrapper rolldown
+generates only supplies `exports`/`module`.
+
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
 

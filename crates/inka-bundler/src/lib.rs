@@ -18,6 +18,7 @@ use rolldown::{
     Platform, RawMinifyOptions, SourceMapType, TreeshakeOptions,
 };
 use rolldown_common::{ModuleType, Output};
+use rolldown_utils::indexmap::FxIndexMap;
 use sys_traits::impls::RealSys;
 use url::Url;
 
@@ -73,6 +74,15 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     let plugin = Arc::new(DenoResolvePlugin { state });
     let shared: Arc<dyn Pluginable> = plugin.clone();
 
+    // Bundled CJS modules reference the Node ambient `__filename`/`__dirname`,
+    // but the emitted chunk is ESM, where those are undefined (rolldown's
+    // `__commonJS` wrapper supplies only `exports`/`module`). Map them to the
+    // Node/Deno ESM equivalents; the shim is applied to every bundled module and
+    // only rewrites global (non-shadowed) references.
+    let mut define = FxIndexMap::default();
+    define.insert("__filename".to_string(), "import.meta.filename".to_string());
+    define.insert("__dirname".to_string(), "import.meta.dirname".to_string());
+
     let options = BundlerOptions {
         input: Some(vec![InputItem {
             name: Some("chunk".to_string()),
@@ -90,6 +100,7 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         // Inline (data-URL) maps keep the artifact self-contained: the caller
         // only carries `chunk.code`, so a `File` map would be silently dropped.
         sourcemap: opts.sourcemap.then_some(SourceMapType::Inline),
+        define: Some(define),
         ..Default::default()
     };
 
@@ -603,6 +614,50 @@ mod tests {
         assert!(
             b.code.contains("module.exports") || b.code.contains("v:"),
             "{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn cjs_ambient_filename_is_shimmed_to_import_meta() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/uses-fn/package.json",
+            r#"{"name":"uses-fn","version":"1.0.0","main":"index.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/uses-fn/index.js",
+            "exports.here = __filename;\nexports.dir = __dirname;\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import * as m from \"uses-fn\";\nconsole.log(m.here, m.dir);\n",
+        );
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert!(
+            b.code.contains("import.meta.filename"),
+            "expected the __filename shim:\n{}",
+            b.code
+        );
+        assert!(
+            b.code.contains("import.meta.dirname"),
+            "expected the __dirname shim:\n{}",
+            b.code
+        );
+        assert!(
+            !b.code.contains("__filename") && !b.code.contains("__dirname"),
+            "ambient names must be rewritten:\n{}",
             b.code
         );
         let _ = std::fs::remove_dir_all(&cwd);

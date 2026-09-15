@@ -296,6 +296,31 @@ else
     skip "workspace src/ alias build parity (no inka-launcher next to $INKA)"
 fi
 
+echo "== bundling CJS __filename/__dirname (build + run) =="
+CJSFN="$SCRATCH/cjsfn"
+mkdir -p "$CJSFN/node_modules/uses-filename"
+printf '%s\n' '{"name":"uses-filename","version":"1.0.0","main":"index.js"}' \
+    > "$CJSFN/node_modules/uses-filename/package.json"
+printf '%s\n' 'exports.here = __filename;' 'exports.dir = __dirname;' \
+    'exports.ok = typeof __filename === "string" && typeof __dirname === "string";' \
+    > "$CJSFN/node_modules/uses-filename/index.js"
+printf '%s\n' 'import * as m from "uses-filename";' \
+    'console.log("cjs-filename", m.ok, m.here.includes("main.js"));' > "$CJSFN/entry.js"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$CJSFN" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build entry.js -o "$CJSFN/app" >/dev/null 2>&1) || {
+        echo "FAIL: cjs __filename build" >&2; exit 1
+    }
+    out="$("$CJSFN/app" 2>&1)" || {
+        echo "FAIL: cjs __filename artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"cjs-filename true true"*) echo "ok: cjs __filename/__dirname shim (build parity)" ;;
+        *) echo "FAIL: cjs __filename output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "cjs __filename shim (no inka-launcher next to $INKA)"
+fi
+
 echo "== package entry .js -> .ts (exports rewrite) =="
 # A package whose `exports` points at a `.js` entry but whose real source is
 # `.ts` (the TS "write .js, ship .ts" convention). `inka run` must rewrite the
