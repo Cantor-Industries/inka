@@ -11,7 +11,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use deno_cache_dir::{GlobalHttpCache, HttpCache};
 use deno_config::workspace::{
@@ -113,6 +113,10 @@ pub(crate) struct ResolverState {
     pub jsr_redirects: HashMap<String, String>,
     pub import_map: Option<import_map::ImportMap>,
     pub deno_dir: PathBuf,
+    /// Absolute resolved module ids recorded by the rolldown plugin (`npm:` and
+    /// bare packages resolved through `ctx.resolve`). Used post-build to locate
+    /// packages that carry run-time asset files (e.g. TypeScript's libs).
+    pub resolved_files: Arc<Mutex<Vec<String>>>,
 }
 
 impl ResolverState {
@@ -123,6 +127,18 @@ impl ResolverState {
         map.resolve(specifier, &referrer)
             .ok()
             .map(|u| u.to_string())
+    }
+
+    /// Record a resolved module id (best-effort; duplicates are ignored).
+    pub(crate) fn record_resolved(&self, id: &str) {
+        if !id.contains("node_modules") && !id.starts_with("file://") {
+            return;
+        }
+        if let Ok(mut v) = self.resolved_files.lock() {
+            if !v.iter().any(|e| e == id) {
+                v.push(id.to_string());
+            }
+        }
     }
 }
 
@@ -157,6 +173,7 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
         jsr_redirects: HashMap::new(),
         import_map,
         deno_dir: deno_dir.clone(),
+        resolved_files: Arc::new(Mutex::new(Vec::new())),
     };
 
     let Some(import_map) = state.import_map.clone() else {

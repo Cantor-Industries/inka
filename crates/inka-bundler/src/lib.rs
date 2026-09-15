@@ -71,6 +71,9 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         }
     }
 
+    // Kept to inspect which packages rolldown resolved after the build.
+    let resolved_files = state.resolved_files.clone();
+
     let plugin = Arc::new(DenoResolvePlugin { state });
     let shared: Arc<dyn Pluginable> = plugin.clone();
 
@@ -155,11 +158,67 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     }
     let code = chunks.into_iter().next().unwrap();
 
+    // Packages that resolve assets at run time need those files in the artifact.
+    // TypeScript is the notable case: its `ts.sys` looks up the default
+    // `lib.*.d.ts` next to the executing file (the bundle), so an inlined
+    // TypeScript reports "Cannot find name 'Promise'/'Record'" unless the libs
+    // travel with it.
+    let resolved = resolved_files.lock().map(|v| v.clone()).unwrap_or_default();
+    for (name, bytes) in typescript_libs(&resolved) {
+        if !embedded.iter().any(|(r, _)| r == &name) {
+            embedded.push((name, bytes));
+        }
+    }
+
     Ok(Bundle {
         code,
         embedded,
         warnings: Vec::new(),
     })
+}
+
+/// `lib.*.d.ts` files for any bundled TypeScript compiler, keyed by the file
+/// name alone so they land next to `main.js` in the artifact root.
+fn typescript_libs(resolved: &[String]) -> Vec<(String, Vec<u8>)> {
+    use std::collections::HashSet;
+    let mut seen_dirs: HashSet<std::path::PathBuf> = HashSet::new();
+    let mut out = Vec::new();
+    for id in resolved {
+        let path = match Url::parse(id) {
+            Ok(u) => match u.to_file_path() {
+                Ok(p) => p,
+                Err(_) => continue,
+            },
+            Err(_) => std::path::PathBuf::from(id),
+        };
+        let Some(dir) = path.parent() else { continue };
+        if dir.file_name().and_then(|n| n.to_str()) != Some("lib")
+            || !dir.to_string_lossy().contains("typescript")
+        {
+            continue;
+        }
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        if !matches!(
+            stem,
+            "typescript" | "tsserverlibrary" | "typescriptServices"
+        ) {
+            continue;
+        }
+        if !seen_dirs.insert(dir.to_path_buf()) {
+            continue;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("lib.") && name.ends_with(".d.ts") {
+                    if let Ok(bytes) = std::fs::read(entry.path()) {
+                        out.push((name, bytes));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// rolldown plugin that resolves import maps, `npm:`, `jsr:`, and serves cached
@@ -241,6 +300,7 @@ impl Plugin for DenoResolvePlugin {
                 if let Some(req_ref) = &req {
                     check_npm_pin(&resolved, req_ref)?;
                 }
+                self.state.record_resolved(resolved.id.as_str());
                 return Ok(Some(HookResolveIdOutput::from_resolved_id(resolved)));
             }
         }

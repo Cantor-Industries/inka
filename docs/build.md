@@ -56,6 +56,11 @@ want that flag's stricter behavior). Keeping such imports creates run-time
 cycles that break `class extends` at module init; this matches how Bun and Deno
 execute the source. Side-effect-only imports (`import "./x"`) are preserved.
 
+Apps that run the **TypeScript compiler at run time** (a language service,
+`ts.createProgram`, …) get TypeScript's `lib.*.d.ts` files embedded into the
+artifact next to `main.js`, because `ts.sys` resolves its default libs relative
+to the executing file. This adds a few MB only when `typescript` is bundled.
+
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
 

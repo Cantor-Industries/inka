@@ -32,7 +32,7 @@ skip() {
 
 echo "== installing packages into the project node_modules =="
 (cd "$SCRATCH" && npm install --no-save --omit=dev \
-    ms@2.1.3 ws@8.21.3 debug@4.3.7 effect hono @parcel/watcher >/dev/null 2>&1)
+    ms@2.1.3 ws@8.21.3 debug@4.3.7 effect hono @parcel/watcher typescript@5.9.3 >/dev/null 2>&1)
 
 # An unpatched CJS fixture with __esModule and a circular pair.
 mkdir -p "$SCRATCH/node_modules/esmflag" "$SCRATCH/node_modules/circ"
@@ -381,6 +381,32 @@ if [ -x "$LAUNCHER" ]; then
     esac
 else
     skip "verbatim-type cycle (no inka-launcher next to $INKA)"
+fi
+
+echo "== bundling TypeScript used at run time (lib files embedded) =="
+# An app that runs TypeScript itself (language service / createProgram) needs
+# TypeScript's `lib.*.d.ts` next to the bundle at run time; without them the
+# compiler reports "Cannot find name 'Promise'/'Record'".
+TSRUN="$SCRATCH/tsrun"
+mkdir -p "$TSRUN"
+printf '%s\n' 'import ts from "typescript";' \
+    'import { existsSync } from "node:fs";' \
+    'const p = ts.getDefaultLibFilePath({ target: ts.ScriptTarget.ESNext });' \
+    'const sf = ts.createSourceFile("x.ts", "const a: Record<string, number> = {};", ts.ScriptTarget.ESNext, true);' \
+    'console.log("tsdefaultlib", existsSync(p), sf.statements.length > 0);' > "$TSRUN/entry.ts"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$TSRUN" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A entry.ts -o "$TSRUN/app" >/dev/null 2>&1) || {
+        echo "FAIL: typescript-lib build" >&2; exit 1
+    }
+    out="$("$TSRUN/app" 2>&1)" || {
+        echo "FAIL: typescript-lib artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"tsdefaultlib true true"*) echo "ok: TypeScript default lib embedded (build parity)" ;;
+        *) echo "FAIL: typescript-lib output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "typescript default lib (no inka-launcher next to $INKA)"
 fi
 
 echo "== package entry .js -> .ts (exports rewrite) =="
