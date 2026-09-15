@@ -81,7 +81,12 @@ impl TempDir {
                 random_suffix()
             ));
             match fs::create_dir(&p) {
-                Ok(()) => return Ok(TempDir(p)),
+                Ok(()) => {
+                    // Stamp the owner so a crashed update's tree can be reaped
+                    // by the launcher's `.inka-owner` sweeper.
+                    let _ = fs::write(p.join(".inka-owner"), std::process::id().to_string());
+                    return Ok(TempDir(p));
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
                 Err(e) => return Err(format!("cannot create {}: {e}", p.display())),
             }
