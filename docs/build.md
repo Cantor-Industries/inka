@@ -81,9 +81,9 @@ embeds it. It tells the runtime what the artifact needs and may do:
 
 ```
 # runtime floor; also >, ==, or a bare exact version
-runtime=inka_runtime>=0.266.3
+runtime=inka_runtime>=0.266.5
 # optional cap: never auto-run on something newer
-tested-against=0.266.3
+tested-against=0.266.5
 # entry name (always derived from the build)
 module=main.js
 # permissions
@@ -95,7 +95,7 @@ text after a value is not stripped).
 
 There is **no on-disk manifest input**: `module=` is always the packed entry, and
 the runtime requirement comes from `inka.runtime` (or `--runtime`) with a default
-floor of `>=0.266.3`. The floor is always embedded, so an artifact can never
+floor of `>=0.266.5`. The floor is always embedded, so an artifact can never
 select a runtime too old to enforce its permissions.
 
 ## Permissions from project config
