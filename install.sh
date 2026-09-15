@@ -7,7 +7,7 @@
 # Like rustup, it installs per-user (no root). A pre-0.5.0 install is reset
 # first (0.5.0 is a clean break: the package store and vendoring were removed
 # and the runtime tuple moved), then the runtime is provisioned fresh. Later
-# 0.5.x installs are ordinary upgrades.
+# (0.5.0+) installs are ordinary upgrades.
 #
 # usage:
 #   curl --proto '=https' --tlsv1.2 -fsSL \
@@ -258,14 +258,13 @@ CURRENT=""
 
 # ---- previous-generation reset ----------------------------------------------
 # 0.5.0 is a clean break: the package store and vendoring were removed and the
-# runtime tuple moved. Detect a pre-0.5.0 install (toolchain VERSION not 0.5.x)
-# and remove the old toolchain + engine so the new release installs fresh.
-# Fresh machines and later 0.5.x upgrades skip this.
+# runtime tuple moved. Reset only a clearly pre-0.5.0 toolchain (0.0-0.4) so the
+# old toolchain + engine are removed before the new release installs fresh.
+# Fresh machines and every 0.5.0+ (or unknown/newer) install upgrade in place.
 engine_dir="${INKA_RUNTIME_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/inka/runtime}"
 reset=0
 case "$CURRENT" in
-    ""|0.5.*) ;;
-    *) reset=1 ;;
+    0.[0-4].*) reset=1 ;;
 esac
 if [ "$reset" = 1 ]; then
     info "resetting previous inka install (pre-0.5.0)"
