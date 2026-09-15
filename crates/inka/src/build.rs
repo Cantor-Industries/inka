@@ -273,6 +273,10 @@ fn pack(
         })
         .unwrap_or_else(|e| err(&e));
 
+        for w in &bundle.warnings {
+            eprintln!("warning: {w}");
+        }
+
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
         files.push(("main.js".to_string(), bundle.code.into_bytes()));
         for (rel, bytes) in bundle.embedded {

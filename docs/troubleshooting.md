@@ -57,6 +57,17 @@ uncached package errors.
 (`inka build --external <pkg>`) so their files are embedded, and the artifact must
 grant `ffi` (plus `sys` for platform detection) at run time.
 
+**`ReferenceError: <name> is not defined` from inside `eval`.** A source module
+uses **direct `eval`** whose string references a module-scope binding (a local,
+an imported name like `factory`/`ts`, …). `inka run` gives each module its own
+scope, so it works; a bundled artifact scope-hoists every module into one scope
+and role inlines/renames imports, so direct eval cannot see those names. `inka
+build` prints rolldown's `Use of direct `eval` …` warning for the affected
+modules. Fixes: pass the names explicitly with `new Function("dep", "return " +
+code)(dep)`, use indirect eval `(0, eval)(code)` (global scope only), or keep the
+package out of scope hoisting. See
+<https://rolldown.rs/guide/troubleshooting#avoiding-direct-eval>.
+
 **"inka was built without bundling support".** The `inka` binary was compiled
 without the `bundle` feature. Use an official release, or build with
 `cargo build --release -p inka --features bundle`.

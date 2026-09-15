@@ -170,10 +170,21 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         }
     }
 
+    // Surface rolldown's warnings instead of dropping them, so things it flags
+    // (notably direct `eval`, which a scope-hoisting bundle cannot preserve
+    // correctly) reach the user at build time. The `verbatimModuleSyntax`
+    // override is intentional (see `transform` above), so it is not surfaced.
+    let warnings = output
+        .warnings
+        .iter()
+        .map(ToString::to_string)
+        .filter(|w| !w.contains("onlyRemoveTypeImports"))
+        .collect();
+
     Ok(Bundle {
         code,
         embedded,
-        warnings: Vec::new(),
+        warnings,
     })
 }
 
