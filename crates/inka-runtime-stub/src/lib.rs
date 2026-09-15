@@ -70,51 +70,6 @@ unsafe fn init(exit_code: *mut c_int, err_msg: *mut *mut c_char) -> bool {
     true
 }
 
-/// Run an in-memory module (ABI-compatible stub; echoes when enabled).
-///
-/// # Safety
-/// Pointer arguments must be valid for the duration of the call: `specifier`
-/// and `perms` NUL-terminated C strings, `source` at least `source_len` bytes,
-/// and `exit_code`/`err_msg` writable.
-#[no_mangle]
-pub unsafe extern "C" fn inka_runtime_run_module_perm(
-    _rt: *mut c_void,
-    specifier: *const c_char,
-    source: *const c_char,
-    source_len: usize,
-    argc: c_int,
-    argv: *const *const c_char,
-    exit_code: *mut c_int,
-    err_msg: *mut *mut c_char,
-    perms: *const c_char,
-) -> c_int {
-    if !init(exit_code, err_msg) {
-        return -1;
-    }
-    let spec = read_cstr(specifier);
-    let perms = read_cstr(perms);
-    let src = if source.is_null() {
-        &[][..]
-    } else {
-        std::slice::from_raw_parts(source as *const u8, source_len)
-    };
-
-    if echo_enabled() {
-        eprintln!(
-            "[inka-stub] run_module_perm(specifier='{spec}', source={} bytes, argc={argc}, perms='{perms}')",
-            src.len()
-        );
-        echo_args(argc, argv);
-        eprintln!("[inka-stub] ---- module source ----");
-        use std::io::Write;
-        let mut out = std::io::stdout().lock();
-        let _ = out.write_all(src);
-        let _ = out.write_all(b"\n");
-        let _ = out.flush();
-    }
-    0
-}
-
 /// Run an entry module from a directory (ABI-compatible stub; echoes when
 /// enabled).
 ///

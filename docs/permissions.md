@@ -113,8 +113,9 @@ spec — malformed values never silently weaken the manifest.
 ## Hardening notes
 
 - **Fail-closed:** if an artifact declares permissions but the installed runtime
-  predates the `_perm` ABI, launching errors (exit 4) rather than silently
-  running allow-all.
+  predates the permission-aware run entry point
+  (`inka_runtime_run_module_dir`), launching errors (exit 4) rather than
+  silently running allow-all.
 - **Policy is a property of the runtime build:** runtimes built before the
   deny-by-default change ran permission-less artifacts allow-all; current builds
   deny. Rebuild old artifacts against the current runtime to inherit the new

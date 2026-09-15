@@ -68,6 +68,7 @@ jobs:
           set -euo pipefail
           cargo clippy --locked -p inka --features bundle --all-targets -- -D warnings
           cargo clippy --locked -p inka-bundler --all-targets -- -D warnings
+          cargo clippy --locked -p inka-runtime --all-targets -- -D warnings
           cargo test --locked -p inka-bundler
           cargo test --locked -p inka --bin inka --features bundle
 

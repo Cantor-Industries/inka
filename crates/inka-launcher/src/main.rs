@@ -4,10 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const FOOTER_LEN: usize = 24;
-const MAGIC_V1: &[u8] = b"INKFOOT2"; // single embedded source
-const MAGIC_V2: &[u8] = b"INKFOOT3"; // multi-file archive
-const MAGIC_V3: &[u8] = b"INKFOOT4"; // multi-file archive, TS pre-transpiled to JS
-const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
+const MAGIC: &[u8] = b"INKFOOT5"; // bundle + embedded files
 
 /// Remove the extracted tree if the process exits from inside the runtime
 /// (e.g. `Deno.exit`), which calls `exit()` and skips Rust destructors. The
@@ -90,18 +87,10 @@ fn parse_version(s: &str) -> Option<Version> {
 }
 
 enum Trailer<'a> {
-    /// v1: a single embedded source file + manifest.
-    Single {
-        source: &'a [u8],
-        manifest: &'a [u8],
-    },
-    /// v2: an archive of relative-path files + manifest.
+    /// An `INKFOOT5` archive of relative-path files + manifest.
     Archive {
         files: Vec<(String, Vec<u8>)>,
         manifest: &'a [u8],
-        /// True when the archive's `.ts/.mts/.cts` payloads are already
-        /// transpiled to JavaScript (built with `--transpile`).
-        precompiled: bool,
     },
 }
 
@@ -119,21 +108,11 @@ fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
     let mstart = bytes.len() - FOOTER_LEN - mlen;
     let pstart = mstart - alen;
     let manifest = &bytes[mstart..mstart + mlen];
-    match magic {
-        MAGIC_V1 => Ok(Trailer::Single {
-            source: &bytes[pstart..mstart],
-            manifest,
-        }),
-        MAGIC_V2 | MAGIC_V3 | MAGIC_V4 => {
-            let files = parse_archive(&bytes[pstart..mstart])?;
-            Ok(Trailer::Archive {
-                files,
-                manifest,
-                precompiled: magic == MAGIC_V3,
-            })
-        }
-        _ => Err("trailer magic not found (not an inka artifact?)".into()),
+    if magic != MAGIC {
+        return Err("trailer magic not found (not an inka artifact?)".into());
     }
+    let files = parse_archive(&bytes[pstart..mstart])?;
+    Ok(Trailer::Archive { files, manifest })
 }
 
 /// Archive layout: repeated `{path_len u64}{data_len u64}{path}{data}`.
@@ -476,144 +455,6 @@ fn required_string(m: &Manifest) -> String {
     }
 }
 
-fn load_and_run(
-    lib: &Path,
-    expected: Version,
-    module: &str,
-    payload: &[u8],
-    args: &[String],
-    perms: &str,
-) -> i32 {
-    let library = match load_runtime_library(lib) {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("[inka] failed to load {}: {e}", lib.display());
-            return 1;
-        }
-    };
-
-    type FnVersion = unsafe extern "C" fn() -> *const c_char;
-    type FnCreate = unsafe extern "C" fn() -> *mut c_void;
-    type FnRunPerm = unsafe extern "C" fn(
-        *mut c_void,
-        *const c_char,
-        *const c_char,
-        usize,
-        c_int,
-        *const *const c_char,
-        *mut c_int,
-        *mut *mut c_char,
-        *const c_char,
-    ) -> c_int;
-    type FnDestroy = unsafe extern "C" fn(*mut c_void);
-    type FnFreeString = unsafe extern "C" fn(*mut c_char);
-
-    unsafe {
-        let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!(
-                    "[inka] runtime {} is missing inka_runtime_version; reinstall it",
-                    lib.display()
-                );
-                return 4;
-            }
-        };
-        let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
-        if let Err(code) = check_reported_version(lib, &reported, expected) {
-            return code;
-        }
-
-        let create: libloading::Symbol<FnCreate> = match library.get(b"inka_runtime_create") {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!(
-                    "[inka] runtime {} is missing inka_runtime_create; reinstall it",
-                    lib.display()
-                );
-                return 4;
-            }
-        };
-        let destroy: libloading::Symbol<FnDestroy> = match library.get(b"inka_runtime_destroy") {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!(
-                    "[inka] runtime {} is missing inka_runtime_destroy; reinstall it",
-                    lib.display()
-                );
-                return 4;
-            }
-        };
-
-        debug_log!("[inka] runtime {} reports: {reported}", lib.display());
-
-        let rt = create();
-        let spec = CString::new(module).unwrap_or_else(|_| CString::new("main.js").unwrap());
-        let perms_c = CString::new(perms).unwrap_or_else(|_| CString::new("").unwrap());
-        let argv: Vec<CString> = args
-            .iter()
-            .map(|a| CString::new(a.as_str()).expect("nul byte in arg"))
-            .collect();
-        let mut argv_ptrs: Vec<*const c_char> = argv.iter().map(|c| c.as_ptr()).collect();
-        argv_ptrs.push(std::ptr::null());
-
-        let mut exit_code: c_int = 0;
-        let mut err_msg: *mut c_char = std::ptr::null_mut();
-
-        // The permission-aware entry point is mandatory: without it we cannot
-        // enforce the manifest's DSL, and there is no permission-less fallback
-        // (so deny-by-default can never silently degrade to allow-all).
-        let run_perm: libloading::Symbol<FnRunPerm> =
-            match library.get(b"inka_runtime_run_module_perm") {
-                Ok(s) => s,
-                Err(_) => {
-                    eprintln!(
-                        "[inka] runtime {} does not support permissions \
-                         (missing inka_runtime_run_module_perm); install a newer runtime",
-                        lib.display()
-                    );
-                    destroy(rt);
-                    return 4;
-                }
-            };
-
-        let rc = run_perm(
-            rt,
-            spec.as_ptr(),
-            payload.as_ptr() as *const c_char,
-            payload.len(),
-            argv.len() as c_int,
-            argv_ptrs.as_ptr(),
-            &mut exit_code,
-            &mut err_msg,
-            perms_c.as_ptr(),
-        );
-
-        // Optional: free the runtime-allocated error string. Older runtimes
-        // lack this symbol, in which case the string is leaked (as before).
-        let free_string = library
-            .get::<FnFreeString>(b"inka_runtime_free_string")
-            .ok();
-
-        if !err_msg.is_null() {
-            eprintln!(
-                "[inka] runtime error message: {}",
-                CStr::from_ptr(err_msg).to_string_lossy()
-            );
-            if let Some(free) = free_string {
-                free(err_msg);
-            }
-        }
-        destroy(rt);
-
-        if rc != 0 {
-            eprintln!("[inka] runtime call failed (rc={rc})");
-            return rc;
-        }
-        exit_code
-    }
-}
-
 fn load_and_run_dir(
     lib: &Path,
     expected: Version,
@@ -766,7 +607,7 @@ fn main() {
     };
 
     let manifest_bytes = match &trailer {
-        Trailer::Single { manifest, .. } | Trailer::Archive { manifest, .. } => *manifest,
+        Trailer::Archive { manifest, .. } => *manifest,
     };
     let m = parse_manifest(manifest_bytes);
     if let Some(bad) = &m.malformed {
@@ -788,29 +629,9 @@ fn main() {
     };
 
     let code = match trailer {
-        Trailer::Single {
-            source,
-            manifest: _,
-        } => {
-            debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
-            debug_log!(
-                "[inka] module '{}' payload {} bytes",
-                m.module,
-                source.len()
-            );
-            load_and_run(&path, v, &m.module, source, &args, &m.perms)
-        }
-        Trailer::Archive {
-            files, precompiled, ..
-        } => {
+        Trailer::Archive { files, .. } => {
             debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
             debug_log!("[inka] module '{}' archive {} files", m.module, files.len());
-            // A precompiled archive already carries JS for its .ts/.mts/.cts
-            // payloads; tell the runtime so it serves them without transpiling.
-            if precompiled {
-                env::set_var("INKA_PRECOMPILED", "1");
-                debug_log!("[inka] precompiled archive (no runtime TS transpile)");
-            }
             let tree = match extract_tree(&files) {
                 Ok(t) => t,
                 Err(e) => {

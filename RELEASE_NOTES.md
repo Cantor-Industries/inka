@@ -4,7 +4,7 @@
   it is safe to keep internal guidance here.
 
   The body uses `{{REL}}` (tag minus `v`, e.g. `0.6.1`) and `{{RUNTIME}}`
-  (`crates/inka-runtime/runtime-version`, e.g. `0.266.5`) placeholders; the
+  (`crates/inka-runtime/runtime-version`, e.g. `0.266.6`) placeholders; the
   workflow substitutes them when staging the release. Do not hardcode versions.
 -->
 # inka {{REL}} — runtime tuple {{RUNTIME}}

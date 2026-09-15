@@ -1,8 +1,8 @@
 # inka-runtime-stub
 
 A tiny stub runtime used for launcher development and spikes. It implements the
-same C ABI as the real `inka-runtime` (`inka_runtime_run_module_perm` +
-`inka_runtime_run_module_dir`) but does no work — it echoes what the launcher
+same C ABI as the real `inka-runtime` (`inka_runtime_run_module_dir`) but does
+no work — it echoes what the launcher
 asked for and returns a configured exit code, which is enough to test tuple
 discovery, roll-forward vs `tested-against=` pinning, and archive extraction
 without building the heavyweight Deno engine.

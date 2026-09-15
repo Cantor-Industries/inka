@@ -29,12 +29,8 @@ they are delivered as a new tuple without changing the `deno_runtime` pin.
 ```
 
 The footer is the last 24 bytes: an 8-byte magic plus two little-endian `u64`
-lengths. Magic values:
-
-- `INKFOOT5` — a bundle plus optional embedded files (current `inka build`)
-- `INKFOOT2` — a single embedded source file (legacy)
-- `INKFOOT3` — a multi-file archive (legacy)
-- `INKFOOT4` — a multi-file archive with TypeScript pre-transpiled (legacy)
+lengths. The only magic is `INKFOOT5` — a bundle plus optional embedded files;
+`inka build` emits it and the launcher accepts nothing else.
 
 At run time the launcher reads its own executable, parses the trailer, and
 extracts the archive to a temp tree when needed.
@@ -45,9 +41,9 @@ Recognized keys (line-oriented; `#` comments must be on their own line):
 
 ```
 # floor (also >, ==, or bare exact)
-runtime=inka_runtime>=0.266.5
+runtime=inka_runtime>=0.266.6
 # cap: do not roll forward past this
-tested-against=0.266.5
+tested-against=0.266.6
 # entry file inside the payload
 module=main.js
 # or allow-<cat>=… / deny-<cat>=…
@@ -73,7 +69,6 @@ The launcher `dlopen`s the runtime and calls a frozen C ABI:
 
 - `inka_runtime_version() -> const char*`
 - `inka_runtime_create() -> *mut void`
-- `inka_runtime_run_module_perm(rt, name, payload, len, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_run_module_dir(rt, dir, entry, argc, argv, out_exit, out_err, perms)`
 - `inka_runtime_destroy(rt)`
 - `inka_runtime_free_string(ptr)` — optional; frees an error string the runtime
@@ -84,9 +79,9 @@ The runtime is loaded **`RTLD_GLOBAL`** (not the `RTLD_LOCAL` default) so native
 it exports; with `RTLD_LOCAL` the addon aborts with `undefined symbol:
 napi_module_register`. See [Dependencies & resolution](packages.md#native-addons-node).
 
-`_perm` and `_dir` are mandatory: a runtime that lacks either is refused
-(exit 4) rather than run with the wrong semantics. There is no permission-less
-entry point, so deny-by-default cannot degrade to allow-all.
+`_dir` is mandatory: a runtime that lacks it is refused (exit 4) rather than
+run with the wrong semantics. There is no permission-less entry point, so
+deny-by-default cannot degrade to allow-all.
 
 ## Resolution
 
