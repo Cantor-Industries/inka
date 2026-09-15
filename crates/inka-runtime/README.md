@@ -39,12 +39,14 @@ absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 
 `resolver.rs` builds an offline `deno_graph::ModuleGraph` for the entry from
 `$DENO_DIR` (a `GlobalHttpCache` loader), fed by the workspace import map, then
-exposes synchronous lookups. Bare specifiers are mapped by Deno's
+exposes synchronous lookups. A bare specifier is mapped in this order: Deno's
 `deno_resolver::workspace::WorkspaceResolver` (import map, package.json
-`#imports`, workspace members, and the filesystem's `node_modules`); `tsconfig`
-`baseUrl`/`paths` are resolved for types only, not at run time (Deno semantics).
-`node_services.rs` is the CJS/`require()` seam over Deno's
-`deno_node`/`node_resolver` machinery:
+`#imports`, workspace members), then — if that leaves it unmapped —
+`tsconfig.rs` resolves the importing file's nearest `tsconfig`/`jsconfig`
+`baseUrl`/`paths` via `oxc_resolver` (the same resolver `inka build` uses),
+confined to the execution tree; npm/`node:`/`jsr:` then resolve through Deno's
+node resolver over `node_modules`. `node_services.rs` is the CJS/`require()`
+seam over Deno's `deno_node`/`node_resolver` machinery:
 
 - `require()` runs natively (CJS→CJS, Node builtins, nested deps, cycles),
 - ESM `import` of a CJS package is served as an ESM facade (default plus

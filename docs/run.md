@@ -70,11 +70,13 @@ resolve as they do in `inka build`. When the current directory has no
 `node_modules` but an ancestor workspace root does (hoisted dependencies), `run`
 also roots at that ancestor.
 
-Bare specifiers resolve through Deno's resolution policy: the `deno.json`
-import map, package.json `#imports`, workspace members, and the project's
-`node_modules`. `tsconfig.json` `compilerOptions.baseUrl`/`paths` are **not**
-applied at run time (Deno uses them for type-checking only) — declare such
-aliases in the `deno.json` import map instead.
+Bare specifiers resolve in this order: the `deno.json` import map (plus
+`package.json` `#imports` and workspace members), then the importing file's
+nearest `tsconfig.json`/`jsconfig.json` `compilerOptions.baseUrl`/`paths`, then
+the project's `node_modules`. The tsconfig step uses the same resolver as
+`inka build`, so a `"baseUrl": "."` `src/util` import or a `@/*` alias works in
+`run` exactly as it does in a built artifact. `require()` of a `baseUrl` path is
+not supported (use an ESM import).
 
 ## See also
 

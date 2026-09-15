@@ -4657,6 +4657,7 @@ dependencies = [
  "futures",
  "import_map",
  "node_resolver",
+ "oxc_resolver",
  "serde_json",
  "sys_traits",
  "tokio",

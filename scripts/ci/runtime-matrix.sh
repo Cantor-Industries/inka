@@ -236,18 +236,65 @@ else
     skip "monorepo build parity (no inka-launcher next to $INKA)"
 fi
 
-echo "== tsconfig baseUrl/paths are not applied at run time (Deno semantics) =="
+echo "== tsconfig baseUrl/paths resolve at run time (Bun/TS parity) =="
 NODENTS="$SCRATCH/nodents"
 mkdir -p "$NODENTS/src"
 printf '%s\n' '{ "compilerOptions": { "baseUrl": "." } }' > "$NODENTS/tsconfig.json"
-printf '%s\n' 'export const u = 1;' > "$NODENTS/src/util.ts"
+printf '%s\n' 'export const u = "baseurl-ok";' > "$NODENTS/src/util.ts"
 printf '%s\n' 'import { u } from "src/util";' 'console.log(u);' > "$NODENTS/main.ts"
-if out="$(cd "$NODENTS" && "$INKA" run -A main.ts 2>&1)"; then
-    echo "FAIL: tsconfig baseUrl import unexpectedly resolved at run time" >&2
-    printf '%s\n' "$out" >&2
-    exit 1
+out="$(cd "$NODENTS" && "$INKA" run -A main.ts 2>&1)" || {
+    echo "FAIL: tsconfig baseUrl import" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"baseurl-ok"*) echo "ok: tsconfig baseUrl resolves at run time" ;;
+    *) echo "FAIL: tsconfig baseUrl output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+echo "== workspace: sibling package with an internal src/ baseUrl import =="
+WS2="$SCRATCH/ws2"
+mkdir -p "$WS2/packages/a/src" "$WS2/packages/b/src" "$WS2/packages/a/node_modules"
+printf '%s\n' '{"name":"ws2","private":true,"workspaces":["packages/*"]}' > "$WS2/package.json"
+printf '%s\n' '{"name":"a","type":"module","dependencies":{"b":"workspace:*"}}' > "$WS2/packages/a/package.json"
+printf '%s\n' '{"name":"b","type":"module","exports":"./src/index.ts"}' > "$WS2/packages/b/package.json"
+printf '%s\n' '{ "compilerOptions": { "baseUrl": "." } }' > "$WS2/packages/b/tsconfig.json"
+printf '%s\n' 'export const name = "b-util";' > "$WS2/packages/b/src/name.ts"
+printf '%s\n' 'import { name } from "src/name";' \
+    'export const greet = () => `hi+${name}`;' > "$WS2/packages/b/src/index.ts"
+printf '%s\n' 'import { greet } from "b";' \
+    'console.log("ws2", greet());' > "$WS2/packages/a/src/index.ts"
+ln -sfn ../../b "$WS2/packages/a/node_modules/b"
+
+out="$(cd "$WS2" && "$INKA" run -A packages/a/src/index.ts 2>&1)" || {
+    echo "FAIL: workspace src/ alias run from root" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"ws2 hi+b-util"*) echo "ok: workspace sibling src/ alias (run from root)" ;;
+    *) echo "FAIL: workspace src/ alias (run from root)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+out="$(cd "$WS2/packages/a" && "$INKA" run -A src/index.ts 2>&1)" || {
+    echo "FAIL: workspace src/ alias run from member" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"ws2 hi+b-util"*) echo "ok: workspace sibling src/ alias (run from member)" ;;
+    *) echo "FAIL: workspace src/ alias (run from member)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+if [ -x "$LAUNCHER" ]; then
+    (cd "$WS2" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build packages/a/src/index.ts \
+        -o "$WS2/a" >/dev/null 2>&1) || {
+        echo "FAIL: workspace src/ alias build" >&2; exit 1
+    }
+    out="$("$WS2/a" 2>&1)" || {
+        echo "FAIL: workspace src/ alias artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"ws2 hi+b-util"*) echo "ok: workspace sibling src/ alias (build parity)" ;;
+        *) echo "FAIL: workspace src/ alias artifact output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "workspace src/ alias build parity (no inka-launcher next to $INKA)"
 fi
-echo "ok: tsconfig baseUrl/paths rejected at run time"
 
 echo "== package entry .js -> .ts (exports rewrite) =="
 # A package whose `exports` points at a `.js` entry but whose real source is

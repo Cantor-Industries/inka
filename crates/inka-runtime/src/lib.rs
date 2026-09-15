@@ -46,6 +46,7 @@ mod runtime_snapshot {
 mod node_services;
 mod resolver;
 mod temp;
+mod tsconfig;
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -77,6 +78,10 @@ struct PkgLoader {
     /// Deno's workspace resolver: the authoritative import map +
     /// package.json/workspace mapping (the same policy Deno applies).
     workspace: Rc<deno_resolver::workspace::WorkspaceResolver<RealSys>>,
+    /// Run-time `tsconfig` `baseUrl`/`paths` fallback (the same `oxc_resolver`
+    /// `inka build` uses), applied to bare specifiers the import map leaves
+    /// unmapped.
+    tsconfig: tsconfig::Resolver,
 }
 
 fn precompiled_flag() -> bool {
@@ -94,11 +99,9 @@ impl ModuleLoader for PkgLoader {
             && !specifier.starts_with("./")
             && !specifier.starts_with("../")
             && !specifier.starts_with('/');
-        // Deno's workspace resolver maps a bare specifier through the
-        // `deno.json` import map, package.json `#imports`, and workspace
-        // members — the same policy Deno applies. `tsconfig`
-        // `baseUrl`/`paths` are intentionally NOT applied at run time (Deno
-        // resolves those for type-checking only).
+        // 1. Deno's workspace resolver maps a bare specifier through the
+        //    `deno.json` import map, package.json `#imports`, and workspace
+        //    members — the same policy Deno applies.
         let mapped = if bare {
             url::Url::parse(referrer).ok().and_then(|referrer_url| {
                 match self.workspace.resolve(
@@ -116,6 +119,20 @@ impl ModuleLoader for PkgLoader {
         } else {
             None
         };
+
+        // 2. A bare specifier the import map leaves unmapped may be a
+        //    `tsconfig` `baseUrl`/`paths` alias (e.g. `src/util` that resolves
+        //    against `"baseUrl": "."`). Resolve it with the same `oxc_resolver`
+        //    `inka build` uses, confined to the execution tree. `#imports` is
+        //    left to Deno's node resolver.
+        if bare && mapped.is_none() && !specifier.starts_with('#') {
+            if let Ok(referrer_url) = url::Url::parse(referrer) {
+                if let Some(u) = self.tsconfig.resolve(specifier, &referrer_url) {
+                    return Ok(u);
+                }
+            }
+        }
+
         let spec = mapped.as_ref().map(|u| u.as_str()).unwrap_or(specifier);
 
         if spec.starts_with("npm:") {
@@ -738,6 +755,7 @@ fn run_tree(
             node_services,
             resolver: Rc::new(resolver_state),
             workspace: Rc::new(workspace),
+            tsconfig: tsconfig::Resolver::new(root.clone()),
         });
         run_module_async(&url, args, permissions, loader, ext_services).await
     })

@@ -10,10 +10,13 @@ what is already on disk.
 
 1. **Import map** — `deno.json`/`deno.jsonc` `imports`/`scopes` (bare specifiers
    and remaps).
-2. **`tsconfig.json`/`jsconfig.json`** — parsed by Deno's resolver, but
-   `compilerOptions.baseUrl`/`paths` are applied for **type resolution only**,
-   not at run time (Deno semantics). Use the `deno.json` import map for
-   run-time aliases.
+2. **`tsconfig.json`/`jsconfig.json` `baseUrl`/`paths`** — a bare specifier like
+   `src/util` (with `"baseUrl": "."`) or an alias like `@/*` resolves against
+   the **nearest** config for the importing file, using the same `oxc_resolver`
+   that `inka build` uses (including `extends`, JSONC, and `.js`→`.ts`
+   extension rewriting). Results are confined to the execution tree. ESM
+   imports only; `require()` of a `baseUrl` path is not resolved (use an ESM
+   import).
 3. **Project `node_modules`** — bring-your-own-node_modules. Hoisted, nested
    (conflicting versions), and symlinked layouts (Deno isolated `.deno/`, pnpm
    `.pnpm/`) all work; the **nearest `node_modules` wins**. In a monorepo where
