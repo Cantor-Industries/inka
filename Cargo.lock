@@ -4595,6 +4595,7 @@ name = "inka"
 version = "0.6.0"
 dependencies = [
  "inka-bundler",
+ "jsonc-parser",
  "libc",
  "libloading 0.8.9",
  "serde_json",
@@ -4610,8 +4611,10 @@ dependencies = [
  "deno_cache_dir",
  "deno_error",
  "deno_graph",
+ "deno_semver",
  "futures",
  "import_map",
+ "jsonc-parser",
  "rolldown",
  "rolldown_common",
  "rolldown_ecmascript",
@@ -4650,6 +4653,7 @@ dependencies = [
  "deno_semver",
  "futures",
  "import_map",
+ "jsonc-parser",
  "node_resolver",
  "serde_json",
  "sys_traits",

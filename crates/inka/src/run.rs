@@ -198,8 +198,7 @@ fn declares_workspace(dir: &Path) -> bool {
         }
     }
     if let Ok(text) = fs::read_to_string(dir.join("deno.json")) {
-        let stripped = crate::config::strip_jsonc(&text);
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&stripped) {
+        if let Ok(v) = crate::config::parse_jsonc(&text) {
             if v.get("workspace")
                 .is_some_and(|w| w.is_array() || w.is_object())
             {

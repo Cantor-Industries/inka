@@ -157,13 +157,15 @@ impl GraphResolverState {
 /// relative when `DENO_DIR`/`HOME` are relative; callers that read the cache
 /// must go through `validate_deno_dir` first.
 fn raw_deno_dir() -> PathBuf {
-    if let Ok(d) = std::env::var("DENO_DIR") {
-        if !d.is_empty() {
-            return PathBuf::from(d);
-        }
-    }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home).join(".cache/deno")
+    deno_cache_dir::resolve_deno_dir(
+        &RealSys,
+        deno_cache_dir::ResolveDenoDirOptions {
+            maybe_initial_cwd: None,
+            maybe_custom_root: None,
+        },
+    )
+    .map(|c| c.into_owned())
+    .unwrap_or_else(|_| PathBuf::from(".deno"))
 }
 
 pub(crate) fn deno_dir_path() -> PathBuf {
@@ -245,7 +247,9 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> GraphResolverState {
 
 fn load_import_map(path: &Path) -> Result<import_map::ImportMap, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let value: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    // `deno.jsonc` allows comments/trailing commas; parse it as JSONC.
+    let value: serde_json::Value = jsonc_parser::parse_to_serde_value(&text, &Default::default())
+        .map_err(|e| e.to_string())?;
     // Keep only the import-map keys; deno.json carries unrelated config too.
     let mut map_value = serde_json::Map::new();
     if let Some(v) = value.get("imports") {

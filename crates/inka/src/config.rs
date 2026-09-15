@@ -25,90 +25,12 @@ use serde_json::Value;
 
 const CATEGORIES: [&str; 8] = ["read", "write", "net", "env", "run", "sys", "ffi", "import"];
 
-/// Strip `//` and `/* … */` comments and trailing commas from JSONC text,
-/// respecting string literals and escapes.
-pub fn strip_jsonc(input: &str) -> String {
-    let bytes: Vec<char> = input.chars().collect();
-    let mut out = String::with_capacity(input.len());
-    let mut i = 0usize;
-    let n = bytes.len();
-    let mut in_string = false;
-    let mut prev_non_ws: char = '\0';
-    while i < n {
-        let c = bytes[i];
-        if in_string {
-            out.push(c);
-            if c == '\\' && i + 1 < n {
-                out.push(bytes[i + 1]);
-                i += 2;
-                continue;
-            }
-            if c == '"' {
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-        match c {
-            '"' => {
-                in_string = true;
-                out.push(c);
-                i += 1;
-            }
-            '/' if i + 1 < n && bytes[i + 1] == '/' => {
-                while i < n && bytes[i] != '\n' {
-                    i += 1;
-                }
-            }
-            '/' if i + 1 < n && bytes[i + 1] == '*' => {
-                i += 2;
-                while i + 1 < n && !(bytes[i] == '*' && bytes[i + 1] == '/') {
-                    i += 1;
-                }
-                i = (i + 2).min(n);
-            }
-            ',' => {
-                // Peek past whitespace *and* comments for a closing bracket.
-                let mut j = i + 1;
-                loop {
-                    while j < n && bytes[j].is_whitespace() {
-                        j += 1;
-                    }
-                    if j + 1 < n && bytes[j] == '/' && bytes[j + 1] == '/' {
-                        while j < n && bytes[j] != '\n' {
-                            j += 1;
-                        }
-                        continue;
-                    }
-                    if j + 1 < n && bytes[j] == '/' && bytes[j + 1] == '*' {
-                        j += 2;
-                        while j + 1 < n && !(bytes[j] == '*' && bytes[j + 1] == '/') {
-                            j += 1;
-                        }
-                        j = (j + 2).min(n);
-                        continue;
-                    }
-                    break;
-                }
-                if j < n && (bytes[j] == '}' || bytes[j] == ']') {
-                    // drop the trailing comma
-                    i += 1;
-                } else {
-                    out.push(c);
-                    i += 1;
-                }
-            }
-            _ => {
-                if !c.is_whitespace() {
-                    prev_non_ws = c;
-                }
-                let _ = prev_non_ws;
-                out.push(c);
-                i += 1;
-            }
-        }
-    }
-    out
+/// Parse JSONC (JSON with comments and trailing commas) into a value.
+///
+/// Uses `jsonc-parser`, the same parser Deno uses, so a `deno.jsonc` (or any
+/// config we choose to accept comments in) is read exactly as Deno reads it.
+pub fn parse_jsonc(input: &str) -> Result<Value, String> {
+    jsonc_parser::parse_to_serde_value(input, &Default::default()).map_err(|e| e.to_string())
 }
 
 /// Outcome of probing one config file. An *absent* file is simply "no config";
@@ -133,14 +55,14 @@ fn read_config_file(cwd: &Path, name: &str) -> LoadOutcome {
             ))
         }
     };
-    // JSONC stripping happens first; a parse failure of the stripped text is an
-    // Unparseable case, not a read error.
-    let text = if name.ends_with(".jsonc") {
-        strip_jsonc(&raw)
+    // `.jsonc` configs accept comments/trailing commas; plain `.json` stays
+    // strict. A parse failure is an Unparseable case, not a read error.
+    let parsed = if name.ends_with(".jsonc") {
+        parse_jsonc(&raw)
     } else {
-        raw
+        serde_json::from_str(&raw).map_err(|e| e.to_string())
     };
-    match serde_json::from_str(&text) {
+    match parsed {
         Ok(v) => LoadOutcome::Ok(v),
         Err(e) => LoadOutcome::Unparseable(format!("{} is not valid JSON: {e}", path.display())),
     }
@@ -857,19 +779,20 @@ mod tests {
     }
 
     #[test]
-    fn jsonc_strip() {
-        let s = strip_jsonc(
+    fn jsonc_parses_comments_and_trailing_commas() {
+        let v = parse_jsonc(
             "{\n  // a comment\n  \"imports\": {\"a\": \"b\",}, /* block */ \"n\": 1,}",
-        );
-        assert!(serde_json::from_str::<Value>(&s).is_ok(), "json: {s}");
+        )
+        .expect("jsonc");
+        assert_eq!(v["n"], serde_json::json!(1));
+        assert_eq!(v["imports"]["a"], serde_json::json!("b"));
     }
 
     #[test]
     fn jsonc_trailing_comma_before_comment() {
         // A trailing comma followed by a comment before the closing bracket.
-        let s = strip_jsonc("{\n  \"a\": [1, // note\n  ],\n  \"b\": 2, /* x */\n}");
-        assert!(serde_json::from_str::<Value>(&s).is_ok(), "json: {s}");
-        let v: Value = serde_json::from_str(&s).unwrap();
+        let v =
+            parse_jsonc("{\n  \"a\": [1, // note\n  ],\n  \"b\": 2, /* x */\n}").expect("jsonc");
         assert_eq!(v["a"], serde_json::json!([1]));
     }
 

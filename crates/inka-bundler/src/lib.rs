@@ -7,6 +7,8 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
+use deno_semver::npm::NpmPackageReqReference;
+use deno_semver::Version;
 use rolldown::plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput,
     HookResolveIdReturn, HookUsage, Plugin, PluginContext, Pluginable, SharedLoadPluginContext,
@@ -189,15 +191,18 @@ impl Plugin for DenoResolvePlugin {
         if target.starts_with("http://") || target.starts_with("https://") {
             return Ok(Some(HookResolveIdOutput::from_id(target)));
         }
-        let npm_bare = if let Some(rest) = target.strip_prefix("npm:") {
-            npm_target(rest)
+        let npm = if let Some(rest) = target.strip_prefix("npm:") {
+            npm_bare_and_req(rest)
         } else if bare {
-            Some(target.clone())
+            Some((target.clone(), None))
         } else {
             None
         };
-        if let Some(spec_bare) = npm_bare {
+        if let Some((spec_bare, req)) = npm {
             if let Ok(Ok(resolved)) = ctx.resolve(&spec_bare, importer, None).await {
+                if let Some(req_ref) = &req {
+                    check_npm_pin(&resolved, req_ref)?;
+                }
                 return Ok(Some(HookResolveIdOutput::from_resolved_id(resolved)));
             }
         }
@@ -244,30 +249,71 @@ fn read_remote_source(deno_dir: &Path, url: &Url) -> Option<(String, ModuleType)
     Some((String::from_utf8_lossy(&bytes).into_owned(), module_type))
 }
 
-/// Strip the version from an `npm:` body, keeping the subpath:
-/// `foo@1/sub` -> `foo/sub`, `@scope/foo@1/sub` -> `@scope/foo/sub`.
-fn npm_target(body: &str) -> Option<String> {
-    let (name, rest) = if body.starts_with('@') {
-        let slash = body.find('/')?;
-        let after = &body[slash + 1..];
-        let end = after
-            .find(['@', '/'])
-            .map(|i| slash + 1 + i)
-            .unwrap_or(body.len());
-        (&body[..end], &body[end..])
-    } else {
-        let end = body.find(['@', '/']).unwrap_or(body.len());
-        (&body[..end], &body[end..])
+/// Parse an `npm:` body into the bare specifier rolldown resolves plus the
+/// version requirement to enforce: `foo@1/sub` -> (`foo/sub`, req `1`),
+/// `@scope/foo@~1.2` -> (`@scope/foo`, req `~1.2`). Uses `deno_semver`'s
+/// `NpmPackageReqReference`, the same parser Deno uses.
+fn npm_bare_and_req(body: &str) -> Option<(String, Option<NpmPackageReqReference>)> {
+    let req_ref = NpmPackageReqReference::from_str(&format!("npm:{body}")).ok()?;
+    let req = req_ref.req();
+    let bare = match req_ref.sub_path() {
+        Some(sub) => format!("{}/{}", req.name, sub),
+        None => req.name.to_string(),
     };
-    let sub = if let Some(rest) = rest.strip_prefix('@') {
-        rest.find('/').map(|i| &rest[i + 1..])
-    } else {
-        rest.strip_prefix('/')
+    Some((bare, Some(req_ref)))
+}
+
+/// Enforce an `npm:` version requirement against the version rolldown resolved
+/// (the same policy `inka run` applies when loading an `npm:` specifier).
+fn check_npm_pin(
+    resolved: &rolldown_common::ResolvedId,
+    req_ref: &NpmPackageReqReference,
+) -> anyhow::Result<()> {
+    let req = req_ref.req();
+    if req.version_req.version_text() == "*" {
+        return Ok(());
+    }
+    let installed = resolved
+        .package_json
+        .as_deref()
+        .and_then(|p| p.version())
+        .map(str::to_string)
+        .or_else(|| installed_version_from_id(resolved.id.as_str()));
+    let Some(installed) = installed.and_then(|v| Version::parse_standard(&v).ok()) else {
+        // The installed version is unknown (e.g. a workspace file dependency);
+        // leave enforcement to the runtime rather than guess here.
+        return Ok(());
     };
-    Some(match sub {
-        Some(s) => format!("{name}/{s}"),
-        None => name.to_string(),
-    })
+    if !req.version_req.matches(&installed) {
+        return Err(anyhow::anyhow!(
+            "package '{}' is installed at {}, which does not satisfy '{}'",
+            req.name,
+            installed,
+            req.version_req
+        ));
+    }
+    Ok(())
+}
+
+/// The `version` of the nearest `package.json` above a resolved module id.
+fn installed_version_from_id(id: &str) -> Option<String> {
+    let path = Url::parse(id)
+        .ok()
+        .and_then(|u| u.to_file_path().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from(id));
+    let mut dir = path.parent();
+    while let Some(d) = dir {
+        let pkg = d.join("package.json");
+        if let Ok(text) = std::fs::read_to_string(&pkg) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(ver) = v.get("version").and_then(|x| x.as_str()) {
+                    return Some(ver.to_string());
+                }
+            }
+        }
+        dir = d.parent();
+    }
+    None
 }
 
 #[cfg(test)]
@@ -478,6 +524,85 @@ mod tests {
         assert!(
             b.code.contains("sourceMappingURL=data:"),
             "expected an inline data-URL source map:\n{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn jsonc_import_map_is_parsed() {
+        let cwd = scratch();
+        mk(&cwd, "util.js", "export const u = \"jsonc-ok\";\n");
+        mk(
+            &cwd,
+            "deno.jsonc",
+            "{\n  // a comment and a trailing comma\n  \"imports\": { \"@util\": \"./util.js\", },\n}\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import { u } from \"@util\";\nconsole.log(u);\n",
+        );
+        let opts = BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let b = bundle(opts).unwrap();
+        assert!(
+            b.code.contains("jsonc-ok"),
+            "jsonc import map not applied:\n{}",
+            b.code
+        );
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn npm_version_pin_is_enforced() {
+        let cwd = scratch();
+        mk(
+            &cwd,
+            "node_modules/foo/package.json",
+            r#"{"name":"foo","version":"1.0.0","main":"index.js"}"#,
+        );
+        mk(
+            &cwd,
+            "node_modules/foo/index.js",
+            "module.exports = { v: 1 };\n",
+        );
+        mk(
+            &cwd,
+            "entry.js",
+            "import foo from \"npm:foo@^2\";\nconsole.log(foo.v);\n",
+        );
+        let opts = || BundleOptions {
+            cwd: &cwd,
+            entry: "entry.js",
+            external: &[],
+            minify: false,
+            sourcemap: false,
+        };
+        let err = match bundle(opts()) {
+            Err(e) => e,
+            Ok(_) => panic!("expected a version-pin error for npm:foo@^2"),
+        };
+        assert!(
+            err.contains("does not satisfy"),
+            "expected a version-pin error, got: {err}"
+        );
+
+        // A satisfying pin still bundles.
+        mk(
+            &cwd,
+            "entry.js",
+            "import foo from \"npm:foo@^1\";\nconsole.log(foo.v);\n",
+        );
+        let b = bundle(opts()).unwrap();
+        assert!(
+            b.code.contains("module.exports") || b.code.contains("v:"),
+            "{}",
             b.code
         );
         let _ = std::fs::remove_dir_all(&cwd);
