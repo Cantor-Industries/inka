@@ -114,6 +114,20 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
             on_demand_wrapping: Some(true),
             ..Default::default()
         }),
+        // Elide imports that are only used in type positions even when the
+        // project sets tsconfig `verbatimModuleSyntax: true`. Keeping such
+        // imports introduces runtime cycles (`a.ts` imports a type from `b.ts`
+        // while `b.ts` imports a value from `a.ts`) that break `class extends`
+        // at module init. This matches the runtime (Bun/Deno) and the common
+        // bundler default. Side-effect-only imports (`import "./x"`) are still
+        // preserved; only unused bindings are dropped.
+        transform: Some(rolldown::BundlerTransformOptions {
+            typescript: Some(rolldown::TypeScriptOptions {
+                only_remove_type_imports: Some(false),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 

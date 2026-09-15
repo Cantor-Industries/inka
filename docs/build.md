@@ -50,6 +50,12 @@ re-export barrels), so a module that does `class X extends Y` sees `Y`
 initialized even after scope hoisting. This is stricter than the default and
 trades a little bundle size for correctness.
 
+Imports that are only used in type positions are **elided** even when the
+project sets `tsconfig` `verbatimModuleSyntax: true` (so use `import type` if you
+want that flag's stricter behavior). Keeping such imports creates run-time
+cycles that break `class extends` at module init; this matches how Bun and Deno
+execute the source. Side-effect-only imports (`import "./x"`) are preserved.
+
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
 

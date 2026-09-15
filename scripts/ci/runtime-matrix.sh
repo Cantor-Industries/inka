@@ -353,6 +353,36 @@ else
     skip "barrel-cycle execution order (no inka-launcher next to $INKA)"
 fi
 
+echo "== bundling: type-only import cycle (verbatimModuleSyntax) =="
+# `tsconfig` `verbatimModuleSyntax: true` makes TypeScript keep a plain import
+# that is only used in a type position. Keeping it creates a runtime cycle
+# (a.ts -> b.ts -> a.ts) that breaks `class extends` at init. The bundler must
+# elide type-only-used imports (as Bun/Deno do).
+VBM="$SCRATCH/vbm"
+mkdir -p "$VBM"
+printf '%s\n' '{"compilerOptions":{"verbatimModuleSyntax":true}}' > "$VBM/tsconfig.json"
+printf '%s\n' 'import { Sub } from "./b";' \
+    'export class Base { make(): Sub { return null as unknown as Sub; } }' > "$VBM/a.ts"
+printf '%s\n' 'import { Base } from "./a";' \
+    'export class Sub extends Base {}' > "$VBM/b.ts"
+printf '%s\n' 'import { Base } from "./a";' \
+    'import { Sub } from "./b";' \
+    'console.log("verbatim-type", new Sub() instanceof Base);' > "$VBM/index.ts"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$VBM" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A index.ts -o "$VBM/app" >/dev/null 2>&1) || {
+        echo "FAIL: verbatim-type build" >&2; exit 1
+    }
+    out="$("$VBM/app" 2>&1)" || {
+        echo "FAIL: verbatim-type artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"verbatim-type true"*) echo "ok: type-only import cycle (build parity)" ;;
+        *) echo "FAIL: verbatim-type output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "verbatim-type cycle (no inka-launcher next to $INKA)"
+fi
+
 echo "== package entry .js -> .ts (exports rewrite) =="
 # A package whose `exports` points at a `.js` entry but whose real source is
 # `.ts` (the TS "write .js, ship .ts" convention). `inka run` must rewrite the
