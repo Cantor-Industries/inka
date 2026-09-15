@@ -296,6 +296,29 @@ else
     skip "workspace src/ alias build parity (no inka-launcher next to $INKA)"
 fi
 
+echo "== workspace: --external finds a hoisted dependency =="
+WSEX="$SCRATCH/wsex"
+mkdir -p "$WSEX/packages/app" "$WSEX/node_modules/dep"
+printf '%s\n' '{"name":"wsex","private":true,"workspaces":["packages/*"]}' > "$WSEX/package.json"
+printf '%s\n' '{"name":"dep","version":"1.0.0","main":"index.js"}' > "$WSEX/node_modules/dep/package.json"
+printf '%s\n' 'module.exports = { v: "dep-ok" };' > "$WSEX/node_modules/dep/index.js"
+printf '%s\n' 'import dep from "dep";' \
+    'console.log("ws-external", dep.v);' > "$WSEX/packages/app/index.ts"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$WSEX/packages/app" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build -A --external dep index.ts -o ./app >/dev/null 2>&1) || {
+        echo "FAIL: workspace --external build" >&2; exit 1
+    }
+    out="$("$WSEX/packages/app/app" 2>&1)" || {
+        echo "FAIL: workspace --external artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"ws-external dep-ok"*) echo "ok: --external hoisted dep from a workspace member" ;;
+        *) echo "FAIL: workspace --external output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "workspace --external (no inka-launcher next to $INKA)"
+fi
+
 echo "== bundling CJS __filename/__dirname (build + run) =="
 CJSFN="$SCRATCH/cjsfn"
 mkdir -p "$CJSFN/node_modules/uses-filename"

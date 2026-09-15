@@ -211,8 +211,10 @@ fn declares_workspace(dir: &Path) -> bool {
 
 /// The nearest ancestor (or `dir` itself) that is a workspace root. Running
 /// inside a member package must root there so sibling packages (symlinked into
-/// `node_modules`) stay inside the execution tree.
-fn workspace_root(dir: &Path) -> Option<PathBuf> {
+/// `node_modules`) stay inside the execution tree. Also used by `--external`
+/// package embedding so hoisted/isolated dependencies at the workspace root are
+/// found when building from a member.
+pub(crate) fn workspace_root(dir: &Path) -> Option<PathBuf> {
     let mut cur = Some(dir);
     while let Some(d) = cur {
         if declares_workspace(d) {

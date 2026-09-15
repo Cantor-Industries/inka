@@ -63,14 +63,18 @@ pub fn collect_directory(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec
 /// it without the project `node_modules`.
 ///
 /// The package is located with a Node-style nearest-`node_modules` lookup from
-/// the entry's directory (`entry_dir`), so a workspace member's package
-/// (`packages/app/node_modules/@scope/other` → `packages/other`) is found even
-/// though it is not hoisted to `<cwd>/node_modules`. The closure is walked from
-/// each package's canonical realpath and every dep is resolved the same way, so
-/// hoisted (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, yarn, bun)
-/// layouts both work. Deps are flattened to `node_modules/<name>`; a name that
-/// resolves to a second version is nested under the referring package
-/// (`node_modules/<pkg>/node_modules/<name>`) so nearest-wins still holds.
+/// the entry's directory (`entry_dir`) up to the **workspace root** (the nearest
+/// ancestor declaring `package.json` workspaces or a `deno.json` workspace),
+/// falling back to `cwd` outside a workspace. This finds a member's package
+/// (`packages/app/node_modules/@scope/other` → `packages/other`) and deps
+/// hoisted to `<workspace>/node_modules` (npm/yarn/bun/pnpm) even when building
+/// from a member, rather than only `<cwd>/node_modules`. The closure is walked
+/// from each package's canonical realpath and every dep is resolved the same
+/// way, so hoisted (npm/yarn/bun) and symlinked isolated (pnpm `.pnpm/`, bun
+/// `.bun/`, yarn) layouts both work. Deps are flattened to
+/// `node_modules/<name>`; a name that resolves to a second version is nested
+/// under the referring package (`node_modules/<pkg>/node_modules/<name>`) so
+/// nearest-wins still holds.
 #[cfg(feature = "bundle")]
 pub fn collect_package(
     cwd: &Path,
@@ -81,8 +85,11 @@ pub fn collect_package(
         return Err(format!("invalid external package name '{pkg}'"));
     }
     // Confine every walked realpath to the project tree (workspace symlinks and
-    // isolated stores stay inside it; a malicious dep cannot pull in /etc).
-    let tree_real = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    // isolated stores stay inside it; a malicious dep cannot pull in /etc). The
+    // tree is the workspace root when building from a member, since hoisted
+    // dependencies live in `<workspace>/node_modules` above the build dir.
+    let tree = crate::run::workspace_root(cwd).unwrap_or_else(|| cwd.to_path_buf());
+    let tree_real = fs::canonicalize(&tree).unwrap_or(tree);
     let Some(root) = find_package_root(&tree_real, entry_dir, pkg) else {
         return Err(format!(
             "external package '{pkg}' not found in a nearest node_modules under {}",
