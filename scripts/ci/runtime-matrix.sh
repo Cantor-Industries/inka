@@ -321,6 +321,38 @@ else
     skip "cjs __filename shim (no inka-launcher next to $INKA)"
 fi
 
+echo "== bundling: execution order across a re-export/barrel cycle (build + run) =="
+# A valid ESM cycle (works under Bun/Node): the module defining the base class
+# imports a barrel that re-exports both it and the subclass. Scope hoisting must
+# initialize the base before the subclass, or `class extends` sees `undefined`.
+BARCYCLE="$SCRATCH/barcycle"
+mkdir -p "$BARCYCLE"
+printf '%s\n' 'export { ServiceBlock } from "./service-block";' \
+    'export { ActionServiceBlock } from "./action";' > "$BARCYCLE/service.ts"
+printf '%s\n' 'import { ActionServiceBlock } from "./service";' \
+    'export class ServiceBlock {' \
+    '  make(): ServiceBlock { return new ActionServiceBlock(); }' \
+    '}' > "$BARCYCLE/service-block.ts"
+printf '%s\n' 'import { ServiceBlock } from "./service-block";' \
+    'export class ActionServiceBlock extends ServiceBlock {}' > "$BARCYCLE/action.ts"
+printf '%s\n' 'import { ServiceBlock } from "./service";' \
+    'const b = new ServiceBlock();' \
+    'console.log("barrel-cycle", b.make() instanceof ServiceBlock);' > "$BARCYCLE/index.ts"
+if [ -x "$LAUNCHER" ]; then
+    (cd "$BARCYCLE" && INKA_LAUNCHER="$LAUNCHER" "$INKA" build index.ts -o "$BARCYCLE/app" >/dev/null 2>&1) || {
+        echo "FAIL: barrel-cycle build" >&2; exit 1
+    }
+    out="$("$BARCYCLE/app" 2>&1)" || {
+        echo "FAIL: barrel-cycle artifact run" >&2; printf '%s\n' "$out" >&2; exit 1
+    }
+    case "$out" in
+        *"barrel-cycle true"*) echo "ok: execution order (barrel cycle, build parity)" ;;
+        *) echo "FAIL: barrel-cycle output" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+    esac
+else
+    skip "barrel-cycle execution order (no inka-launcher next to $INKA)"
+fi
+
 echo "== package entry .js -> .ts (exports rewrite) =="
 # A package whose `exports` points at a `.js` entry but whose real source is
 # `.ts` (the TS "write .js, ship .ts" convention). `inka run` must rewrite the

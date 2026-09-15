@@ -45,6 +45,11 @@ shimmed to `import.meta.filename`/`import.meta.dirname` (the bundle's path): a
 single-file ESM artifact has no per-module filenames, and the wrapper rolldown
 generates only supplies `exports`/`module`.
 
+The bundle preserves **module execution order** (including across cyclic
+re-export barrels), so a module that does `class X extends Y` sees `Y`
+initialized even after scope hoisting. This is stricter than the default and
+trades a little bundle size for correctness.
+
 The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
 needs no `node_modules` or Deno cache at run time.
 

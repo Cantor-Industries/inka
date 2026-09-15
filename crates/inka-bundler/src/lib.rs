@@ -101,6 +101,19 @@ async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
         // only carries `chunk.code`, so a `File` map would be silently dropped.
         sourcemap: opts.sourcemap.then_some(SourceMapType::Inline),
         define: Some(define),
+        // Execute modules in the order they are declared. Scope hoisting turns
+        // `class X extends Y` into `var X = class extends Y`, and when rolldown
+        // orders a dependent before its dependency `Y` is hoisted-but-unset
+        // (→ "Class extends value undefined"). `strict_execution_order` emits
+        // execution-order helpers so dependencies initialize first;
+        // `on_demand_wrapping` restricts that wrapping to modules that actually
+        // need it (the blanket variant mis-orders valid re-export/barrel
+        // cycles). Correctness beats the bundle-size cost for an app artifact.
+        strict_execution_order: Some(true),
+        experimental: Some(rolldown::ExperimentalOptions {
+            on_demand_wrapping: Some(true),
+            ..Default::default()
+        }),
         ..Default::default()
     };
 
