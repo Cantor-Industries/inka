@@ -317,7 +317,8 @@ fn pack(
         let module = "main.js";
         let bundle_len = files[0].1.len();
         let archive = encode_archive(&files);
-        let manifest_payload = set_module_line(&manifest_bytes, module);
+        let mut manifest_payload = manifest_bytes;
+        manifest_set_key(&mut manifest_payload, "module", module);
         let launcher = find_launcher();
         let launcher_bytes = fs::read(&launcher)
             .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
@@ -410,34 +411,6 @@ fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-/// Force the `module=` line to the packed entry path. The manifest is always
-/// derived from config (which never emits `module=`), so this replaces a stale
-/// line if present and appends otherwise.
-#[cfg(feature = "bundle")]
-fn set_module_line(manifest: &[u8], entry: &str) -> Vec<u8> {
-    let text = String::from_utf8_lossy(manifest);
-    let mut found = false;
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("module=") {
-            found = true;
-            let lead_len = line.len() - line.trim_start().len();
-            out.push(format!("{}module={entry}", &line[..lead_len]));
-        } else {
-            out.push(line.to_string());
-        }
-    }
-    if !found {
-        out.push(format!("module={entry}"));
-    }
-    let mut joined = out.join("\n");
-    if text.ends_with('\n') {
-        joined.push('\n');
-    }
-    joined.into_bytes()
-}
-
 fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
     match it.next() {
         Some(v) => PathBuf::from(v),
@@ -496,17 +469,6 @@ fn manifest_set_key(bytes: &mut Vec<u8>, key: &str, value: &str) {
     *bytes = joined.into_bytes();
 }
 
-/// Turn a runtime spec like `>=0.266.2` / `==0.266.2` / `0.266.2` into a
-/// `runtime=inka_runtime…` value.
-fn runtime_value(spec: &str) -> String {
-    let spec = spec.trim();
-    if spec.starts_with('>') || spec.starts_with('=') {
-        format!("inka_runtime{spec}")
-    } else {
-        format!("inka_runtime=={spec}")
-    }
-}
-
 /// Derive the embedded manifest from project config and CLI overrides. There is
 /// no on-disk manifest: permission lines come from explicit CLI flags (which
 /// override config) or package.json / deno.json(.jsonc) build-intent sources,
@@ -551,9 +513,13 @@ fn resolve_manifest(
     // to enforce its permission DSL.
     if let Some(r) = runtime_flag {
         check_version_arg("--runtime", r)?;
-        manifest_set_key(&mut bytes, "runtime", &runtime_value(r));
+        manifest_set_key(&mut bytes, "runtime", &crate::config::runtime_value(r));
     } else if !manifest_has_key(&bytes, "runtime") {
-        manifest_set_key(&mut bytes, "runtime", &runtime_value(DEFAULT_RUNTIME));
+        manifest_set_key(
+            &mut bytes,
+            "runtime",
+            &crate::config::runtime_value(DEFAULT_RUNTIME),
+        );
     }
     if let Some(t) = tested_flag {
         check_version_arg("--tested-against", t)?;
@@ -721,15 +687,16 @@ mod tests {
         let _ = fs::remove_dir_all(&cwd);
     }
 
-    #[cfg(feature = "bundle")]
     #[test]
     fn module_line_appended_and_replaced() {
-        let appended = set_module_line(b"runtime=x\n", "app.js");
+        let mut appended = b"runtime=x\n".to_vec();
+        manifest_set_key(&mut appended, "module", "app.js");
         assert_eq!(
             String::from_utf8(appended).unwrap(),
-            "runtime=x\nmodule=app.js\n"
+            "runtime=x\n\nmodule=app.js\n"
         );
-        let replaced = set_module_line(b"module=old.js\n", "sub/main.ts");
+        let mut replaced = b"module=old.js\n".to_vec();
+        manifest_set_key(&mut replaced, "module", "sub/main.ts");
         assert_eq!(String::from_utf8(replaced).unwrap(), "module=sub/main.ts\n");
     }
 }

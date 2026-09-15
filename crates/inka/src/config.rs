@@ -285,6 +285,17 @@ pub(crate) fn valid_version_spec(spec: &str) -> bool {
         .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
+/// Turn a runtime spec (`>=0.266.5`, `==0.266.5`, or a bare `0.266.5`) into the
+/// `inka_runtime…` value used in a `runtime=` manifest line.
+pub(crate) fn runtime_value(spec: &str) -> String {
+    let spec = spec.trim();
+    if spec.starts_with('>') || spec.starts_with('=') {
+        format!("inka_runtime{spec}")
+    } else {
+        format!("inka_runtime=={spec}")
+    }
+}
+
 /// Append the scalar string items of a category value (`true` counts as `*`).
 fn collect_permission_items(v: &Value, out: &mut Vec<String>) {
     match v {
@@ -695,12 +706,7 @@ pub fn synthesize_manifest(
                 "inka.runtime must be a version like 0.266.2 (optionally >=/==), got '{r}'"
             ));
         }
-        let line = if r.starts_with('>') || r.starts_with('=') {
-            format!("runtime=inka_runtime{r}")
-        } else {
-            format!("runtime=inka_runtime=={r}")
-        };
-        lines.push(line);
+        lines.push(format!("runtime={}", runtime_value(&r)));
     }
     if let Some(t) = tested {
         if !valid_version_spec(&t) {

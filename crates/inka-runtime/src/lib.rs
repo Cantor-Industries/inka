@@ -302,10 +302,7 @@ impl ModuleLoader for PkgLoader {
             // extension, which also covers extensionless specifiers). A
             // precompiled archive already carries JS under .ts/.mts/.cts
             // payload names, so those are served as-is (no runtime transpile).
-            let file_ts = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_ascii_lowercase())
-                .is_some_and(|e| e == "ts" || e == "mts" || e == "cts");
+            let file_ts = ts_family(&path.to_string_lossy());
             let code: ModuleSourceCode = if module_type == ModuleType::JavaScript && file_ts {
                 if precompiled {
                     if std::env::var_os("INKA_DEBUG").is_some() {
@@ -384,12 +381,7 @@ async fn load_cached_remote(
         })?;
     let bytes = entry.content.into_owned();
 
-    let ext = specifier
-        .path()
-        .rsplit('.')
-        .next()
-        .map(|s| s.to_ascii_lowercase());
-    let is_ts = matches!(ext.as_deref(), Some("ts" | "mts" | "cts"));
+    let is_ts = ts_family(specifier.path());
     let code: ModuleSourceCode = if is_ts {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let name = ModuleName::from(specifier.as_str().to_string());
