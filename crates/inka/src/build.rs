@@ -22,7 +22,9 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+use crate::help::{self, Mode};
 use crate::permissions::{self, Flags, PermFlag};
+use crate::ui;
 
 #[cfg(feature = "bundle")]
 const FOOTER_LEN: usize = 24;
@@ -31,51 +33,17 @@ const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
 #[cfg(feature = "bundle")]
 const LAUNCHER_BIN: &str = "inka-launcher";
 
-fn usage_text() -> &'static str {
-    "usage: inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n\
-     \n\
-     bundles <source> (import maps + npm:/jsr:/node_modules) into one self-contained\n\
-     module and packs it onto the launcher. The manifest is always derived from\n\
-     package.json / deno.json(.jsonc) permissions and embedded; there is no on-disk\n\
-     manifest input.\n\
-     \n\
-     options:\n\
-     \x20 -s, --source <file>   source file (default: the positional argument)\n\
-     \x20 -o, --output <file>   output executable (default: source without its extension)\n\
-     \x20     --runtime <spec>  runtime requirement, e.g. '>=0.266.2' or '==0.266.2' (overrides config)\n\
-     \x20     --tested-against <ver>  never roll forward past this runtime (overrides config)\n\
-     \x20 -A, --allow-all       bake permissions=all (trimmed by any --deny-*)\n\
-     \x20 -R, -W, -N, -E, -S    bake read/write/net/env/sys (whole category); -R=<list> scopes it\n\
-     \x20     --allow-<cat>[=list]   bake a grant for read|write|net|env|run|sys|ffi\n\
-     \x20     --deny-<cat>[=list]    deny within an allowed category\n\
-     \x20 -P[=<name>], --permission-set[=<name>]  bake a named config set (bare -P = `default`)\n\
-     \x20     --minify          minify the bundle\n\
-     \x20     --sourcemap       embed an inline source map\n\
-     \x20     --external <pkg>  leave a package unbundled and embed it from node_modules (repeatable)\n\
-     \x20     --embed-dir       also embed the whole current-directory tree (for assets)\n\
-     \x20 -h, --help            show this help\n\
-     \n\
-     CLI permission flags override config-derived permissions. Without any source\n\
-     the artifact is deny-by-default.\n\
-     \n\
-     launcher is found at $INKA_LAUNCHER or next to the inka binary."
-}
-
-fn help() -> ! {
-    println!("{}", usage_text());
-    std::process::exit(0);
-}
-
 /// A usage error (bad/unknown option, missing argument): print to stderr and
 /// exit 2, so CI and callers do not mistake it for success.
 fn usage_err(msg: &str) -> ! {
-    eprintln!("error: {msg}");
-    eprintln!("{}", usage_text());
+    ui::log_error(msg);
+    eprintln!("usage: inka build [source] [options]");
+    ui::hint("run `inka build --help` for details");
     std::process::exit(2);
 }
 
 fn err(msg: &str) -> ! {
-    eprintln!("error: {msg}");
+    ui::log_error(msg);
     std::process::exit(1);
 }
 
@@ -130,7 +98,17 @@ pub fn cmd_build(args: &[String]) {
                 external.push(a["--external=".len()..].to_string())
             }
             "--embed-dir" => embed_dir = true,
-            "-h" | "--help" => help(),
+            "-h" => {
+                help::print(help::build(), Mode::Short);
+                std::process::exit(0);
+            }
+            "--help" => {
+                help::print(help::build(), Mode::Long);
+                std::process::exit(0);
+            }
+            "-q" | "--quiet" | "-v" | "--verbose" => {
+                ui::apply_verbosity_flag(a);
+            }
             other if other.starts_with('-') => {
                 match permissions::parse_perm_flag(&mut perm_flags, other) {
                     Ok(PermFlag::Once) => {}
@@ -146,7 +124,7 @@ pub fn cmd_build(args: &[String]) {
     }
 
     if let Err(e) = permissions::validate(&perm_flags) {
-        eprintln!("error: {e}");
+        ui::log_error(&e);
         std::process::exit(2);
     }
 
@@ -154,31 +132,28 @@ pub fn cmd_build(args: &[String]) {
     // positionals, the user likely meant `-P <name>`; point at the working form
     // before the generic "too many arguments" error.
     if perm_flags.permset.as_deref() == Some("default") && positional.len() >= 2 {
-        eprintln!(
-            "note: bare -P selects the `default` set; use -P=<name> or \
-             --permission-set <name> to pick another set"
-        );
+        ui::hint("bare -P selects the `default` set; use -P=<name> or --permission-set <name>");
     }
 
     let source = match source_flag {
         Some(s) => {
             if !positional.is_empty() {
-                eprintln!(
-                    "error: unexpected argument '{}' (source already given with -s/--source)",
+                ui::log_error(format!(
+                    "unexpected argument '{}' (source already given with -s/--source)",
                     positional[0].display()
-                );
+                ));
                 std::process::exit(2);
             }
             s
         }
         None => match positional.len() {
             0 => {
-                eprintln!("error: no source file given (pass a file or -s/--source <file>)");
+                ui::log_error("no source file given (pass a file or -s/--source <file>)");
                 std::process::exit(2);
             }
             1 => positional.remove(0),
             _ => {
-                eprintln!("error: too many arguments: {}", positional[1].display());
+                ui::log_error(format!("too many arguments: {}", positional[1].display()));
                 std::process::exit(2);
             }
         },
@@ -214,7 +189,7 @@ pub fn cmd_build(args: &[String]) {
         Err(e) => err(&e),
     };
     for w in &manifest_warnings {
-        eprintln!("warning: {w}");
+        ui::warn(w);
     }
 
     let entry_rel = match crate::embed::rel_from_cwd(&cwd, &source) {
@@ -279,7 +254,7 @@ fn pack(
         .unwrap_or_else(|e| err(&e));
 
         for w in &warnings {
-            eprintln!("warning: {w}");
+            ui::warn(w);
         }
 
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
@@ -336,18 +311,22 @@ fn pack(
         write_executable(output, &out)
             .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
 
-        println!(
-            "packed {} ({}) <- launcher {} ({}) + bundle ({}) + {} embedded file(s) ({}) + manifest ({})",
+        ui::title("build");
+        ui::section("Build");
+        ui::row("entry", entry_rel);
+        ui::row("module", module);
+        ui::row("output", output.display());
+        ui::row("launcher", launcher.display());
+        ui::section("Bundle");
+        ui::row("code", ui::human_size(bundle_len as u64));
+        ui::row("embedded", format!("{} file(s)", files.len() - 1));
+        ui::row("manifest", ui::human_size(manifest_payload.len() as u64));
+        ui::row("artifact", ui::human_size(out.len() as u64));
+        ui::status_ok(format!(
+            "packed {} ({})",
             output.display(),
-            out.len(),
-            launcher.display(),
-            launcher_bytes.len(),
-            bundle_len,
-            files.len() - 1,
-            archive.len(),
-            manifest_payload.len(),
-        );
-        println!("  entry: {entry_rel}  (module {module})");
+            ui::human_size(out.len() as u64)
+        ));
     }
 }
 
@@ -493,7 +472,7 @@ fn resolve_manifest(
 ) -> Result<(Vec<u8>, Vec<String>), String> {
     // Must track `crates/inka-runtime/runtime-version`: an artifact must never
     // select a runtime too old to enforce its permission DSL or resolution.
-    const DEFAULT_RUNTIME: &str = ">=0.266.6";
+    const DEFAULT_RUNTIME: &str = ">=0.266.7";
 
     // CLI permission flags override any config-derived permission source.
     let (cli_dsl, cli_warns) = if perm_flags.selects() {
@@ -594,7 +573,7 @@ mod tests {
     fn default_runtime_floor_always_embedded() {
         let cwd = scratch();
         let m = manifest(&cwd, None, None, None);
-        assert!(m.contains("runtime=inka_runtime>=0.266.6"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.7"), "{m}");
         assert!(!m.contains("allow-"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
@@ -647,7 +626,7 @@ mod tests {
         let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("permissions=all"), "{m}");
-        assert!(m.contains("runtime=inka_runtime>=0.266.6"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.7"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
 

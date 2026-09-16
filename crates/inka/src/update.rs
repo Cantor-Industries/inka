@@ -25,17 +25,19 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
+use crate::help::{self, Mode};
+use crate::ui;
 use crate::{
-    fetch_text, fetch_with_sidecar, hex, parse_version, Version, FILENAME_PREFIX, FILENAME_SUFFIX,
+    download_file, fetch_sidecar, fetch_text, parse_version, sha256_file, Version, FILENAME_PREFIX,
+    FILENAME_SUFFIX,
 };
 
 pub(crate) const DEFAULT_CHANNEL: &str =
     "https://github.com/Cantor-Industries/inka/releases/latest/download";
 
 fn fail(msg: &str) -> ! {
-    eprintln!("error: {msg}");
+    ui::log_error(msg);
     std::process::exit(1);
 }
 
@@ -118,7 +120,7 @@ fn target_dir(home: Option<&str>) -> PathBuf {
 
 fn ensure_dir(dir: &Path) {
     fs::create_dir_all(dir).unwrap_or_else(|e| {
-        eprintln!("error: cannot create {}: {e}", dir.display());
+        ui::log_error(format!("cannot create {}: {e}", dir.display()));
         std::process::exit(1);
     });
 }
@@ -165,16 +167,15 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--no-toolchain" => toolchain = ToolchainMode::Skip,
             "--toolchain-only" => toolchain = ToolchainMode::Only,
             "--no-runtime" => components.runtime = false,
-            "--help" | "-h" => {
-                eprintln!(
-                    "usage: inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]\n\
-                     \x20                  [--insecure] [--home <dir>]\n\
-                     \x20                  [--no-toolchain | --toolchain-only]\n\
-                     \x20                  [--no-runtime]\n\
-                     \x20 no <version>: update the toolchain (if installer-managed) and install the\n\
-                     \x20                newest runtime that is behind\n\
-                     \x20 <version>:     install that exact runtime tuple"
-                );
+            "-q" | "--quiet" | "-v" | "--verbose" => {
+                ui::apply_verbosity_flag(a);
+            }
+            "-h" => {
+                help::print(help::update(), Mode::Short);
+                std::process::exit(0);
+            }
+            "--help" => {
+                help::print(help::update(), Mode::Long);
                 std::process::exit(0);
             }
             other => {
@@ -188,6 +189,7 @@ pub(crate) fn cmd_update(args: &[String]) {
     }
 
     let base = resolve_base(from);
+    ui::title("update");
     match version {
         Some(v) => update_pinned(
             &base,
@@ -254,34 +256,38 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
         ));
     }
 
+    ui::section("Toolchain");
     if let (Some(i), Some(l)) = (parse_version(&installed), parse_version(latest)) {
         if i >= l {
-            println!("[inka] toolchain {installed} is current (latest {latest})");
+            ui::ok(
+                "toolchain",
+                format!("{installed} is current (latest {latest})"),
+            );
             return Ok(false);
         }
     } else if installed == latest {
-        println!("[inka] toolchain {installed} is current (latest {latest})");
+        ui::ok(
+            "toolchain",
+            format!("{installed} is current (latest {latest})"),
+        );
         return Ok(false);
     }
 
-    println!("[inka] updating toolchain {installed} -> {latest}");
-    let (bytes, sidecar) =
-        fetch_with_sidecar(base, archive).map_err(|e| format!("failed to fetch {archive}: {e}"))?;
-    let expected = tc
-        .get("sha256")
-        .and_then(Value::as_str)
-        .map(|s| s.to_ascii_lowercase())
-        .or_else(|| {
-            sidecar.map(|s| {
-                s.split_whitespace()
-                    .next()
-                    .unwrap_or(&s)
-                    .trim()
-                    .to_ascii_lowercase()
-                    .to_string()
-            })
-        });
-    let actual = hex(&Sha256::digest(&bytes));
+    ui::doing("toolchain", format!("updating {installed} -> {latest}"));
+    let expected = match tc.get("sha256").and_then(Value::as_str) {
+        Some(s) => Some(s.to_ascii_lowercase()),
+        None => fetch_sidecar(base, archive)
+            .map_err(|e| format!("failed to fetch {archive}.sha256: {e}"))?
+            .map(normalize_sha),
+    };
+
+    let tmp = TempDir::create("inka-toolchain-")?;
+    // Fixed staging name: the remote name is only used for the fetch URL.
+    let archive_path = tmp.0.join("toolchain.tar.gz");
+    download_file(base, archive, &archive_path)
+        .map_err(|e| format!("failed to fetch {archive}: {e}"))?;
+
+    let actual = sha256_file(&archive_path)?;
     match expected {
         Some(exp) if exp != actual => {
             return Err(format!(
@@ -296,11 +302,6 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
         _ => {}
     }
 
-    let tmp = TempDir::create("inka-toolchain-")?;
-    // Fixed staging name: the remote name is only used for the fetch URL.
-    let archive_path = tmp.0.join("toolchain.tar.gz");
-    fs::write(&archive_path, &bytes)
-        .map_err(|e| format!("cannot write {}: {e}", archive_path.display()))?;
     let mut cmd = Command::new("tar");
     cmd.args(["-xzf"])
         .arg(&archive_path)
@@ -310,10 +311,9 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
-    println!("[inka] installed toolchain {latest}");
+    ui::ok("toolchain", format!("installed {latest}"));
     Ok(true)
 }
-
 /// Replace the toolchain binaries in `dir` from an extracted archive in
 /// `staging`. Binary replacement is an atomic rename over the running image
 /// (Linux keeps the old inode until this process exits).
@@ -353,8 +353,8 @@ fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
 }
 
 fn toolchain_warn(e: String) -> bool {
-    eprintln!("[inka] warning: toolchain not updated: {e}");
-    eprintln!("[inka]   the engine update continues; re-run install.sh to update the toolchain");
+    ui::warn(format!("toolchain not updated: {e}"));
+    ui::detail("the engine update continues; re-run install.sh to update the toolchain");
     false
 }
 
@@ -439,6 +439,7 @@ fn update_latest(
     ensure_dir(&target);
 
     if components.runtime {
+        ui::section("Runtimes");
         if actions.runtime {
             let name = format!("{FILENAME_PREFIX}{latest_runtime}{FILENAME_SUFFIX}");
             install_file(
@@ -447,18 +448,31 @@ fn update_latest(
                 &target,
                 runtime_sha.map(str::to_string),
                 insecure,
-                "inka_runtime",
             )
             .unwrap_or_else(|e| fail(&e));
             changed = true;
         } else if let Some(i) = installed_runtime {
-            println!("[inka] runtime {i} is current (latest {latest_runtime})");
+            ui::ok(
+                "runtime",
+                format!("{i} is current (latest {latest_runtime})"),
+            );
         }
     }
 
-    if !changed {
-        println!("[inka] up to date");
+    if changed {
+        ui::status_ok("updated");
+    } else {
+        ui::status_ok("up to date");
     }
+}
+
+/// Normalize a checksum line (bare hex or `<hex>  <file>`) to lowercase hex.
+fn normalize_sha(s: String) -> String {
+    s.split_whitespace()
+        .next()
+        .unwrap_or(&s)
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// Fetch, verify, and atomically install one `.so` from the base into `target`.
@@ -468,51 +482,58 @@ fn install_file(
     target_dir: &Path,
     expected_override: Option<String>,
     insecure: bool,
-    label: &str,
 ) -> Result<(), String> {
     if !valid_asset_name(name) {
         return Err(format!("invalid asset name '{name}'"));
     }
-    let (bytes, sidecar_sha) = fetch_with_sidecar(base, name)
-        .map_err(|e| format!("failed to fetch {name} from {base}: {e}"))?;
+    let expected: Option<String> = match expected_override {
+        Some(h) => Some(h),
+        None => match fetch_sidecar(base, name)
+            .map_err(|e| format!("failed to fetch {name}.sha256 from {base}: {e}"))?
+        {
+            Some(h) => Some(h),
+            None if insecure => None,
+            None => {
+                return Err(format!(
+                    "no checksum available for {name}\n  provide --sha256 <hex>, publish a \
+                     {name}.sha256 sidecar, or pass --insecure to skip verification"
+                ))
+            }
+        },
+    };
+    let expected = expected.map(normalize_sha);
 
-    let expected: Option<String> = match (expected_override, sidecar_sha) {
-        (Some(h), _) => Some(h),
-        (None, Some(h)) => Some(h),
-        (None, None) if insecure => None,
-        (None, None) => {
-            return Err(format!(
-                "no checksum available for {name}\n  provide --sha256 <hex>, publish a \
-                 {name}.sha256 sidecar, or pass --insecure to skip verification"
-            ))
+    let target = target_dir.join(name);
+    let tmp = reserve_temp(target_dir, name)?;
+    if let Err(e) = download_file(base, name, &tmp) {
+        let _ = fs::remove_file(&tmp);
+        return Err(format!("failed to fetch {name} from {base}: {e}"));
+    }
+
+    let actual = match sha256_file(&tmp) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = fs::remove_file(&tmp);
+            return Err(e);
         }
     };
-    let expected = expected.map(|e| {
-        e.split_whitespace()
-            .next()
-            .unwrap_or(&e)
-            .trim()
-            .to_ascii_lowercase()
-    });
-
-    let actual = hex(&Sha256::digest(&bytes));
     if let Some(exp) = expected {
         if exp != actual {
+            let _ = fs::remove_file(&tmp);
             return Err(format!(
                 "checksum mismatch for {name}\n  expected {exp}\n  actual   {actual}"
             ));
         }
-        println!("[inka] checksum ok ({})", &actual[..12]);
+        ui::ok("checksum", format!("ok ({})", &actual[..12]));
     } else {
-        println!("[inka] checksum skipped (--insecure)  sha256={actual}");
+        ui::warn_row("checksum", format!("skipped (--insecure)  sha256={actual}"));
     }
 
-    let target = target_dir.join(name);
-    install_atomically(&target, &bytes)?;
-    println!(
-        "[inka] installed {label} {} ({})",
-        target.display(),
-        bytes.len()
+    install_from_path(&tmp, &target)?;
+    let size = fs::metadata(&target).map(|m| m.len()).unwrap_or(0);
+    ui::ok(
+        "installed",
+        format!("{} ({})", target.display(), crate::ui::human_size(size)),
     );
     Ok(())
 }
@@ -540,9 +561,10 @@ fn update_pinned(
 
     if components.runtime {
         let name = format!("{FILENAME_PREFIX}{ver}{FILENAME_SUFFIX}");
-        println!("[inka] installing inka_runtime {ver} from {base}");
-        install_file(base, &name, &target, sha256, insecure, "inka_runtime")
-            .unwrap_or_else(|e| fail(&e));
+        ui::section("Runtimes");
+        ui::doing("runtime", format!("installing {ver} from {base}"));
+        install_file(base, &name, &target, sha256, insecure).unwrap_or_else(|e| fail(&e));
+        ui::status_ok(format!("installed inka_runtime {ver}"));
     }
 }
 
@@ -557,26 +579,30 @@ fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn install_atomically(target: &Path, bytes: &[u8]) -> Result<(), String> {
-    use std::io::Write;
-    let tmp = target.with_extension(format!("so.tmp{}-{}", std::process::id(), random_suffix()));
-    // `create_new` never follows a pre-planted symlink at the temp path.
-    let mut f = fs::OpenOptions::new()
+/// Reserve an exclusive temp path next to `target` (so an install is an atomic
+/// rename) without ever following a pre-planted symlink.
+fn reserve_temp(dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let tmp = dir.join(format!(
+        ".{name}.tmp{}-{}",
+        std::process::id(),
+        random_suffix()
+    ));
+    fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(&tmp)
         .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-    if let Err(e) = f.write_all(bytes) {
-        let _ = fs::remove_file(&tmp);
-        return Err(format!("cannot write {}: {e}", tmp.display()));
-    }
-    drop(f);
-    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)) {
-        let _ = fs::remove_file(&tmp);
+    Ok(tmp)
+}
+
+/// chmod 0755 and rename a fully-written temp file into place.
+fn install_from_path(tmp: &Path, target: &Path) -> Result<(), String> {
+    if let Err(e) = fs::set_permissions(tmp, fs::Permissions::from_mode(0o755)) {
+        let _ = fs::remove_file(tmp);
         return Err(format!("cannot chmod {}: {e}", tmp.display()));
     }
-    if let Err(e) = fs::rename(&tmp, target) {
-        let _ = fs::remove_file(&tmp);
+    if let Err(e) = fs::rename(tmp, target) {
+        let _ = fs::remove_file(tmp);
         return Err(format!("cannot move {} into place: {e}", target.display()));
     }
     Ok(())
@@ -623,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn install_atomically_writes_and_cleans_temp() {
+    fn install_from_path_writes_and_cleans_temp() {
         let dir = std::env::temp_dir().join(format!(
             "inka-install-{}-{}",
             std::process::id(),
@@ -631,8 +657,11 @@ mod tests {
         ));
         fs::create_dir_all(&dir).unwrap();
         let target = dir.join("libinka_runtime-0.0.0.so");
-        install_atomically(&target, b"ELF").unwrap();
+        let tmp = reserve_temp(&dir, "libinka_runtime-0.0.0.so").unwrap();
+        fs::write(&tmp, b"ELF").unwrap();
+        install_from_path(&tmp, &target).unwrap();
         assert_eq!(fs::read(&target).unwrap(), b"ELF");
+        assert!(!tmp.exists(), "temp must be renamed away");
         let leftovers: Vec<_> = fs::read_dir(&dir)
             .unwrap()
             .flatten()

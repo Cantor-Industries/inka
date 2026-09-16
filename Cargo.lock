@@ -4592,8 +4592,9 @@ checksum = "f4200d433cbd5178df7797c9c2e75b348b728e39631cf14520d1e2fc424201f4"
 
 [[package]]
 name = "inka"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
+ "deno_terminal",
  "inka-bundler",
  "jsonc-parser",
  "libc",
@@ -4604,7 +4605,7 @@ dependencies = [
 
 [[package]]
 name = "inka-bundler"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "deno_cache_dir",
@@ -4625,14 +4626,14 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "libloading 0.8.9",
 ]
 
 [[package]]
 name = "inka-runtime"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4644,6 +4645,7 @@ dependencies = [
  "deno_resolver",
  "deno_runtime",
  "deno_semver",
+ "deno_terminal",
  "import_map",
  "node_resolver",
  "oxc_resolver",
@@ -4654,7 +4656,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.7.0"
+version = "0.7.1"
 
 [[package]]
 name = "inotify"

@@ -6,21 +6,27 @@
 //   inka run [-A] [-P[=name]] [--allow-<cat>[=list]]... <file> [args...]
 //   inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>]
 //                           [--insecure] [--home <dir>]
-//   inka list [--home <dir>]
 //   inka doctor
+//   inka help [command]
 
 mod build;
 mod config;
 mod embed;
+mod help;
 mod permissions;
 mod run;
+mod ui;
 mod update;
 
 use std::env;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+use deno_terminal::colors;
+use sha2::{Digest, Sha256};
 
 pub(crate) const FILENAME_PREFIX: &str = "libinka_runtime-";
 pub(crate) const FILENAME_SUFFIX: &str = ".so";
@@ -45,13 +51,6 @@ pub(crate) fn parse_version(s: &str) -> Option<Version> {
         return None;
     }
     Some(Version(a, b, c))
-}
-
-fn usage() -> ! {
-    eprintln!(
-        "usage:\n  inka build [source] [-s|--source <file>] [-o|--output <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external <pkg>]... [--embed-dir]\n  inka update [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]\n  inka list [--home <dir>]\n  inka doctor                 print a diagnostic report (runtimes, project, DENO_DIR)\n  inka run [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]\n                             execute a ts/js file via the installed runtime\n  inka --version, -V          print the inka toolchain version"
-    );
-    std::process::exit(2);
 }
 
 /// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,
@@ -117,6 +116,9 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
     out
 }
 
+/// Top-level commands, in help order and for suggestions.
+pub(crate) const COMMANDS: [&str; 5] = ["build", "run", "update", "doctor", "help"];
+
 fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
     // closes the pipe, and the default action (terminate quietly) is preferable to
@@ -124,33 +126,79 @@ fn main() {
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
+    ui::init_from_env();
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.is_empty() {
-        usage();
-    }
-    match args[0].as_str() {
+    let Some(first) = args.first() else {
+        help::print(help::top(), help::Mode::Long);
+        return;
+    };
+    match first.as_str() {
+        "-h" => help::print(help::top(), help::Mode::Short),
+        "--help" => help::print(help::top(), help::Mode::Long),
         "--version" | "-V" => println!("inka {}", env!("CARGO_PKG_VERSION")),
+        "help" => cmd_help(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
-        "update" => update::cmd_update(&args[1..]),
-        "list" => cmd_list(&args[1..]),
-        "doctor" => cmd_doctor(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
-        _ => usage(),
+        "update" => update::cmd_update(&args[1..]),
+        "doctor" => cmd_doctor(&args[1..]),
+        other if other.starts_with('-') => {
+            ui::log_error(format!("unknown option '{other}'"));
+            ui::hint("run `inka --help` for usage");
+            std::process::exit(2);
+        }
+        other => unknown_command(other),
+    }
+}
+
+/// Report an unknown command and exit 2 (with a suggestion when close).
+fn unknown_command(name: &str) -> ! {
+    ui::log_error(format!("unrecognized command '{name}'"));
+    match help::suggest(name, &COMMANDS) {
+        Some(s) => ui::hint(format!("did you mean `inka {s}`?")),
+        None => ui::hint("run `inka --help` for usage"),
+    }
+    std::process::exit(2);
+}
+
+fn cmd_help(args: &[String]) {
+    match args.first().map(String::as_str) {
+        None => help::print(help::top(), help::Mode::Long),
+        Some("-h") => help::print(help::top(), help::Mode::Short),
+        Some("--help") => help::print(help::top(), help::Mode::Long),
+        Some("build") => help::print(help::build(), help::Mode::Long),
+        Some("run") => help::print(help::run(), help::Mode::Long),
+        Some("update") => help::print(help::update(), help::Mode::Long),
+        Some("doctor") => help::print(help::doctor(), help::Mode::Long),
+        Some("help") => help::print(help::help(), help::Mode::Long),
+        Some(other) => unknown_command(other),
     }
 }
 
 // ---- fetch helpers ---------------------------------------------------------
 
-/// Fetch `<base>/<file>` plus `<base>/<file>.sha256` when available.
-/// `base` may be a local directory path or an http(s) URL.
-pub(crate) fn fetch_with_sidecar(
-    base: &str,
-    file: &str,
-) -> Result<(Vec<u8>, Option<String>), String> {
+/// Fetch `<base>/<file>.sha256` when available. `base` may be a local directory
+/// path or an http(s) URL.
+pub(crate) fn fetch_sidecar(base: &str, file: &str) -> Result<Option<String>, String> {
     let is_url = base.starts_with("http://") || base.starts_with("https://");
-    let main = fetch_one(base, file, is_url)?;
-    let sidecar = fetch_optional(base, &format!("{file}.sha256"), is_url)?;
-    Ok((main, sidecar))
+    fetch_optional(base, &format!("{file}.sha256"), is_url)
+}
+
+/// Lowercase hex sha256 of a file on disk (streamed; never buffers it whole).
+pub(crate) fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex(&hasher.finalize()))
 }
 
 /// Fetch `<base>/<file>` as UTF-8 text (for release metadata like versions.json).
@@ -265,37 +313,143 @@ fn wget_get(url: &str) -> Result<Vec<u8>, String> {
     Ok(out.stdout)
 }
 
-// ---- list ------------------------------------------------------------------
+// ---- file downloads (progress) ---------------------------------------------
 
-fn cmd_list(args: &[String]) {
-    let mut home = None;
-    let mut it = args.iter();
-    while let Some(a) = it.next() {
-        match a.as_str() {
-            "--home" => home = it.next().cloned(),
-            "--help" | "-h" => usage(),
-            _ => usage(),
-        }
+/// Download `<base>/<file>` to `dest`, drawing a progress bar on a TTY.
+/// `base` may be a local directory (a plain copy) or an http(s) URL.
+pub(crate) fn download_file(base: &str, file: &str, dest: &Path) -> Result<(), String> {
+    let is_url = base.starts_with("http://") || base.starts_with("https://");
+    if !is_url {
+        let src = PathBuf::from(base).join(file);
+        fs::copy(&src, dest).map_err(|e| format!("{}: {e}", src.display()))?;
+        return Ok(());
     }
-    let dirs = match home.as_deref() {
-        Some(h) => vec![PathBuf::from(h)],
-        None => runtime_search_dirs(),
+    let url = format!("{}/{}", base.trim_end_matches('/'), file);
+    let total = url_content_length(&url);
+
+    let _ = fs::remove_file(dest);
+    let curl_result = match spawn_curl_download(&url, dest) {
+        Ok(child) => drive_download(child, file, dest, total),
+        Err(e) => Err(e),
     };
-    let found = installed_parts_all(&dirs);
-    if found.is_empty() {
-        match home.as_deref() {
-            Some(h) => println!("(no runtimes installed in {h})"),
-            None => println!("(no runtimes installed)"),
+    match curl_result {
+        Ok(()) => Ok(()),
+        Err(curl_err) => {
+            let _ = fs::remove_file(dest);
+            match spawn_wget_download(&url, dest) {
+                Ok(child) => match drive_download(child, file, dest, total) {
+                    Ok(()) => Ok(()),
+                    Err(wget_err) => Err(format!(
+                        "failed to download {url}\n  curl: {curl_err}\n  wget: {wget_err}"
+                    )),
+                },
+                Err(e) => Err(format!(
+                    "failed to download {url}\n  curl: {curl_err}\n  wget: {e}"
+                )),
+            }
         }
-        return;
-    }
-    for (v, p) in found {
-        println!("inka_runtime {v:<10} {}", p.display());
     }
 }
 
+/// Spawn curl writing `url` to `dest` (silenced but for errors).
+fn spawn_curl_download(url: &str, dest: &Path) -> Result<std::process::Child, String> {
+    let mut cmd = Command::new("curl");
+    if url.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--tlsv1.2"]);
+        cmd.args(["--proto-redir", "=https", "--max-redirs", "5"]);
+    }
+    cmd.args(["-fsSL", "--connect-timeout", "30", "--max-time", "1800"])
+        .arg("-o")
+        .arg(dest)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("curl not available ({e})"))
+}
+
+/// Spawn wget writing `url` to `dest` (silenced but for errors).
+fn spawn_wget_download(url: &str, dest: &Path) -> Result<std::process::Child, String> {
+    let mut cmd = Command::new("wget");
+    if url.starts_with("https://") {
+        cmd.arg("--https-only");
+    }
+    cmd.args(["-qO"])
+        .arg(dest)
+        .arg(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("wget not available ({e})"))
+}
+
+/// Poll a running download's output file while drawing the progress bar, then
+/// wait and surface the engine's stderr on failure.
+fn drive_download(
+    mut child: std::process::Child,
+    file: &str,
+    dest: &Path,
+    total: Option<u64>,
+) -> Result<(), String> {
+    let mut progress = ui::Progress::download(file, total);
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(e) => return Err(format!("{e}")),
+        }
+        match fs::metadata(dest) {
+            Ok(md) => progress.set(md.len()),
+            Err(_) => progress.tick(),
+        }
+        std::thread::sleep(Duration::from_millis(80));
+    }
+    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    progress.finish();
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stderr = stderr.trim();
+        Err(if stderr.is_empty() {
+            format!("exit {}", out.status)
+        } else {
+            stderr.to_string()
+        })
+    }
+}
+
+/// Best-effort `Content-Length` of a URL (follows redirects; takes the final
+/// `200`). `None` when HEAD is unavailable or the size is unknown.
+fn url_content_length(url: &str) -> Option<u64> {
+    let mut cmd = Command::new("curl");
+    if url.starts_with("https://") {
+        cmd.args(["--proto", "=https", "--tlsv1.2"]);
+        cmd.args(["--proto-redir", "=https", "--max-redirs", "5"]);
+    }
+    let out = cmd
+        .args(["-fsSLI", "--connect-timeout", "30", "--max-time", "60", url])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().rev().find_map(|line| {
+        let (key, value) = line.split_once(':')?;
+        if !key.trim().eq_ignore_ascii_case("content-length") {
+            return None;
+        }
+        value.trim().parse::<u64>().ok()
+    })
+}
+
+// ---- installed runtimes ----------------------------------------------------
+
 /// Scan a runtime dir for installed `libinka_runtime-*.so` files, sorted by
-/// version. Reused by `inka list`, `inka doctor`, and `inka run`.
+/// version. Reused by `inka doctor` and `inka run`.
 pub(crate) fn installed_parts(dir: &Path) -> Vec<(Version, PathBuf)> {
     let mut found: Vec<(Version, PathBuf)> = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
@@ -344,115 +498,158 @@ pub(crate) fn default_deno_dir() -> PathBuf {
     )
 }
 
-/// Whether the `inka-launcher` binary can be found (`$INKA_LAUNCHER` or next to
-/// the running `inka`).
-fn launcher_found() -> bool {
+/// Path to the `inka-launcher` binary (`$INKA_LAUNCHER`, else next to the
+/// running `inka`), when present.
+fn launcher_path() -> Option<PathBuf> {
     if let Ok(p) = env::var("INKA_LAUNCHER") {
-        if PathBuf::from(p).is_file() {
-            return true;
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
         }
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            if dir.join("inka-launcher").is_file() {
-                return true;
+            let adjacent = dir.join("inka-launcher");
+            if adjacent.is_file() {
+                return Some(adjacent);
             }
         }
     }
-    false
+    None
 }
 
 fn cmd_doctor(args: &[String]) {
-    if args.iter().any(|a| a == "--help" || a == "-h") {
-        eprintln!("usage: inka doctor");
-        std::process::exit(0);
+    for a in args {
+        if a == "-h" {
+            help::print(help::doctor(), help::Mode::Short);
+            std::process::exit(0);
+        }
+        if a == "--help" {
+            help::print(help::doctor(), help::Mode::Long);
+            std::process::exit(0);
+        }
+        if ui::apply_verbosity_flag(a) {
+            continue;
+        }
+        if a.starts_with('-') {
+            ui::log_error(format!("unknown option '{a}'"));
+            ui::hint("run `inka doctor --help` for usage");
+            std::process::exit(2);
+        }
     }
-    let mut warnings: Vec<String> = Vec::new();
 
-    println!("[inka] doctor");
     let dirs = runtime_search_dirs();
-    println!("runtime dirs:");
-    for d in &dirs {
-        println!("  {}", d.display());
-    }
     let runtimes = installed_parts_all(&dirs);
+    let mut warnings: Vec<String> = Vec::new();
+    let mut problems: Vec<(String, String)> = Vec::new();
+
+    ui::title("doctor");
+    ui::section("Runtimes");
     if runtimes.is_empty() {
-        println!("  runtimes: (none installed)");
-        warnings.push("no runtimes installed; artifacts cannot run until `inka update`".into());
-    }
-    for (v, p) in &runtimes {
-        println!("  runtime {v}  {}", p.display());
+        ui::bad_row("installed", "none");
+        problems.push((
+            "no runtimes installed".to_string(),
+            "run `inka update`".to_string(),
+        ));
+    } else {
+        let selected = runtimes.last().map(|(v, _)| *v);
+        for (v, p) in &runtimes {
+            let marker = if Some(*v) == selected {
+                colors::green("→").to_string()
+            } else {
+                " ".to_string()
+            };
+            println!(
+                "  {marker} {:<10} {}",
+                colors::green(v.to_string()),
+                colors::gray(p.display())
+            );
+        }
     }
 
-    // Project resolution status (cwd).
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    println!("project (cwd):");
+    ui::section("Project (cwd)");
+    println!("  {}", colors::gray(cwd.display()));
+
     let configs: Vec<&str> = ["package.json", "deno.json", "deno.jsonc"]
         .into_iter()
         .filter(|f| cwd.join(f).is_file())
         .collect();
     if configs.is_empty() {
-        println!("  config: (no package.json/deno.json/deno.jsonc)");
+        ui::warn_row("config", "(no package.json/deno.json/deno.jsonc)");
+        warnings.push("no project config (package.json/deno.json)".to_string());
     } else {
-        println!("  config: {}", configs.join(", "));
+        ui::ok("config", configs.join(", "));
     }
-    println!(
-        "  node_modules: {}",
-        if cwd.join("node_modules").is_dir() {
-            "present"
-        } else {
-            "absent"
-        }
-    );
-    let deno_dir = default_deno_dir();
-    println!(
-        "  DENO_DIR: {} ({}; remote={} npm={})",
-        deno_dir.display(),
-        if deno_dir.is_dir() {
-            "present"
-        } else {
-            "absent"
-        },
-        if deno_dir.join("remote").is_dir() {
-            "yes"
-        } else {
-            "no"
-        },
-        if deno_dir.join("npm").is_dir() {
-            "yes"
-        } else {
-            "no"
-        },
-    );
-    let bundling = cfg!(feature = "bundle");
-    println!(
-        "  bundling: {}",
-        if bundling {
-            "available"
-        } else {
-            "unavailable (built without `bundle`)"
-        }
-    );
-    if !bundling {
-        warnings
-            .push("inka was built without the `bundle` feature; `inka build` cannot bundle".into());
-    }
-    println!(
-        "  launcher: {}",
-        if launcher_found() {
-            "found"
-        } else {
-            "not found"
-        }
-    );
 
-    if warnings.is_empty() {
-        println!("warnings: none");
+    if cwd.join("node_modules").is_dir() {
+        ui::ok("node_modules", "present");
     } else {
-        println!("warnings:");
-        for w in &warnings {
-            println!("  - {w}");
+        ui::warn_row("node_modules", "absent");
+        warnings.push("node_modules is absent; dependency imports may fail".to_string());
+    }
+
+    let deno_dir = default_deno_dir();
+    if deno_dir.is_dir() {
+        ui::ok(
+            "DENO_DIR",
+            format!(
+                "{}  (remote: {}, npm: {})",
+                deno_dir.display(),
+                presence(deno_dir.join("remote").is_dir()),
+                presence(deno_dir.join("npm").is_dir()),
+            ),
+        );
+    } else {
+        ui::warn_row("DENO_DIR", format!("{} (absent)", deno_dir.display()));
+        warnings.push(format!("DENO_DIR {} is absent", deno_dir.display()));
+    }
+
+    if cfg!(feature = "bundle") {
+        ui::ok("bundling", "available");
+    } else {
+        ui::bad_row("bundling", "unavailable (built without `bundle`)");
+        problems.push((
+            "inka was built without the `bundle` feature; `inka build` cannot bundle".to_string(),
+            "use an official release or rebuild with `--features bundle`".to_string(),
+        ));
+    }
+
+    match launcher_path() {
+        Some(p) => ui::ok("launcher", p.display().to_string()),
+        None => {
+            ui::bad_row("launcher", "not found");
+            problems.push((
+                "the `inka-launcher` binary was not found".to_string(),
+                "reinstall the toolchain, or set INKA_LAUNCHER".to_string(),
+            ));
         }
+    }
+
+    if problems.is_empty() && warnings.is_empty() {
+        ui::status_ok("ready");
+    } else {
+        if !problems.is_empty() {
+            ui::status_bad(format!("{} problem(s)", problems.len()));
+        }
+        for (msg, hint) in &problems {
+            println!("  {} {}", colors::red("✗"), msg);
+            println!("    {} {}", colors::cyan("hint:"), colors::gray(hint));
+        }
+        if !warnings.is_empty() {
+            ui::status_warn(format!("{} warning(s)", warnings.len()));
+        }
+        for w in &warnings {
+            println!("  {} {}", colors::yellow("!"), w);
+        }
+    }
+}
+
+fn presence(present: bool) -> &'static str {
+    if present {
+        "present"
+    } else {
+        "absent"
     }
 }
 

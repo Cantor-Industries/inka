@@ -1,7 +1,7 @@
 [package]
 name = "inka-runtime"
 license = "MIT"
-version = "0.7.0"
+version = "0.7.1"
 edition = "2021"
 publish = false
 
@@ -20,6 +20,7 @@ deno_graph = "=0.111.0"
 deno_resolver = "=0.89.0"
 deno_runtime = { version = "=0.266.0", features = ["transpile"] }
 deno_semver = "=0.10.1"
+deno_terminal = { version = "=0.2.3", features = ["colors"] }
 import_map = "=0.25.0"
 node_resolver = "=0.96.0"
 oxc_resolver = "=11.24.3"

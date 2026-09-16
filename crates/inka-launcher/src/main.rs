@@ -48,12 +48,80 @@ mod tree_cleanup {
     pub(super) fn arm(_root: &Path) {}
 }
 
-macro_rules! debug_log {
-    ($($arg:tt)*) => {
-        if std::env::var_os("INKA_DEBUG").is_some() {
-            eprintln!($($arg)*);
+/// Minimal ANSI styling for the launcher's own diagnostics. No dependency:
+/// color is on for a TTY (or `FORCE_COLOR`) and off for `NO_COLOR`.
+mod style {
+    use std::fmt::Display;
+    use std::io::IsTerminal;
+    use std::sync::OnceLock;
+
+    fn enabled() -> bool {
+        static ON: OnceLock<bool> = OnceLock::new();
+        *ON.get_or_init(|| {
+            if std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()) {
+                return false;
+            }
+            if std::env::var_os("FORCE_COLOR").is_some_and(|v| !v.is_empty()) {
+                return true;
+            }
+            std::io::stderr().is_terminal()
+        })
+    }
+
+    fn paint(code: &str, s: impl Display) -> String {
+        if enabled() {
+            format!("\x1b[{code}m{s}\x1b[0m")
+        } else {
+            s.to_string()
         }
-    };
+    }
+
+    pub(super) fn red_bold(s: impl Display) -> String {
+        paint("1;31", s)
+    }
+    pub(super) fn yellow_bold(s: impl Display) -> String {
+        paint("1;33", s)
+    }
+    pub(super) fn cyan(s: impl Display) -> String {
+        paint("36", s)
+    }
+    pub(super) fn gray(s: impl Display) -> String {
+        paint("38;5;245", s)
+    }
+}
+
+/// `error: <first line>` with any continuation lines (e.g. a JS stack) dimmed.
+fn error(msg: impl std::fmt::Display) {
+    let text = msg.to_string();
+    let mut lines = text.lines();
+    match lines.next() {
+        Some(first) => eprintln!("{}: {}", style::red_bold("error"), first),
+        None => {
+            eprintln!("{}:", style::red_bold("error"));
+            return;
+        }
+    }
+    for line in lines {
+        eprintln!("{}", style::gray(line));
+    }
+}
+
+fn warning(msg: impl std::fmt::Display) {
+    eprintln!("{}: {}", style::yellow_bold("warning"), msg);
+}
+
+fn detail(label: &str, value: impl std::fmt::Display) {
+    eprintln!("  {}", style::gray(format!("{label:<10} {value}")));
+}
+
+fn hint(msg: impl std::fmt::Display) {
+    eprintln!("  {} {}", style::cyan("hint:"), style::gray(msg));
+}
+
+fn debug(msg: impl std::fmt::Display) {
+    if std::env::var_os("INKA_DEBUG").is_some() {
+        eprintln!("{}: {}", style::gray("debug"), style::gray(msg));
+    }
 }
 
 /// Load the runtime with `RTLD_GLOBAL`. Native `.node` addons are `dlopen`ed
@@ -457,18 +525,17 @@ fn check_reported_version(lib: &Path, reported: &str, expected: Version) -> Resu
     {
         Some(v) if v == expected => Ok(()),
         Some(v) => {
-            eprintln!(
-                "[inka] runtime {} reports version {v}, but its filename says {expected}; \
-                 refusing to load",
+            error(format!(
+                "runtime {} reports version {v}, but its filename says {expected}; refusing to load",
                 lib.display()
-            );
+            ));
             Err(4)
         }
         None => {
-            eprintln!(
-                "[inka] runtime {} reports an unrecognized version '{reported}'; refusing to load",
+            error(format!(
+                "runtime {} reports an unrecognized version '{reported}'; refusing to load",
                 lib.display()
-            );
+            ));
             Err(4)
         }
     }
@@ -501,11 +568,10 @@ fn warn_if_world_writable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Ok(md) = fs::metadata(dir) {
         if md.permissions().mode() & 0o002 != 0 {
-            eprintln!(
-                "[inka] warning: runtime dir {} is world-writable; a local user could \
-                 replace the runtime",
+            warning(format!(
+                "runtime dir {} is world-writable; a local user could replace the runtime",
                 dir.display()
-            );
+            ));
         }
     }
 }
@@ -571,7 +637,7 @@ fn load_and_run_dir(
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[inka] failed to load {}: {e}", lib.display());
+            error(format!("failed to load {}: {e}", lib.display()));
             return 1;
         }
     };
@@ -593,10 +659,11 @@ fn load_and_run_dir(
         let ver: libloading::Symbol<FnVersion> = match library.get(b"inka_runtime_version") {
             Ok(s) => s,
             Err(_) => {
-                eprintln!(
-                    "[inka] runtime {} is missing inka_runtime_version; reinstall it",
+                error(format!(
+                    "runtime {} is missing inka_runtime_version",
                     lib.display()
-                );
+                ));
+                hint("run `inka update` to reinstall the runtime");
                 return 4;
             }
         };
@@ -619,10 +686,11 @@ fn load_and_run_dir(
             match library.get(b"inka_runtime_create") {
                 Ok(s) => s,
                 Err(_) => {
-                    eprintln!(
-                        "[inka] runtime {} is missing inka_runtime_create; reinstall it",
+                    error(format!(
+                        "runtime {} is missing inka_runtime_create",
                         lib.display()
-                    );
+                    ));
+                    hint("run `inka update` to reinstall the runtime");
                     return 4;
                 }
             };
@@ -630,10 +698,11 @@ fn load_and_run_dir(
             match library.get(b"inka_runtime_destroy") {
                 Ok(s) => s,
                 Err(_) => {
-                    eprintln!(
-                        "[inka] runtime {} is missing inka_runtime_destroy; reinstall it",
+                    error(format!(
+                        "runtime {} is missing inka_runtime_destroy",
                         lib.display()
-                    );
+                    ));
+                    hint("run `inka update` to reinstall the runtime");
                     return 4;
                 }
             };
@@ -641,11 +710,12 @@ fn load_and_run_dir(
             match library.get(b"inka_runtime_run_module_dir") {
                 Ok(s) => s,
                 Err(_) => {
-                    eprintln!(
-                        "[inka] this artifact is multi-file but runtime {} does not support it \
-                     (missing inka_runtime_run_module_dir); install a newer runtime",
+                    error(format!(
+                        "runtime {} does not support multi-file artifacts \
+                         (missing inka_runtime_run_module_dir)",
                         lib.display()
-                    );
+                    ));
+                    hint("run `inka update` to install a newer runtime");
                     return 4;
                 }
             };
@@ -668,11 +738,9 @@ fn load_and_run_dir(
             .get::<FnFreeString>(b"inka_runtime_free_string")
             .ok();
 
-        if !err_msg.is_null() {
-            eprintln!(
-                "[inka] runtime error message: {}",
-                CStr::from_ptr(err_msg).to_string_lossy()
-            );
+        let had_err = !err_msg.is_null();
+        if had_err {
+            error(CStr::from_ptr(err_msg).to_string_lossy());
             if let Some(free) = free_string {
                 free(err_msg);
             }
@@ -680,7 +748,9 @@ fn load_and_run_dir(
         destroy(rt);
 
         if rc != 0 {
-            eprintln!("[inka] runtime call failed (rc={rc})");
+            if !had_err {
+                error(format!("runtime call failed (rc={rc})"));
+            }
             return rc;
         }
         exit_code
@@ -706,7 +776,7 @@ fn main() {
                 println!("inka-launcher {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
             }
-            eprintln!("[inka] {e}");
+            error(&e);
             std::process::exit(2);
         }
     };
@@ -719,31 +789,38 @@ fn main() {
     };
     let m = parse_manifest(manifest_bytes);
     if let Some(bad) = &m.malformed {
-        eprintln!("[inka] manifest has an unparseable version constraint: {bad}");
+        error(format!(
+            "manifest has an unparseable version constraint: {bad}"
+        ));
         std::process::exit(3);
     }
     let dirs = runtime_dirs();
 
     let Some((v, path)) = resolve_runtime(&m, &dirs) else {
-        eprintln!("[inka] no compatible runtime found");
-        eprintln!("[inka] required: {}", required_string(&m));
+        error("no compatible runtime found");
+        detail("required", required_string(&m));
         if let Some(t) = m.tested {
-            eprintln!("[inka] capped at tested-against {t}");
+            detail("capped", format!("tested-against {t}"));
         }
         for d in &dirs {
-            eprintln!("[inka]   searched: {}", d.display());
+            detail("searched", d.display());
         }
+        hint("run `inka update` to install a compatible runtime");
         std::process::exit(3);
     };
 
     let code = match trailer {
         Trailer::Archive { files, .. } => {
-            debug_log!("[inka] resolved inka_runtime {v} at {}", path.display());
-            debug_log!("[inka] module '{}' archive {} files", m.module, files.len());
+            debug(format!("resolved inka_runtime {v} at {}", path.display()));
+            debug(format!(
+                "module '{}' archive {} files",
+                m.module,
+                files.len()
+            ));
             let tree = match extract_tree(&files) {
                 Ok(t) => t,
                 Err(e) => {
-                    eprintln!("[inka] failed to extract artifact tree: {e}");
+                    error(format!("failed to extract artifact tree: {e}"));
                     std::process::exit(1);
                 }
             };

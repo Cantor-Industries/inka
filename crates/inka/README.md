@@ -23,9 +23,15 @@ See the [repository README](../../README.md) for the full architecture and
   resolving import maps, `npm:` (node_modules), and `jsr:` (Deno cache, offline).
 - `inka update [<ver>] [--from <base>]` — self-update the toolchain (for
   installer-managed installs) and reconcile the shared runtime with the newest
-  release (or install a specific tuple), sha256-verified.
-- `inka list` / `inka doctor` — show installed tuples / a diagnostic report
-  (runtimes + project status).
+  release (or install a specific tuple), sha256-verified. Downloads show a
+  progress bar on a TTY.
+- `inka doctor` — a grouped diagnostic report (runtimes + project status with
+  status glyphs and per-problem hints).
+- `inka help [command]` — short (`-h`) or full (`--help`) help; running `inka`
+  with no arguments prints the top-level help.
+
+Output is colored on a TTY (honors `NO_COLOR`/`FORCE_COLOR`); `INK_LOG`,
+`INK_LOG_STYLE`, `-q`/`--quiet`, and `-v`/`--verbose` adjust verbosity.
 
 Bundling lives behind the non-default `bundle` cargo feature (release builds
 enable it); without it, `inka build` reports that bundling is unavailable.

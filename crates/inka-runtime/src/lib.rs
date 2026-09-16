@@ -31,6 +31,7 @@ use deno_resolver::workspace::{
     CreateResolverOptions, MappedResolution, ResolutionKind as WorkspaceResolutionKind,
     WorkspaceResolver,
 };
+use deno_terminal::colors;
 use sys_traits::impls::RealSys;
 
 /// Runtime tuple version, set by `build.rs` from `runtime-version`: the
@@ -548,8 +549,9 @@ fn build_options_permissions(
     for (cat, _) in &spec.deny {
         if find(&spec.allow, cat).is_none() && !spec.all {
             eprintln!(
-                "[inka] warning: deny-{cat} has no effect without allow-{cat} or permissions=all \
-                 (deny-by-default is already in force)"
+                "{}: deny-{cat} has no effect without allow-{cat} or permissions=all \
+                 (deny-by-default is already in force)",
+                colors::yellow_bold("warning")
             );
         }
     }
@@ -609,7 +611,7 @@ async fn run_module_async(
         return Err(format!("{e}"));
     }
     if let Err(e) = worker.dispatch_load_event() {
-        eprintln!("[inka] load event error: {e}");
+        eprintln!("{}: load event: {e}", colors::yellow_bold("warning"));
     }
     if let Err(e) = worker.run_event_loop(false).await {
         return Err(format!("{e}"));
@@ -633,6 +635,18 @@ fn ts_family(name: &str) -> bool {
     matches!(ext.as_deref(), Some("ts" | "mts" | "cts"))
 }
 
+/// Configure terminal color once per process: `deno_terminal`'s `NO_COLOR`/
+/// `FORCE_COLOR` policy, additionally gated on a TTY so piped output is plain.
+fn init_terminal() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let forced = colors::force_color();
+        let color = colors::use_color() && (forced || deno_terminal::is_stderr_tty());
+        colors::set_use_color(color);
+    });
+}
+
 /// Runs an entry module from a tree (`dir`/`entry`) through the `PkgLoader`.
 fn run_tree(
     dir: &str,
@@ -640,6 +654,7 @@ fn run_tree(
     args: &[String],
     perm_dsl: Option<&str>,
 ) -> Result<i32, String> {
+    init_terminal();
     let root = PathBuf::from(dir);
     if !root.is_dir() {
         return Err(format!("runtime directory not found: {dir}"));

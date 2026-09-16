@@ -2,7 +2,9 @@
 
 Start with `inka doctor` — it prints the runtime dirs, installed runtimes, and
 project status (config files, `node_modules`, `DENO_DIR`, bundling capability,
-launcher), plus any warnings.
+launcher), grouped into sections with a status glyph per row and a `hint:` for
+each problem. The report is colored only on a TTY (honors `NO_COLOR`) and
+always exits `0`.
 
 ## Exit codes
 

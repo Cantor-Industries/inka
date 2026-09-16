@@ -5,8 +5,8 @@ inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-again
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... <file> [args...]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
              [--no-toolchain|--toolchain-only] [--no-runtime]
-inka list    [--home <dir>]
 inka doctor
+inka help    [command]
 inka --version, -V
 ```
 
@@ -45,11 +45,23 @@ built-in GitHub latest-release URL. `--sha256` pins a checksum; `--insecure`
 skips verification; `--home <dir>` sets the runtime install dir. See
 [Install & upgrade](install-and-upgrade.md).
 
-## `list` / `doctor`
+## `doctor`
 
-`list` prints installed runtime tuples (across all search dirs; `--home` narrows
-to one). `doctor` prints a diagnostic report: installed runtimes plus project
-status (config files, `node_modules`, `DENO_DIR`, bundling capability, launcher).
+`doctor` prints a diagnostic report: installed runtimes plus project status
+(config files, `node_modules`, `DENO_DIR`, bundling capability, launcher). The
+report is grouped into sections with status glyphs (`✓` ok, `!` warning, `✗`
+problem), marks the newest runtime tuple as the one artifacts select, and prints
+a `hint:` for each problem. It is informational and always exits `0`.
+
+## `help`
+
+`help [command]` prints the full help for a command; `-h` prints a short
+summary and `--help` the full one. Running `inka` with no arguments prints the
+top-level help and exits `0`.
+
+Output is styled when a stream is a TTY; piped/CI output is plain. `-q`/
+`--quiet` and `-v`/`--verbose` adjust verbosity, and `build`/`run`/`update`
+honor them.
 
 ## Environment
 
@@ -61,3 +73,8 @@ status (config files, `node_modules`, `DENO_DIR`, bundling capability, launcher)
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
 | `INKA_DEBUG` | verbose runtime/resolution logging |
+| `INK_LOG` | log level: `error`\|`warn`\|`info`\|`debug`\|`trace` (default `info`) |
+| `INK_LOG_STYLE` | color: `auto` (default; TTY only), `always`, `never` |
+
+Colored output also follows the de-facto `NO_COLOR` (disable) and `FORCE_COLOR`
+(enable) variables.

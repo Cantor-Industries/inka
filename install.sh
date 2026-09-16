@@ -29,9 +29,21 @@ set -eu
 REPO="${INKA_REPO:-Cantor-Industries/inka}"
 DEFAULT_BASE="https://github.com/$REPO/releases/latest/download"
 
-info() { printf '[inka] %s\n' "$*" >&2; }
-warn() { printf '[inka] warning: %s\n' "$*" >&2; }
-die() { printf '[inka] error: %s\n' "$*" >&2; exit 1; }
+# Color only when stderr is a terminal and NO_COLOR is unset.
+_red=""
+_yellow=""
+_cyan=""
+_reset=""
+if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then
+    _red='\033[1;31m'
+    _yellow='\033[1;33m'
+    _cyan='\033[36m'
+    _reset='\033[0m'
+fi
+
+info() { printf "${_cyan}info${_reset}: %s\n" "$*" >&2; }
+warn() { printf "${_yellow}warning${_reset}: %s\n" "$*" >&2; }
+die() { printf "${_red}error${_reset}: %s\n" "$*" >&2; exit 1; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -71,6 +83,50 @@ fetch() {
                     wget --https-only -qO "$_dest" "$_base/$_file"
                 else
                     wget -qO "$_dest" "$_base/$_file"
+                fi
+            else
+                die "need curl or wget to download over HTTP"
+            fi
+            ;;
+        *) cp "$_base/$_file" "$_dest" ;;
+    esac
+}
+
+# Download <base>/<file> to <dest>, showing curl/wget progress on a TTY.
+# <base> may be an http(s) URL or a local dir.
+download() {
+    _base=$1; _file=$2; _dest=$3
+    case "$_base" in
+        http://*|https://*)
+            _tty=0
+            if [ -t 2 ] && [ -z "${NO_COLOR:-}" ]; then _tty=1; fi
+            if have curl; then
+                if [ "${_base#https://}" != "$_base" ]; then
+                    if [ "$_tty" = 1 ]; then
+                        curl --proto '=https' --tlsv1.2 -fLS --progress-bar "$_base/$_file" -o "$_dest"
+                    else
+                        curl --proto '=https' --tlsv1.2 -fsSL "$_base/$_file" -o "$_dest"
+                    fi
+                else
+                    if [ "$_tty" = 1 ]; then
+                        curl -fLS --progress-bar "$_base/$_file" -o "$_dest"
+                    else
+                        curl -fsSL "$_base/$_file" -o "$_dest"
+                    fi
+                fi
+            elif have wget; then
+                if [ "${_base#https://}" != "$_base" ]; then
+                    if [ "$_tty" = 1 ]; then
+                        wget --https-only --show-progress -O "$_dest" "$_base/$_file"
+                    else
+                        wget --https-only -qO "$_dest" "$_base/$_file"
+                    fi
+                else
+                    if [ "$_tty" = 1 ]; then
+                        wget --show-progress -O "$_dest" "$_base/$_file"
+                    else
+                        wget -qO "$_dest" "$_base/$_file"
+                    fi
                 fi
             else
                 die "need curl or wget to download over HTTP"
@@ -279,7 +335,7 @@ if [ "$FORCE" != 1 ] && [ "$CURRENT" = "$TC_VER" ] && [ -x "$PREFIX/lib/inka/ink
     info "inka toolchain $TC_VER is current"
 else
     info "installing inka toolchain $TC_VER"
-    fetch "$BASE" "$TC_ARCHIVE" "$TMP/$TC_ARCHIVE"
+    download "$BASE" "$TC_ARCHIVE" "$TMP/$TC_ARCHIVE"
     fetch "$BASE" "$TC_ARCHIVE.sha256" "$TMP/$TC_ARCHIVE.sha256"
     verify_sha "$TMP/$TC_ARCHIVE" "$TMP/$TC_ARCHIVE.sha256"
     mkdir -p "$PREFIX/lib/inka"

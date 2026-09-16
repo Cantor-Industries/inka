@@ -22,44 +22,21 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
+use crate::help::{self, Mode};
 use crate::permissions::{self, Flags, PermFlag};
+use crate::ui;
 use crate::Version;
-
-fn usage_text() -> &'static str {
-    "usage: inka run [options] <file> [args...]\n\
-     \n\
-     executes <file> (.ts/.js/...) via the installed runtime. Options must precede the\n\
-     file; anything after <file> (or after `--`) is passed to the program as its\n\
-     arguments.\n\
-     \n\
-     permissions (deny by default; no prompting):\n\
-     \x20 -A, --allow-all            allow everything (trimmed by any --deny-*)\n\
-     \x20 -R, -W, -N, -E, -S         allow read/write/net/env/sys (whole category)\n\
-     \x20 -R=<list>, -N=<list>, ...   same, scoped to the given list\n\
-     \x20     --allow-<cat>[=list]    grant category read|write|net|env|run|sys|ffi\n\
-     \x20     --deny-<cat>[=list]     deny within an allowed category\n\
-     \x20 -P[=<name>], --permission-set[=<name>]\n\
-     \x20                             apply a named permission set from the config\n\
-     \x20                             (bare -P uses the `default` set)\n\
-     \x20     --runtime <ver>        use a specific installed runtime tuple\n\
-     \x20     --                     end of options (file may start with '-')\n\
-     \x20 -h, --help                  show this help"
-}
-
-fn usage() -> ! {
-    println!("{}", usage_text());
-    exit(0);
-}
 
 /// A usage error (unknown option, missing file): print to stderr and exit 2.
 fn usage_err(msg: &str) -> ! {
-    eprintln!("error: {msg}");
-    eprintln!("{}", usage_text());
+    ui::log_error(msg);
+    eprintln!("usage: inka run [options] <file> [args...]");
+    ui::hint("run `inka run --help` for details");
     exit(2);
 }
 
 fn fail(msg: &str) -> ! {
-    eprintln!("error: {msg}");
+    ui::log_error(msg);
     exit(2);
 }
 
@@ -76,7 +53,14 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
             continue;
         }
         match a.as_str() {
-            "-h" | "--help" => usage(),
+            "-h" => {
+                help::print(help::run(), Mode::Short);
+                exit(0);
+            }
+            "--help" => {
+                help::print(help::run(), Mode::Long);
+                exit(0);
+            }
             "--" => {
                 // end of options: the next token is the file (may start with '-')
                 if i + 1 >= args.len() {
@@ -92,6 +76,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
                 if i >= args.len() {
                     fail("--runtime needs a version like 0.266.0");
                 }
+            }
+            "-q" | "--quiet" | "-v" | "--verbose" => {
+                ui::apply_verbosity_flag(a);
             }
             _ => {
                 match permissions::parse_perm_flag(&mut f, a) {
@@ -349,7 +336,7 @@ pub(crate) fn cmd_run(args: &[String]) {
         fail(&format!("source file not found: {}", file.display()));
     }
     let cwd = env::current_dir().unwrap_or_else(|e| {
-        eprintln!("error: cannot determine current directory: {e}");
+        ui::log_error(format!("cannot determine current directory: {e}"));
         exit(2);
     });
     let (root, entry) = match execution_root(&cwd, &file) {
@@ -361,7 +348,7 @@ pub(crate) fn cmd_run(args: &[String]) {
         Err(e) => fail(&e),
     };
     for n in &perm_notes {
-        eprintln!("warning: {n}");
+        ui::warn(n);
     }
 
     // Informational guard: config declares build-intent or default permissions
@@ -374,39 +361,37 @@ pub(crate) fn cmd_run(args: &[String]) {
     {
         if let Some(hint) = crate::config::build_intent_permission_hint(&root) {
             match &hint.set_name {
-                Some(name) => eprintln!(
-                    "[inka] note: {} is baked by `inka build`; `inka run` does not apply it. \
+                Some(name) => ui::hint(format!(
+                    "{} is baked by `inka build`; `inka run` does not apply it. \
                      Use `-P={name}` (or -A/--allow-*) to run with those permissions.",
                     hint.source
-                ),
-                None => eprintln!(
-                    "[inka] note: {} is baked by `inka build`; `inka run` does not apply it. \
+                )),
+                None => ui::hint(format!(
+                    "{} is baked by `inka build`; `inka run` does not apply it. \
                      Pass -A/--allow-* (or define a named set and use -P) to match.",
                     hint.source
-                ),
+                )),
             }
         } else if crate::config::config_has_default_grants(&root) {
-            eprintln!(
-                "[inka] note: config declares permissions but none were selected for this run; \
-                 the program is deny-by-default (use -P, -A, or --allow-*)"
+            ui::hint(
+                "config declares permissions but none were selected for this run; \
+                 the program is deny-by-default (use -P, -A, or --allow-*)",
             );
         }
     }
 
     let (lib, chosen) = choose_runtime(args);
-    if env::var_os("INKA_DEBUG").is_some() {
-        eprintln!(
-            "[inka] running {} in {} with runtime {}",
-            entry,
-            root.display(),
-            chosen.map(|v| v.to_string()).unwrap_or_default()
-        );
-    }
+    ui::debug(format!(
+        "running {} in {} with runtime {}",
+        entry,
+        root.display(),
+        chosen.map(|v| v.to_string()).unwrap_or_default()
+    ));
 
     let library = match load_runtime_library(&lib) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("[inka] failed to load {}: {e}", lib.display());
+            ui::log_error(format!("failed to load {}: {e}", lib.display()));
             exit(1);
         }
     };
@@ -416,10 +401,11 @@ pub(crate) fn cmd_run(args: &[String]) {
             match library.get(b"inka_runtime_create") {
                 Ok(s) => s,
                 Err(_) => {
-                    eprintln!(
-                        "[inka] runtime {} is missing inka_runtime_create; reinstall it",
+                    ui::log_error(format!(
+                        "runtime {} is missing inka_runtime_create",
                         lib.display()
-                    );
+                    ));
+                    ui::hint("run `inka update` to install a compatible runtime");
                     exit(4);
                 }
             };
@@ -437,18 +423,18 @@ pub(crate) fn cmd_run(args: &[String]) {
             *const std::ffi::c_char,
         ) -> std::ffi::c_int;
         type FnFreeString = unsafe extern "C" fn(*mut std::ffi::c_char);
-        let run_dir: libloading::Symbol<FnRunDir> = match library
-            .get(b"inka_runtime_run_module_dir")
-        {
-            Ok(s) => s,
-            Err(_) => {
-                eprintln!(
-                    "[inka] runtime {} does not support `run` (missing inka_runtime_run_module_dir); install a newer runtime",
-                    lib.display()
-                );
-                exit(4);
-            }
-        };
+        let run_dir: libloading::Symbol<FnRunDir> =
+            match library.get(b"inka_runtime_run_module_dir") {
+                Ok(s) => s,
+                Err(_) => {
+                    ui::log_error(format!(
+                        "runtime {} does not support `run` (missing inka_runtime_run_module_dir)",
+                        lib.display()
+                    ));
+                    ui::hint("run `inka update` to install a newer runtime");
+                    exit(4);
+                }
+            };
 
         let dir_c = match std::ffi::CString::new(root.to_string_lossy().into_owned()) {
             Ok(c) => c,
@@ -480,11 +466,11 @@ pub(crate) fn cmd_run(args: &[String]) {
             &mut err_msg,
             perms_c.as_ptr(),
         );
-        if !err_msg.is_null() {
-            eprintln!(
-                "[inka] runtime error message: {}",
-                CStr::from_ptr(err_msg).to_string_lossy()
-            );
+        let had_err = !err_msg.is_null();
+        if had_err {
+            let msg = CStr::from_ptr(err_msg).to_string_lossy().into_owned();
+            ui::log_error(&msg);
+            runtime_hint(&msg);
             // Optional: free the runtime-allocated string (older runtimes lack
             // this symbol; the string is then leaked, as before).
             if let Ok(free) = library.get::<FnFreeString>(b"inka_runtime_free_string") {
@@ -493,10 +479,28 @@ pub(crate) fn cmd_run(args: &[String]) {
         }
         destroy(rt);
         if rc != 0 {
-            eprintln!("[inka] runtime call failed (rc={rc})");
+            if !had_err {
+                ui::log_error(format!("runtime call failed (rc={rc})"));
+            }
             exit(rc);
         }
         exit(exit_code);
+    }
+}
+
+/// Add a `hint:` for common runtime failures (permissions, missing modules).
+fn runtime_hint(msg: &str) {
+    let lower = msg.to_ascii_lowercase();
+    if lower.contains("permissiondenied")
+        || lower.contains("notcapable")
+        || (lower.contains("requires") && lower.contains("access"))
+    {
+        ui::hint("grant the capability with --allow-<cat>[=list], --deny-*, or -A");
+    } else if lower.contains("module not found")
+        || lower.contains("cannot find module")
+        || lower.contains("not a dependency")
+    {
+        ui::hint("install dependencies so they are in node_modules, or check the import path");
     }
 }
 

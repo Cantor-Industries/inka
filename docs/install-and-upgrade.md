@@ -164,7 +164,7 @@ Two independent version lines:
 
 - **Toolchain** — the release tag (`v0.4.0`); the `inka` crate version tracks it.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
-  revision: `0.266.0` → `0.266.1`, …, `0.266.6`; when the base moves to
+  revision: `0.266.0` → `0.266.1`, …, `0.266.7`; when the base moves to
   `0.267.0`, revisions restart at `0.267.1`. See
   `crates/inka-runtime/runtime-version`.
 

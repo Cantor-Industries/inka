@@ -153,7 +153,7 @@ Notes for the spike:
      unchanged.
    - `INKA_RUNTIME_HOME` remains a flat, target-specific override (this is what
      `runtime-matrix.sh` stages), so tests keep working.
-   - `inka list`/`inka doctor` should show the libc-appropriate dirs.
+   - `inka doctor` should show the libc-appropriate dirs.
 2. **`versions.json` + `inka update`.**
    - `.github/workflows/release.yml` produces the file; `crates/inka/src/update.rs`
      consumes it (`toolchain`/`runtime`/`runtime_sha256`).

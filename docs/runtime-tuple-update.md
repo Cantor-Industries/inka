@@ -68,7 +68,7 @@ A failure localizes to the seam. Run it on any PR that touches
 
 ## Capability
 
-Native CJS is a runtime capability. `inka build` embeds a `runtime>=0.266.6`
+Native CJS is a runtime capability. `inka build` embeds a `runtime>=0.266.7`
 floor by default, so artifacts always select a tuple that can run raw CommonJS
 packages from `node_modules`/the Deno cache. A tuple bump that changes this
 capability must bump the default floor in `crates/inka/src/build.rs` and

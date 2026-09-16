@@ -285,7 +285,7 @@ pub(crate) fn valid_version_spec(spec: &str) -> bool {
         .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Turn a runtime spec (`>=0.266.6`, `==0.266.6`, or a bare `0.266.6`) into the
+/// Turn a runtime spec (`>=0.266.7`, `==0.266.7`, or a bare `0.266.7`) into the
 /// `inka_runtime…` value used in a `runtime=` manifest line.
 pub(crate) fn runtime_value(spec: &str) -> String {
     let spec = spec.trim();
