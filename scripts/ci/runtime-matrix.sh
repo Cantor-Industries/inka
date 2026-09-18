@@ -151,31 +151,80 @@ console.log("pnpm-ok", a);'
 
 echo "== symlink escape confinement =="
 # A symlink planted inside the tree must not let a module escape the execution
-# root. ESM `import` is confined by the loader regardless of permissions; a
-# `require()`d package symlinked outside is deny-by-default (the canonical
-# containment check routes the read to the permission system).
+# root by default. An explicit read grant (`-A`/`--allow-read`) serves the target
+# (out-of-tree linked packages, Deno semantics); CJS `require()` is gated the
+# same way.
 ESCAPE_DIR="$SECRET_DIR/escape"
 mkdir -p "$ESCAPE_DIR"
 printf 'console.log("escape-loaded");\n' > "$ESCAPE_DIR/secret.js"
 ln -sfn "$ESCAPE_DIR/secret.js" escape_link.js
 printf '%s\n' 'import "./escape_link.js";' 'console.log("escape-import-ok");' > p_escape_import.js
-out="$("$INKA" run -A p_escape_import.js 2>&1)" && {
-    echo "FAIL: symlink import escape was not denied" >&2; printf '%s\n' "$out" >&2; exit 1
+
+# Default: the lexical symlink is canonicalized and refused.
+out="$("$INKA" run p_escape_import.js 2>&1)" && {
+    echo "FAIL: symlink import escape was not denied by default" >&2; printf '%s\n' "$out" >&2; exit 1
 }
 case "$out" in
-    *"outside the execution tree"*) echo "ok: symlink import escape denied (even with -A)" ;;
+    *"outside the execution tree"*) echo "ok: symlink import escape denied by default" ;;
     *) echo "FAIL: symlink import escape (unexpected error)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# Explicit read grant: allowed.
+out="$("$INKA" run --allow-read="$ESCAPE_DIR" p_escape_import.js 2>&1)" || {
+    echo "FAIL: symlink import escape not allowed with --allow-read" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"escape-import-ok"*) echo "ok: symlink import allowed with an explicit read grant" ;;
+    *) echo "FAIL: symlink import with grant (unexpected output)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
 esac
 
 mkdir -p "$ESCAPE_DIR/evilpkg"
 printf '%s\n' '{"name":"evilpkg","version":"1.0.0","main":"index.js"}' > "$ESCAPE_DIR/evilpkg/package.json"
 printf 'module.exports = "escape-loaded";\n' > "$ESCAPE_DIR/evilpkg/index.js"
 ln -sfn "$ESCAPE_DIR/evilpkg" node_modules/evilpkg
-run_with "" "require symlink escape denied by default" "escape-denied" p_escape_req.js \
-'import { createRequire } from "node:module";
-const require = createRequire(import.meta.url);
-try { console.log("escape-loaded", require("evilpkg")); }
-catch (e) { console.log("escape-denied", e && e.constructor && e.constructor.name); }'
+
+# ESM import of an out-of-tree CJS package: deny by default...
+printf '%s\n' 'import v from "evilpkg";' 'console.log("escape-pkg", v);' > p_escape_pkg.js
+out="$("$INKA" run p_escape_pkg.js 2>&1)" && {
+    echo "FAIL: out-of-tree package import was not denied" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"outside the execution tree"*|*NotCapable*) echo "ok: out-of-tree package import denied by default" ;;
+    *) echo "FAIL: out-of-tree package import (unexpected error)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# ...and served with an explicit read grant (ESM + CJS facade).
+out="$("$INKA" run --allow-read="$ESCAPE_DIR/evilpkg" p_escape_pkg.js 2>&1)" || {
+    echo "FAIL: out-of-tree package import not allowed with --allow-read" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"escape-pkg escape-loaded"*) echo "ok: out-of-tree package import allowed with a read grant" ;;
+    *) echo "FAIL: out-of-tree package with grant (unexpected output)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# CJS `require()` of the same out-of-tree package: deny by default...
+printf '%s\n' \
+    'import { createRequire } from "node:module";' \
+    'const require = createRequire(import.meta.url);' \
+    'try { console.log("escape-loaded", require("evilpkg")); }' \
+    'catch (e) { console.log("escape-denied", e && e.constructor && e.constructor.name); }' \
+    > p_escape_req.js
+out="$("$INKA" run p_escape_req.js 2>&1)" || {
+    echo "FAIL: require symlink escape errored unexpectedly" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *escape-denied*) echo "ok: require symlink escape denied by default" ;;
+    *) echo "FAIL: require symlink escape was not denied" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
+
+# ...and allowed with an explicit read grant (CJS parity with ESM).
+out="$("$INKA" run --allow-read="$ESCAPE_DIR/evilpkg" p_escape_req.js 2>&1)" || {
+    echo "FAIL: require symlink escape with --allow-read errored" >&2; printf '%s\n' "$out" >&2; exit 1
+}
+case "$out" in
+    *"escape-loaded escape-loaded"*) echo "ok: require symlink escape allowed with a read grant" ;;
+    *) echo "FAIL: require symlink escape with grant (unexpected output)" >&2; printf '%s\n' "$out" >&2; exit 1 ;;
+esac
 
 echo "== workspace monorepo (import map, #imports, workspace climb) =="
 MONO="$SCRATCH/mono"

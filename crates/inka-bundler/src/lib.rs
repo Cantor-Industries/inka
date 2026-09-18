@@ -34,6 +34,9 @@ pub struct BundleOptions<'a> {
     pub external: &'a [String],
     pub minify: bool,
     pub sourcemap: bool,
+    /// Opt-in: fetch remote (`jsr:`/`https:`) modules missing from the Deno
+    /// cache before resolving. Off by default (inka is offline).
+    pub fetch: bool,
 }
 
 /// Package names this bundler keeps external by default (without a CLI
@@ -81,9 +84,20 @@ pub fn bundle(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     rt.block_on(bundle_async(opts))
 }
 
+/// Opt-in: fetch every remote (`jsr:`/`https:`) module in `entry`'s graph that
+/// is missing from the Deno cache, so later offline builds/runs succeed.
+/// `entry` must be absolute. Returns the number of remote modules fetched.
+pub fn warm_cache(cwd: &Path, entry: &Path) -> Result<usize, String> {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to build tokio runtime: {e}"))?;
+    rt.block_on(resolve::warm_cache(cwd, entry))
+}
+
 async fn bundle_async(opts: BundleOptions<'_>) -> Result<Bundle, String> {
     let entry_path = opts.cwd.join(opts.entry);
-    let state = resolve::build(opts.cwd, &entry_path).await;
+    let state = resolve::build(opts.cwd, &entry_path, opts.fetch).await;
 
     // Best-effort native/asset candidates: any resolved `.node` file.
     let mut embedded: Vec<(String, Vec<u8>)> = Vec::new();
@@ -445,6 +459,19 @@ mod tests {
     }
 
     #[test]
+    fn warm_cache_local_entry_fetches_nothing() {
+        let cwd = scratch();
+        mk(&cwd, "entry.js", "console.log(1);\n");
+        match warm_cache(&cwd, &cwd.join("entry.js")) {
+            Ok(0) => {}
+            Ok(n) => panic!("expected 0 remote modules fetched, got {n}"),
+            // A relative DENO_DIR (unusual test env) is refused by design.
+            Err(_) => {}
+        }
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
     fn bundles_relative_cjs_deterministically() {
         let cwd = scratch();
         mk(
@@ -469,6 +496,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let a = bundle(opts()).unwrap();
         let b = bundle(opts()).unwrap();
@@ -505,6 +533,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).expect("jsr bundle must succeed when the cache is present");
         assert!(b.code.contains("assert"), "expected inlined assert code");
@@ -536,6 +565,7 @@ mod tests {
             external: &external,
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let a = bundle(opts()).unwrap();
         let b = bundle(opts()).unwrap();
@@ -577,6 +607,7 @@ mod tests {
             external: &[],
             minify: true,
             sourcemap: false,
+            fetch: false,
         };
         let a = bundle(opts()).unwrap();
         let b = bundle(opts()).unwrap();
@@ -599,6 +630,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert!(
@@ -624,6 +656,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: true,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert!(
@@ -654,6 +687,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert!(
@@ -688,6 +722,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let err = match bundle(opts()) {
             Err(e) => e,
@@ -737,6 +772,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert!(
@@ -781,6 +817,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert_eq!(
@@ -826,6 +863,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert_eq!(
@@ -862,6 +900,7 @@ mod tests {
             external: &[],
             minify: false,
             sourcemap: false,
+            fetch: false,
         };
         let b = bundle(opts).unwrap();
         assert!(

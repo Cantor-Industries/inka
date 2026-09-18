@@ -3,8 +3,9 @@ use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-const FOOTER_LEN: usize = 24;
-const MAGIC: &[u8] = b"INKFOOT5"; // bundle + embedded files
+use inka_format::{
+    constraint_allows, parse_manifest, parse_trailer, parse_version, Manifest, Version,
+};
 
 /// Per-tree marker recording the pid that created it, so a later run can reap
 /// trees orphaned by a process that died without cleanup.
@@ -140,98 +141,6 @@ fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::
     {
         unsafe { libloading::Library::new(path) }
     }
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-struct Version(u64, u64, u64);
-
-impl std::fmt::Display for Version {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}.{}", self.0, self.1, self.2)
-    }
-}
-
-fn parse_version(s: &str) -> Option<Version> {
-    let s = s.trim();
-    let mut parts = s.split('.');
-    let a = parts.next()?.trim().parse().ok()?;
-    let b = parts.next().unwrap_or("0").trim().parse().ok()?;
-    let c = parts.next().unwrap_or("0").trim().parse().ok()?;
-    Some(Version(a, b, c))
-}
-
-enum Trailer<'a> {
-    /// An `INKFOOT5` archive of relative-path files + manifest.
-    Archive {
-        files: Vec<(String, Vec<u8>)>,
-        manifest: &'a [u8],
-    },
-}
-
-fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
-    if bytes.len() < FOOTER_LEN {
-        return Err("file smaller than footer".into());
-    }
-    let footer = &bytes[bytes.len() - FOOTER_LEN..];
-    let magic = &footer[0..8];
-    let alen = u64::from_le_bytes(footer[8..16].try_into().unwrap()) as usize;
-    let mlen = u64::from_le_bytes(footer[16..24].try_into().unwrap()) as usize;
-    if alen.saturating_add(mlen).saturating_add(FOOTER_LEN) > bytes.len() {
-        return Err("trailer lengths out of range".into());
-    }
-    let mstart = bytes.len() - FOOTER_LEN - mlen;
-    let pstart = mstart - alen;
-    let manifest = &bytes[mstart..mstart + mlen];
-    if magic != MAGIC {
-        return Err("trailer magic not found (not an inka artifact?)".into());
-    }
-    let files = parse_archive(&bytes[pstart..mstart])?;
-    Ok(Trailer::Archive { files, manifest })
-}
-
-/// Archive layout: repeated `{path_len u64}{data_len u64}{path}{data}`.
-fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut files = Vec::new();
-    let mut rest = blob;
-    while !rest.is_empty() {
-        if rest.len() < 16 {
-            return Err("malformed archive entry header".into());
-        }
-        let path_len = usize::try_from(u64::from_le_bytes(rest[0..8].try_into().unwrap()))
-            .map_err(|_| "archive entry path length out of range".to_string())?;
-        let data_len = usize::try_from(u64::from_le_bytes(rest[8..16].try_into().unwrap()))
-            .map_err(|_| "archive entry data length out of range".to_string())?;
-        rest = &rest[16..];
-        let end = path_len
-            .checked_add(data_len)
-            .ok_or_else(|| "archive entry lengths overflow".to_string())?;
-        if path_len == 0 || end > rest.len() {
-            return Err("malformed archive entry lengths".into());
-        }
-        let path_bytes = &rest[..path_len];
-        let path = std::str::from_utf8(path_bytes)
-            .map_err(|_| "archive entry path is not valid UTF-8".to_string())?;
-        validate_rel_path(path)?;
-        let data = rest[path_len..end].to_vec();
-        rest = &rest[end..];
-        files.push((path.to_string(), data));
-    }
-    Ok(files)
-}
-
-fn validate_rel_path(path: &str) -> Result<(), String> {
-    if path.is_empty() || Path::new(path).is_absolute() {
-        return Err(format!("invalid archive path '{path}' (must be relative)"));
-    }
-    if path.contains('\0') {
-        return Err("archive path contains a NUL byte".into());
-    }
-    for comp in path.split('/') {
-        if comp == ".." {
-            return Err(format!("archive path '{path}' escapes the artifact tree"));
-        }
-    }
-    Ok(())
 }
 
 /// A freshly created, exclusive temp tree, removed when dropped.
@@ -413,109 +322,6 @@ fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
     Ok(TempTree { root })
 }
 
-#[derive(Default)]
-struct Manifest {
-    min: Option<Version>,
-    gt: Option<Version>,
-    exact: Option<Version>,
-    tested: Option<Version>,
-    /// A present-but-unparseable `runtime=`/`tested-against=` value. A malformed
-    /// constraint must not silently drop to "accept anything".
-    malformed: Option<String>,
-    module: String,
-    /// Canonical permission lines (`permissions=…`, `allow-*=…`, `deny-*=…`)
-    /// forwarded verbatim to the runtime.
-    perms: String,
-}
-
-fn parse_manifest(bytes: &[u8]) -> Manifest {
-    let mut m = Manifest {
-        module: "main.js".into(),
-        ..Default::default()
-    };
-    for raw in String::from_utf8_lossy(bytes).lines() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some(eq) = line.find('=') else { continue };
-        let key = line[..eq].trim();
-        let val = line[eq + 1..].trim();
-        match key {
-            "runtime" => {
-                let rest = val.strip_prefix("inka_runtime").unwrap_or(val).trim_start();
-                let (slot, text) = if let Some(x) = rest.strip_prefix(">=") {
-                    (Slot::Min, x)
-                } else if let Some(x) = rest.strip_prefix(">") {
-                    (Slot::Gt, x)
-                } else if let Some(x) = rest.strip_prefix("==") {
-                    (Slot::Exact, x)
-                } else {
-                    (Slot::Exact, rest)
-                };
-                match parse_version(text) {
-                    Some(v) => match slot {
-                        Slot::Min => m.min = Some(v),
-                        Slot::Gt => m.gt = Some(v),
-                        Slot::Exact => m.exact = Some(v),
-                    },
-                    None => m.malformed = Some(format!("runtime={val}")),
-                }
-            }
-            "tested-against" => match parse_version(val) {
-                Some(v) => m.tested = Some(v),
-                None => m.malformed = Some(format!("tested-against={val}")),
-            },
-            "module" => m.module = val.to_string(),
-            "permissions" => {
-                if !m.perms.is_empty() {
-                    m.perms.push('\n');
-                }
-                m.perms.push_str(&format!("permissions={val}"));
-            }
-            _ if key.starts_with("allow-") || key.starts_with("deny-") => {
-                if !m.perms.is_empty() {
-                    m.perms.push('\n');
-                }
-                m.perms.push_str(&format!("{key}={val}"));
-            }
-            _ => {}
-        }
-    }
-    m
-}
-
-enum Slot {
-    Min,
-    Gt,
-    Exact,
-}
-
-/// Does `v` satisfy every constraint in the manifest?
-fn constraint_allows(m: &Manifest, v: Version) -> bool {
-    if let Some(e) = m.exact {
-        if v != e {
-            return false;
-        }
-    }
-    if let Some(g) = m.gt {
-        if v <= g {
-            return false;
-        }
-    }
-    if let Some(mn) = m.min {
-        if v < mn {
-            return false;
-        }
-    }
-    if let Some(t) = m.tested {
-        if v > t {
-            return false;
-        }
-    }
-    true
-}
-
 /// Confirm the loaded runtime's self-reported version matches the version its
 /// filename claims. `inka_runtime_version()` returns `inka_runtime-<x.y.z>`.
 fn check_reported_version(lib: &Path, reported: &str, expected: Version) -> Result<(), i32> {
@@ -626,6 +432,15 @@ fn required_string(m: &Manifest) -> String {
     }
 }
 
+/// Required capabilities that `advertised` (comma-separated) does not provide.
+fn missing_features(required: &[String], advertised: &str) -> Vec<String> {
+    required
+        .iter()
+        .filter(|r| !advertised.split(',').any(|a| a.trim() == r.as_str()))
+        .cloned()
+        .collect()
+}
+
 fn load_and_run_dir(
     lib: &Path,
     expected: Version,
@@ -633,6 +448,7 @@ fn load_and_run_dir(
     entry: &str,
     args: &[String],
     perms: &str,
+    requires: &str,
 ) -> i32 {
     let library = match load_runtime_library(lib) {
         Ok(l) => l,
@@ -670,6 +486,32 @@ fn load_and_run_dir(
         let reported = CStr::from_ptr(ver()).to_string_lossy().into_owned();
         if let Err(code) = check_reported_version(lib, &reported, expected) {
             return code;
+        }
+
+        // Capability check: an artifact may require engine capabilities by name.
+        // The runtime advertises them via an optional symbol; when it is absent
+        // (an older runtime) the manifest's version floor is authoritative.
+        let required = inka_format::parse_requires(requires);
+        if !required.is_empty() {
+            type FnFeatures = unsafe extern "C" fn() -> *const c_char;
+            if let Ok(get_features) = library.get::<FnFeatures>(b"inka_runtime_features") {
+                let p = get_features();
+                let advertised = if p.is_null() {
+                    String::new()
+                } else {
+                    CStr::from_ptr(p).to_string_lossy().into_owned()
+                };
+                let missing = missing_features(&required, &advertised);
+                if !missing.is_empty() {
+                    error(format!(
+                        "runtime {} does not provide required capability(ies): {}",
+                        lib.display(),
+                        missing.join(", ")
+                    ));
+                    hint("run `inka update` to install a newer runtime");
+                    return 4;
+                }
+            }
         }
 
         let dir_c = CString::new(dir).expect("nul in dir");
@@ -784,9 +626,7 @@ fn main() {
     // Reap trees from crashed runs before staging ours.
     sweep_stale_temp_trees();
 
-    let manifest_bytes = match &trailer {
-        Trailer::Archive { manifest, .. } => *manifest,
-    };
+    let manifest_bytes = trailer.manifest;
     let m = parse_manifest(manifest_bytes);
     if let Some(bad) = &m.malformed {
         error(format!(
@@ -809,33 +649,38 @@ fn main() {
         std::process::exit(3);
     };
 
-    let code = match trailer {
-        Trailer::Archive { files, .. } => {
-            debug(format!("resolved inka_runtime {v} at {}", path.display()));
-            debug(format!(
-                "module '{}' archive {} files",
-                m.module,
-                files.len()
-            ));
-            let tree = match extract_tree(&files) {
-                Ok(t) => t,
-                Err(e) => {
-                    error(format!("failed to extract artifact tree: {e}"));
-                    std::process::exit(1);
-                }
-            };
-            let code = load_and_run_dir(
-                &path,
-                v,
-                &tree.path().to_string_lossy(),
-                &m.module,
-                &args,
-                &m.perms,
-            );
-            // Remove the tree before exiting (process::exit skips destructors).
-            drop(tree);
-            code
-        }
+    let files = trailer.files;
+    let code = {
+        debug(format!("resolved inka_runtime {v} at {}", path.display()));
+        debug(format!(
+            "module '{}' archive {} files",
+            m.module,
+            files.len()
+        ));
+        let tree = match extract_tree(&files) {
+            Ok(t) => t,
+            Err(e) => {
+                error(format!("failed to extract artifact tree: {e}"));
+                std::process::exit(1);
+            }
+        };
+        // Portable path tokens / `path-base=exe` are expanded host-side: the
+        // artifact's own directory is the anchor Deno cannot know about.
+        let exe_dir = me.parent();
+        let perms =
+            inka_format::expand_permissions(&m.perms, m.path_base.as_deref(), exe_dir, exe_dir);
+        let code = load_and_run_dir(
+            &path,
+            v,
+            &tree.path().to_string_lossy(),
+            &m.module,
+            &args,
+            &perms,
+            &m.requires,
+        );
+        // Remove the tree before exiting (process::exit skips destructors).
+        drop(tree);
+        code
     };
     std::process::exit(code);
 }
@@ -843,43 +688,6 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn entry(path: &str, data: &[u8]) -> Vec<u8> {
-        let mut v = Vec::new();
-        v.extend_from_slice(&(path.len() as u64).to_le_bytes());
-        v.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        v.extend_from_slice(path.as_bytes());
-        v.extend_from_slice(data);
-        v
-    }
-
-    #[test]
-    fn archive_roundtrip() {
-        let mut blob = entry("main.js", b"hi");
-        blob.extend_from_slice(&entry("node_modules/x/index.js", b"x"));
-        let files = parse_archive(&blob).unwrap();
-        assert_eq!(files.len(), 2);
-        assert_eq!(files[0], ("main.js".to_string(), b"hi".to_vec()));
-        assert_eq!(
-            files[1],
-            ("node_modules/x/index.js".to_string(), b"x".to_vec())
-        );
-    }
-
-    #[test]
-    fn archive_overflow_header_is_rejected() {
-        // path_len = u64::MAX, data_len = 1: `path_len + data_len` must not wrap.
-        let mut blob = Vec::new();
-        blob.extend_from_slice(&u64::MAX.to_le_bytes());
-        blob.extend_from_slice(&1u64.to_le_bytes());
-        assert!(parse_archive(&blob).is_err());
-    }
-
-    #[test]
-    fn archive_rejects_parent_dir() {
-        assert!(parse_archive(&entry("../evil", b"x")).is_err());
-        assert!(parse_archive(&entry("/abs", b"x")).is_err());
-    }
 
     #[test]
     fn extract_tree_creates_and_cleans_up() {
@@ -978,55 +786,27 @@ mod tests {
     }
 
     #[test]
-    fn manifest_operator_semantics() {
-        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\n");
-        assert_eq!(m.min, Some(Version(0, 266, 2)));
-        assert!(m.gt.is_none() && m.exact.is_none() && m.malformed.is_none());
-
-        let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
-        assert_eq!(m.gt, Some(Version(0, 266, 2)));
-        assert!(m.min.is_none());
-
-        let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
-        assert_eq!(m.exact, Some(Version(0, 266, 2)));
-
-        let m = parse_manifest(b"runtime=0.266.2\n");
-        assert_eq!(m.exact, Some(Version(0, 266, 2)));
-    }
-
-    #[test]
-    fn malformed_version_is_detected() {
-        assert!(parse_manifest(b"runtime=inka_runtime>=garbage\n")
-            .malformed
-            .is_some());
-        assert!(parse_manifest(b"tested-against=nope\n").malformed.is_some());
-    }
-
-    #[test]
-    fn strict_gt_and_constraints() {
-        let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
-        assert!(
-            !constraint_allows(&m, Version(0, 266, 2)),
-            "> rejects equal"
-        );
-        assert!(constraint_allows(&m, Version(0, 266, 3)));
-        assert!(!constraint_allows(&m, Version(0, 266, 1)));
-
-        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
-        assert!(constraint_allows(&m, Version(0, 266, 2)));
-        assert!(constraint_allows(&m, Version(0, 266, 4)));
-        assert!(!constraint_allows(&m, Version(0, 266, 5)), "cap");
-
-        let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
-        assert!(constraint_allows(&m, Version(0, 266, 2)));
-        assert!(!constraint_allows(&m, Version(0, 266, 3)));
-    }
-
-    #[test]
     fn reported_version_must_match_filename() {
         let lib = Path::new("/x/libinka_runtime-0.266.2.so");
         assert!(check_reported_version(lib, "inka_runtime-0.266.2", Version(0, 266, 2)).is_ok());
         assert!(check_reported_version(lib, "inka_runtime-0.266.3", Version(0, 266, 2)).is_err());
         assert!(check_reported_version(lib, "garbage", Version(0, 266, 2)).is_err());
+    }
+
+    #[test]
+    fn capability_check_reports_missing_only() {
+        let req = |s: &[&str]| s.iter().map(|x| x.to_string()).collect::<Vec<_>>();
+        let advertised = "raw-cjs,native-addon,free-string";
+        assert!(missing_features(&req(&["raw-cjs"]), advertised).is_empty());
+        assert!(missing_features(&req(&["native-addon", "raw-cjs"]), advertised).is_empty());
+        assert_eq!(
+            missing_features(&req(&["raw-cjs", "workspace"]), advertised),
+            vec!["workspace".to_string()]
+        );
+        // An empty advertised set (symbol returned null) misses everything.
+        assert_eq!(
+            missing_features(&req(&["raw-cjs"]), ""),
+            vec!["raw-cjs".to_string()]
+        );
     }
 }

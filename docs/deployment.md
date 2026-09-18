@@ -40,7 +40,8 @@ Each `v*` tag publishes:
 `versions.json` records the release, the toolchain block (version/target/archive/
 sha256), the runtime tuple and its base `deno_runtime`, and the runtime `sha256`.
 `inka doctor` prints the runtime dirs/versions and project status (it does not
-print a release identity).
+print a release identity); `inka doctor <artifact>` inspects a built executable
+instead.
 
 ## Release CI (tags → GitHub Release assets)
 

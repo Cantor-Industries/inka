@@ -27,8 +27,26 @@ what is already on disk.
    are read from `$DENO_DIR/remote`; `npm:` resolves against `node_modules`.
 5. **Built-ins** — `node:` modules served by the engine.
 
-`inka` is **offline**: it never fetches from the network. If a `jsr:` package is
-not in the Deno cache, run `deno cache`/`deno install` first.
+`inka` is **offline by default**: it never fetches from the network on its own.
+If a `jsr:` package is not in the Deno cache, warm it explicitly:
+
+```sh
+inka cache app.ts      # fetch the entry graph's jsr:/remote modules
+inka build --fetch app.ts
+inka run --fetch app.ts
+```
+
+`inka cache` (and `--fetch`) requires an absolute `DENO_DIR` and a build with
+bundling support; the network is touched only for missing remote modules.
+
+Module reads are confined to the execution tree's realpath. An out-of-tree
+package reached through a symlink (e.g. `npm link`) is refused by default and
+loads only when an explicit `read` grant covers it (`-A` or
+`--allow-read=<path>`). Both ESM `import` (including the ESM facade for a
+CommonJS package) and CJS `require()` are supported, with the same grant.
+inka is bring-your-own-`node_modules`: npm packages resolve from the local
+`node_modules` (never Deno's global npm cache); the `jsr:`/remote offline cache
+is separate and unaffected.
 
 ## `inka build` bundles
 

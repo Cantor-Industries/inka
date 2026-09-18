@@ -68,8 +68,16 @@ A failure localizes to the seam. Run it on any PR that touches
 
 ## Capability
 
-Native CJS is a runtime capability. `inka build` embeds a `runtime>=0.266.7`
-floor by default, so artifacts always select a tuple that can run raw CommonJS
-packages from `node_modules`/the Deno cache. A tuple bump that changes this
-capability must bump the default floor in `crates/inka/src/build.rs` and
-`crates/inka-runtime/runtime-version` together.
+Engine capabilities are named, advertised by the runtime
+(`inka_runtime_features()`), and required by artifacts (`requires=` in the
+manifest). `crates/inka-format` owns the feature list and each feature's
+minimum tuple (`FEATURE_FLOORS`) plus the `SECURITY_FLOOR` (the tuple that
+guarantees deny-by-default, realpath confinement, and the `_dir` entry):
+`inka build` computes the floor as the maximum of the security floor and the
+required features' floors. The launcher verifies `requires=` against the
+runtime's advertised set when the symbol exists.
+
+When a tuple bump adds a capability an artifact may need, add it to
+`FEATURE_FLOORS` (and to the runtime's advertised set) and emit `requires=` from
+`crates/inka/src/build.rs`. When the *security* model changes, bump
+`SECURITY_FLOOR`. Keep `crates/inka-runtime/runtime-version` in step.

@@ -11,9 +11,10 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use deno_cache_dir::{GlobalHttpCache, HttpCache};
+use deno_cache_dir::{GlobalHttpCache, HeadersMap, HttpCache};
 use deno_config::workspace::{
     WorkspaceDirectory, WorkspaceDiscoverOptions, WorkspaceDiscoverStart,
 };
@@ -30,14 +31,21 @@ fn load_error(msg: String) -> deno_graph::source::LoadError {
 }
 
 /// Cache-only loader: `file:` from disk, `http(s):` from `$DENO_DIR/remote`.
+/// When `online`, a remote cache miss is fetched (opt-in `inka cache`/`--fetch`)
+/// and written to the cache; the default stays fully offline.
 struct CacheLoader {
     cache: Arc<GlobalHttpCache<RealSys>>,
+    online: bool,
+    /// Count of remote modules actually fetched (for user feedback).
+    fetched: Arc<AtomicUsize>,
 }
 
 impl Loader for CacheLoader {
     fn load(&self, specifier: &ModuleSpecifier, _options: LoadOptions) -> LoadFuture {
         let spec = specifier.clone();
         let cache = self.cache.clone();
+        let online = self.online;
+        let fetched = self.fetched.clone();
         Box::pin(async move {
             match spec.scheme() {
                 "file" => {
@@ -57,25 +65,86 @@ impl Loader for CacheLoader {
                     let key = cache
                         .cache_item_key(&spec)
                         .map_err(|e| load_error(format!("cache key: {e}")))?;
-                    match cache
+                    if let Some(entry) = cache
                         .get(&key, None)
                         .map_err(|e| load_error(format!("cache get: {e}")))?
                     {
-                        Some(entry) => Ok(Some(LoadResponse::Module {
+                        return Ok(Some(LoadResponse::Module {
                             content: entry.content.into_owned().into(),
                             mtime: None,
                             specifier: spec,
                             maybe_headers: Some(entry.metadata.headers.clone()),
-                        })),
-                        None => Err(load_error(format!(
-                            "module not in the Deno cache (offline): {spec}"
-                        ))),
+                        }));
                     }
+                    if online {
+                        let resp = fetch_remote(&spec, &cache).await?;
+                        if resp.is_some() {
+                            fetched.fetch_add(1, Ordering::Relaxed);
+                        }
+                        return Ok(resp);
+                    }
+                    Err(load_error(format!(
+                        "module not in the Deno cache (offline): {spec}"
+                    )))
                 }
                 _ => Ok(Some(LoadResponse::External { specifier: spec })),
             }
         })
     }
+}
+
+/// Fetch a remote module over the network (opt-in) and write it to the Deno
+/// cache. Redirects are surfaced to `deno_graph` (auto-follow is disabled) so
+/// its specifier tracking stays correct. Blocking `ureq` is fine here: the
+/// resolver runs on a dedicated current-thread runtime.
+async fn fetch_remote(
+    spec: &ModuleSpecifier,
+    cache: &GlobalHttpCache<RealSys>,
+) -> Result<Option<LoadResponse>, deno_graph::source::LoadError> {
+    let agent = ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .max_redirects(0)
+            .user_agent(concat!("inka/", env!("CARGO_PKG_VERSION")))
+            .build(),
+    );
+    let resp = agent
+        .get(spec.as_str())
+        .call()
+        .map_err(|e| load_error(format!("fetch failed for {spec}: {e}")))?;
+    let status = resp.status();
+    if status.is_redirection() {
+        if let Some(loc) = resp
+            .headers()
+            .get(ureq::http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+        {
+            let target = spec
+                .join(loc)
+                .map_err(|e| load_error(format!("invalid redirect from {spec}: {e}")))?;
+            return Ok(Some(LoadResponse::Redirect { specifier: target }));
+        }
+    }
+    if !status.is_success() {
+        return Err(load_error(format!("HTTP {} for {spec}", status.as_u16())));
+    }
+    let headers: HeadersMap = resp
+        .headers()
+        .iter()
+        .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+        .collect();
+    let body = resp
+        .into_body()
+        .read_to_vec()
+        .map_err(|e| load_error(format!("reading {spec}: {e}")))?;
+    cache
+        .set(spec, headers.clone(), &body)
+        .map_err(|e| load_error(format!("cache write for {spec}: {e}")))?;
+    Ok(Some(LoadResponse::Module {
+        content: body.into(),
+        mtime: None,
+        specifier: spec.clone(),
+        maybe_headers: Some(headers),
+    }))
 }
 
 struct ImportMapGraphResolver {
@@ -148,8 +217,9 @@ pub(crate) fn deno_dir() -> PathBuf {
     .unwrap_or_else(|_| PathBuf::from(".deno"))
 }
 
-/// Build the resolver state for `entry` under `root`.
-pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
+/// Build the offline resolver state for `entry` under `root`. When `online`, a
+/// remote cache miss is fetched and cached (opt-in).
+pub(crate) async fn build(root: &Path, entry: &Path, online: bool) -> ResolverState {
     let deno_dir = deno_dir();
     let import_map = workspace_import_map(root);
     let mut state = ResolverState {
@@ -160,31 +230,18 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
     };
 
     let Some(import_map) = state.import_map.clone() else {
+        if online {
+            // No import map: still allow direct `jsr:`/`https:` specifiers to be
+            // fetched (the graph resolves schemes itself).
+            let _ = build_graph(entry, true, None, &deno_dir).await;
+        }
         return state;
     };
     if !deno_dir.is_absolute() {
         return state;
     }
 
-    let cache = Arc::new(GlobalHttpCache::new(RealSys, deno_dir.join("remote")));
-    let loader = CacheLoader { cache };
-    let Ok(entry_url) = Url::from_file_path(entry) else {
-        return state;
-    };
-    let resolver = ImportMapGraphResolver { map: import_map };
-    let mut graph = ModuleGraph::new(GraphKind::All);
-    graph
-        .build(
-            vec![entry_url],
-            vec![],
-            &loader,
-            BuildOptions {
-                prefer_cached_jsr_versions: true,
-                resolver: Some(&resolver),
-                ..Default::default()
-            },
-        )
-        .await;
+    let (graph, _) = build_graph(entry, online, Some(&import_map), &deno_dir).await;
 
     for module in graph.modules() {
         let referrer = module.specifier().to_string();
@@ -219,6 +276,57 @@ pub(crate) async fn build(root: &Path, entry: &Path) -> ResolverState {
     }
 
     state
+}
+
+/// Build a `deno_graph` for `entry`, reading from the Deno cache and (when
+/// `online`) fetching missing remote modules into it.
+async fn build_graph(
+    entry: &Path,
+    online: bool,
+    import_map: Option<&import_map::ImportMap>,
+    deno_dir: &Path,
+) -> (ModuleGraph, usize) {
+    let cache = Arc::new(GlobalHttpCache::new(RealSys, deno_dir.join("remote")));
+    let fetched = Arc::new(AtomicUsize::new(0));
+    let loader = CacheLoader {
+        cache,
+        online,
+        fetched: fetched.clone(),
+    };
+    let Ok(entry_url) = Url::from_file_path(entry) else {
+        return (ModuleGraph::new(GraphKind::All), 0);
+    };
+    let resolver = import_map
+        .cloned()
+        .map(|map| ImportMapGraphResolver { map });
+    let mut graph = ModuleGraph::new(GraphKind::All);
+    graph
+        .build(
+            vec![entry_url],
+            vec![],
+            &loader,
+            BuildOptions {
+                prefer_cached_jsr_versions: true,
+                resolver: resolver.as_ref().map(|r| r as &dyn GraphResolver),
+                ..Default::default()
+            },
+        )
+        .await;
+    (graph, fetched.load(Ordering::Relaxed))
+}
+
+/// Opt-in cache warming: fetch every remote (`jsr:`/`https:`) module in
+/// `entry`'s graph that is missing from the Deno cache, so later builds/runs
+/// work offline. Requires an absolute `DENO_DIR`. Returns the number of remote
+/// modules fetched.
+pub async fn warm_cache(root: &Path, entry: &Path) -> Result<usize, String> {
+    let deno_dir = deno_dir();
+    if !deno_dir.is_absolute() {
+        return Err("DENO_DIR must be an absolute path to fetch remote modules".to_string());
+    }
+    let import_map = workspace_import_map(root);
+    let (_, fetched) = build_graph(entry, true, import_map.as_ref(), &deno_dir).await;
+    Ok(fetched)
 }
 
 /// The workspace import map (workspace root plus member `deno.json` import

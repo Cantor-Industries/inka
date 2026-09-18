@@ -82,6 +82,19 @@ impl ExecutionRoots {
     }
 }
 
+/// True when an explicit read grant (`--allow-read`/`-A`) covers `path`. Used to
+/// permit out-of-tree ESM/CJS reads (e.g. `npm link`) without weakening the
+/// deny-by-default confinement.
+pub(crate) fn read_granted(permissions: &PermissionsContainer, path: &Path) -> bool {
+    permissions
+        .check_open(
+            Cow::Borrowed(path),
+            OpenAccessKind::ReadNoFollow,
+            Some("import"),
+        )
+        .is_ok()
+}
+
 /// A `node_modules` root plus the tree it belongs to (the boundary the
 /// nearest-`node_modules` walk may climb to).
 struct NodeModulesRoot {
@@ -97,7 +110,6 @@ impl NodeModulesRoot {
             .unwrap_or_else(|| nm.clone());
         Self { nm, tree }
     }
-
     /// A package's folder if `nm/<name>/package.json` exists (hoisted).
     fn hoisted(&self, name: &str) -> Option<PathBuf> {
         let candidate = self.nm.join(name);
@@ -375,6 +387,15 @@ impl NodeRequireLoader for ExecutionRequireLoader {
         if self.roots.contains(path.as_ref()) {
             return Ok(path);
         }
+        // A grant may be written against the real target of a symlinked package
+        // (e.g. an out-of-tree `npm link`). Canonicalize first so the grant is
+        // honored, mirroring the ESM loader's `read_granted`; fall back to the
+        // lexical path when it does not exist.
+        if let Ok(real) = std::fs::canonicalize(path.as_ref()) {
+            if read_granted(permissions, &real) {
+                return Ok(path);
+            }
+        }
         let checked = permissions
             .check_open(path, OpenAccessKind::ReadNoFollow, Some("require"))
             .map_err(JsErrorBox::from_err)?;
@@ -405,6 +426,7 @@ impl NodeRequireLoader for ExecutionRequireLoader {
 /// source so an ESM file in a package root is passed through untouched.
 struct InkaCjsCodeAnalyzer {
     roots: ExecutionRoots,
+    permissions: PermissionsContainer,
 }
 
 #[async_trait::async_trait(?Send)]
@@ -418,7 +440,7 @@ impl CjsCodeAnalyzer for InkaCjsCodeAnalyzer {
         let path = specifier
             .to_file_path()
             .map_err(|_| JsErrorBox::generic(format!("not a file URL: {specifier}")))?;
-        if !self.roots.contains(&path) {
+        if !self.roots.contains(&path) && !read_granted(&self.permissions, &path) {
             return Err(JsErrorBox::generic(format!(
                 "refusing to analyze a CJS module outside the execution tree: {specifier}"
             )));
@@ -483,6 +505,7 @@ pub(crate) type InkaNodeServices =
 #[derive(Clone)]
 pub(crate) struct NodeServices {
     roots: ExecutionRoots,
+    permissions: PermissionsContainer,
     pkg_json: PackageJsonResolverRc<RealSys>,
     node_resolver: NodeResolverRc<ExecutionNpmChecker, ExecutionFolderResolver, RealSys>,
     folder: ExecutionFolderResolver,
@@ -491,7 +514,10 @@ pub(crate) struct NodeServices {
 }
 
 impl NodeServices {
-    pub(crate) fn new(roots: ExecutionRoots) -> (Self, InkaNodeServices) {
+    pub(crate) fn new(
+        roots: ExecutionRoots,
+        permissions: PermissionsContainer,
+    ) -> (Self, InkaNodeServices) {
         let sys = RealSys;
         let pkg_json: PackageJsonResolverRc<RealSys> =
             new_rc(PackageJsonResolver::new(sys.clone(), None));
@@ -518,6 +544,7 @@ impl NodeServices {
         let analyzer: InkaAnalyzer = new_rc(CjsModuleExportAnalyzer::new(
             InkaCjsCodeAnalyzer {
                 roots: roots.clone(),
+                permissions: permissions.clone(),
             },
             checker,
             node_resolver.clone(),
@@ -542,6 +569,7 @@ impl NodeServices {
         (
             Self {
                 roots,
+                permissions,
                 pkg_json,
                 node_resolver,
                 folder,
@@ -621,7 +649,7 @@ impl NodeServices {
                 continue;
             }
             let real = std::fs::canonicalize(&cand).ok()?;
-            if !self.roots.contains(&real) {
+            if !self.roots.contains(&real) && !read_granted(&self.permissions, &real) {
                 continue;
             }
             return Url::from_file_path(&real).ok();
@@ -665,16 +693,13 @@ impl NodeServices {
         match extension(path).as_deref() {
             Some("cjs" | "cts") => true,
             Some("mjs" | "mts" | "json") => false,
-            _ => match self
-                .pkg_json
-                .get_closest_package_json(path)
-                .ok()
-                .flatten()
-                .map(|pkg| pkg.typ.clone())
-            {
-                Some(t) if t == "module" => false,
-                Some(t) if t == "commonjs" => true,
-                _ => self.roots.in_package_root(path),
+            // A `.js` inside a package (nearest package.json) is CJS unless the
+            // package declares `"type": "module"` — matching Node/deno_node, and
+            // working for out-of-tree linked packages too. Actual ESM is still
+            // rescued by the analyzer, which parses the source.
+            _ => match self.pkg_json.get_closest_package_json(path).ok().flatten() {
+                Some(pkg) => pkg.typ != "module",
+                None => self.roots.in_package_root(path),
             },
         }
     }

@@ -26,6 +26,12 @@ pub(crate) struct Flags {
     pub permset: Option<String>,
     pub allow: Vec<(String, String)>, // (category, list or "*")
     pub deny: Vec<(String, String)>,
+    /// `--path-base exe|cwd`: how relative read/write grants are anchored
+    /// (`exe` = the executable/execution-root directory). Not itself a grant.
+    pub path_base: Option<String>,
+    /// `--fetch`: opt in to fetching remote (`jsr:`/`https:`) modules missing
+    /// from the Deno cache (build/run). Not a permission.
+    pub fetch: bool,
 }
 
 impl Flags {
@@ -185,7 +191,50 @@ pub(crate) fn validate(flags: &Flags) -> Result<(), String> {
             "--deny-* needs an allow source (-A or --allow-*); a bare deny would be ignored".into(),
         );
     }
+    if let Some(pb) = &flags.path_base {
+        if pb != "exe" && pb != "cwd" {
+            return Err(format!(
+                "--path-base must be \"exe\" or \"cwd\", got '{pb}'"
+            ));
+        }
+    }
     Ok(())
+}
+
+/// A relative `read`/`write` grant (not `*`, absolute, a URL, or a `${...}` token).
+fn is_relative_grant(item: &str) -> bool {
+    !item.is_empty()
+        && item != "*"
+        && !item.starts_with('/')
+        && !item.contains("://")
+        && !item.contains("${")
+}
+
+/// Warn about relative read/write grants from CLI flags: they follow the launch
+/// directory (Deno semantics) unless anchored with `--path-base=exe` or a token.
+fn warn_relative_grants(
+    entries: &[(String, String)],
+    kind: &str,
+    path_base: Option<&str>,
+    notes: &mut Vec<String>,
+) {
+    if path_base.is_some() {
+        return;
+    }
+    for (cat, list) in entries {
+        if cat != "read" && cat != "write" {
+            continue;
+        }
+        for item in list.split(',') {
+            let item = item.trim();
+            if is_relative_grant(item) {
+                notes.push(format!(
+                    "--{kind}-{cat} grant '{item}' is relative; it resolves at run time against the \
+                     launch directory (use ${{EXE_DIR}}/... or --path-base=exe to anchor it)"
+                ));
+            }
+        }
+    }
 }
 
 /// Render the permission DSL from parsed flags. `-P` resolves a named set from
@@ -209,7 +258,15 @@ pub(crate) fn dsl(root: &Path, flags: &Flags) -> Result<(String, Vec<String>), S
     for (cat, list) in merge_cat(&flags.deny) {
         lines.push(format!("deny-{cat}={list}"));
     }
-    Ok((lines.join("\n"), Vec::new()))
+    let mut notes = Vec::new();
+    warn_relative_grants(
+        &flags.allow,
+        "allow",
+        flags.path_base.as_deref(),
+        &mut notes,
+    );
+    warn_relative_grants(&flags.deny, "deny", flags.path_base.as_deref(), &mut notes);
+    Ok((lines.join("\n"), notes))
 }
 
 #[cfg(test)]
@@ -320,5 +377,37 @@ mod tests {
         assert!(!f.selects());
         let (f, _) = parse(&["--allow-read"]);
         assert!(f.selects());
+    }
+
+    #[test]
+    fn path_base_validation() {
+        let (mut f, _) = parse(&["--allow-read=./x"]);
+        assert!(f.path_base.is_none());
+        f.path_base = Some("exe".into());
+        assert!(validate(&f).is_ok());
+        f.path_base = Some("cwd".into());
+        assert!(validate(&f).is_ok());
+        f.path_base = Some("bogus".into());
+        let err = validate(&f).expect_err("bad --path-base must be rejected");
+        assert!(err.contains("--path-base"), "{err}");
+    }
+
+    #[test]
+    fn relative_cli_grant_warns_unless_anchored() {
+        let (mut f, _) = parse(&["--allow-read=./data"]);
+        let (_, notes) = dsl(Path::new("."), &f).unwrap();
+        assert!(notes.iter().any(|n| n.contains("relative")), "{notes:?}");
+        // `--path-base=exe` anchors it -> no warning.
+        f.path_base = Some("exe".into());
+        let (_, notes) = dsl(Path::new("."), &f).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        // A token anchors it too.
+        let (f, _) = parse(&["--allow-read=${EXE_DIR}/data"]);
+        let (_, notes) = dsl(Path::new("."), &f).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        // An absolute path never warns.
+        let (f, _) = parse(&["--allow-read=/etc"]);
+        let (_, notes) = dsl(Path::new("."), &f).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
     }
 }

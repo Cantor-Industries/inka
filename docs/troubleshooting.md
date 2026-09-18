@@ -6,6 +6,14 @@ launcher), grouped into sections with a status glyph per row and a `hint:` for
 each problem. The report is colored only on a TTY (honors `NO_COLOR`) and
 always exits `0`.
 
+To diagnose a **built executable**, pass it: `inka doctor ./app` parses the
+INKFOOT5 trailer and reports the module, runtime floor/`tested-against` cap,
+`requires=`, `path-base`, baked permission lines, and embedded payload, plus
+whether a compatible runtime is installed. Unlike machine mode it exits
+nonzero on trouble: `2` if the path is not an inka artifact, `3` if the manifest
+constraint is malformed or no compatible runtime is installed. `--json` emits
+the same data for scripts.
+
 ## Exit codes
 
 Built artifacts (launcher):
@@ -14,7 +22,7 @@ Built artifacts (launcher):
 |---|---|
 | `2` | not an inka artifact / corrupt trailer |
 | `3` | no compatible runtime installed, or an unparseable manifest version constraint |
-| `4` | installed runtime is too old for the ABI, is missing a required symbol, or reports a version that contradicts its filename |
+| `4` | installed runtime is too old for the ABI, is missing a required symbol, reports a version that contradicts its filename, or lacks a required capability (`requires=`) |
 | other | the program's own exit code (propagated) |
 
 `inka run` uses `2` for bad flags/usage, `1` for load failures, and `4` for a

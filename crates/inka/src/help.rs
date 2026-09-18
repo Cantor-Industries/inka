@@ -134,8 +134,9 @@ pub(crate) fn top() -> &'static Help {
                 "run",
                 "execute a .ts/.js file through the installed runtime",
             ),
+            ("cache", "fetch remote modules into the Deno cache"),
             ("update", "update the toolchain and shared runtime"),
-            ("doctor", "print a diagnostic report (runtimes, project)"),
+            ("doctor", "diagnose the machine, or inspect an executable"),
             ("help", "show help for a command"),
         ],
         arguments: &[],
@@ -147,6 +148,8 @@ pub(crate) fn top() -> &'static Help {
         examples: &[
             "inka run app.ts          iterate on a script",
             "inka build app.ts        -> ./app",
+            "inka cache app.ts        fetch jsr:/remote deps",
+            "inka doctor ./app        inspect a built artifact",
             "inka update              update toolchain + runtime",
         ],
         env: &[
@@ -213,6 +216,11 @@ pub(crate) fn build() -> &'static Help {
                 "--embed-dir",
                 "also embed the current directory tree (assets)",
             ),
+            (
+                "--path-base <exe|cwd>",
+                "anchor relative read/write grants (default cwd)",
+            ),
+            ("--fetch", "fetch jsr:/remote deps into the Deno cache"),
             ("-h, --help", "show this help"),
         ],
         permissions: &[
@@ -254,6 +262,11 @@ pub(crate) fn run() -> &'static Help {
                 "apply a named permission set from the config",
             ),
             ("--runtime <ver>", "use a specific installed runtime tuple"),
+            (
+                "--path-base <exe|cwd>",
+                "anchor relative read/write grants (default cwd)",
+            ),
+            ("--fetch", "fetch missing jsr:/remote deps before running"),
             ("--", "end of options (the file may start with '-')"),
             ("-h, --help", "show this help"),
         ],
@@ -268,6 +281,24 @@ pub(crate) fn run() -> &'static Help {
             "inka run app.ts",
             "inka run -A app.ts",
             "inka run -R=./data --allow-net app.ts",
+        ],
+        env: &[],
+    }
+}
+
+/// Fetch remote modules into the Deno cache (opt-in network).
+pub(crate) fn cache() -> &'static Help {
+    &Help {
+        name: "cache",
+        about: "fetch remote (jsr:/https:) modules into the Deno cache",
+        usage: &["cache <file>"],
+        commands: &[],
+        arguments: &[("<file>", "entry file whose import graph to fetch")],
+        options: &[("-h, --help", "show this help")],
+        permissions: &[],
+        examples: &[
+            "inka cache app.ts       fetch jsr:/remote deps",
+            "inka cache -h",
         ],
         env: &[],
     }
@@ -308,13 +339,19 @@ pub(crate) fn update() -> &'static Help {
 pub(crate) fn doctor() -> &'static Help {
     &Help {
         name: "doctor",
-        about: "print a diagnostic report (runtimes, project, DENO_DIR)",
-        usage: &["doctor"],
+        about: "diagnose the machine, or inspect an inka executable",
+        usage: &["doctor [artifact]"],
         commands: &[],
-        arguments: &[],
-        options: &[("-h, --help", "show this help")],
+        arguments: &[(
+            "artifact",
+            "an inka executable to inspect instead of the machine",
+        )],
+        options: &[
+            ("--json", "machine-readable output (artifact mode)"),
+            ("-h, --help", "show this help"),
+        ],
         permissions: &[],
-        examples: &[],
+        examples: &["inka doctor", "inka doctor ./app"],
         env: &[],
     }
 }
@@ -327,7 +364,7 @@ pub(crate) fn help() -> &'static Help {
         commands: &[],
         arguments: &[(
             "[command]",
-            "command to describe (build, run, update, doctor)",
+            "command to describe (build, run, cache, update, doctor)",
         )],
         options: &[],
         permissions: &[],
@@ -343,7 +380,7 @@ mod tests {
     #[test]
     fn top_help_lists_commands() {
         let text = render(top(), Mode::Long);
-        for cmd in ["build", "run", "update", "doctor", "help"] {
+        for cmd in ["build", "run", "cache", "update", "doctor", "help"] {
             assert!(text.contains(cmd), "missing {cmd}:\n{text}");
         }
         assert!(!text.contains("list"), "list must be gone:\n{text}");

@@ -26,7 +26,10 @@ See the [repository README](../../README.md) for the full architecture and
   release (or install a specific tuple), sha256-verified. Downloads show a
   progress bar on a TTY.
 - `inka doctor` — a grouped diagnostic report (runtimes + project status with
-  status glyphs and per-problem hints).
+  status glyphs and per-problem hints). Given an executable
+  (`inka doctor <artifact>`), it inspects the artifact instead (module, runtime
+  floor, permissions, payload, and runtime compatibility); `--json` for
+  machine-readable output.
 - `inka help [command]` — short (`-h`) or full (`--help`) help; running `inka`
   with no arguments prints the top-level help.
 

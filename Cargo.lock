@@ -4592,10 +4592,11 @@ checksum = "f4200d433cbd5178df7797c9c2e75b348b728e39631cf14520d1e2fc424201f4"
 
 [[package]]
 name = "inka"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "deno_terminal",
  "inka-bundler",
+ "inka-format",
  "jsonc-parser",
  "libc",
  "libloading 0.8.9",
@@ -4605,7 +4606,7 @@ dependencies = [
 
 [[package]]
 name = "inka-bundler"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "deno_cache_dir",
@@ -4621,19 +4622,25 @@ dependencies = [
  "serde_json",
  "sys_traits",
  "tokio",
+ "ureq",
  "url",
 ]
 
 [[package]]
+name = "inka-format"
+version = "0.8.0"
+
+[[package]]
 name = "inka-launcher"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
+ "inka-format",
  "libloading 0.8.9",
 ]
 
 [[package]]
 name = "inka-runtime"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4647,6 +4654,7 @@ dependencies = [
  "deno_semver",
  "deno_terminal",
  "import_map",
+ "inka-format",
  "node_resolver",
  "oxc_resolver",
  "sys_traits",
@@ -4656,7 +4664,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.7.1"
+version = "0.8.0"
 
 [[package]]
 name = "inotify"
@@ -7850,6 +7858,7 @@ dependencies = [
  "aws-lc-rs",
  "log",
  "once_cell",
+ "ring",
  "rustls-pki-types",
  "rustls-webpki",
  "subtle",
@@ -9648,6 +9657,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
+name = "ureq"
+version = "3.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
+dependencies = [
+ "base64 0.23.1",
+ "log",
+ "percent-encoding",
+ "rustls",
+ "rustls-pki-types",
+ "ureq-proto",
+ "utf8-zero",
+ "webpki-roots 1.0.9",
+]
+
+[[package]]
+name = "ureq-proto"
+version = "0.6.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
+dependencies = [
+ "base64 0.23.1",
+ "http",
+ "httparse",
+ "log",
+]
+
+[[package]]
 name = "url"
 version = "2.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9677,6 +9714,12 @@ name = "utf-8"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09cc8ee72d2a9becf2f2febe0205bbed8fc6615b7cb429ad062dc7b7ddd036a9"
+
+[[package]]
+name = "utf8-zero"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b8c0a043c9540bae7c578c88f91dda8bd82e59ae27c21baca69c8b191aaf5a6e"
 
 [[package]]
 name = "utf8_iter"

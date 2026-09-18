@@ -4,7 +4,7 @@
 > the agreed design so the work can be picked up later without re-doing the
 > research. Nothing here is implemented yet. It is intentionally detailed.
 >
-> References use the tree at 0.7.0 (runtime tuple `0.266.6`). Line numbers may
+> References use the tree at 0.8.0 (runtime tuple `0.266.8`). Line numbers may
 > drift; search by symbol if they no longer match.
 
 ## Goal
@@ -169,7 +169,7 @@ Notes for the spike:
    - Map `uname -m` (`x86_64`, `aarch64`) + libc → target triple; install the
      runtime into the matching subdir; stop hardcoding
      `x86_64-unknown-linux-gnu`.
-4. **Tuple**: unchanged (`0.266.6`). The engine behavior is identical; libc is a
+4. **Tuple**: unchanged (`0.266.8`). The engine behavior is identical; libc is a
    build flavor, not a new engine revision.
 
 ### Phase 2 — release / CI

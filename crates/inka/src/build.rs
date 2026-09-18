@@ -22,14 +22,14 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
+#[cfg(feature = "bundle")]
+use inka_format::{encode_archive, encode_footer, FOOTER_LEN};
+use inka_format::{manifest_has_key, manifest_set_key};
+
 use crate::help::{self, Mode};
 use crate::permissions::{self, Flags, PermFlag};
 use crate::ui;
 
-#[cfg(feature = "bundle")]
-const FOOTER_LEN: usize = 24;
-#[cfg(feature = "bundle")]
-const MAGIC_V4: &[u8] = b"INKFOOT5"; // bundle + optional embedded files
 #[cfg(feature = "bundle")]
 const LAUNCHER_BIN: &str = "inka-launcher";
 
@@ -98,6 +98,11 @@ pub fn cmd_build(args: &[String]) {
                 external.push(a["--external=".len()..].to_string())
             }
             "--embed-dir" => embed_dir = true,
+            "--fetch" => perm_flags.fetch = true,
+            "--path-base" => perm_flags.path_base = Some(next_str(&mut it, a)),
+            _ if a.starts_with("--path-base=") => {
+                perm_flags.path_base = Some(a["--path-base=".len()..].to_string())
+            }
             "-h" => {
                 help::print(help::build(), Mode::Short);
                 std::process::exit(0);
@@ -179,7 +184,7 @@ pub fn cmd_build(args: &[String]) {
 
     let cwd = env::current_dir()
         .unwrap_or_else(|e| err(&format!("cannot determine current directory: {e}")));
-    let (manifest_bytes, manifest_warnings) = match resolve_manifest(
+    let (manifest_bytes, manifest_warnings, runtime_explicit) = match resolve_manifest(
         &cwd,
         runtime_flag.as_deref(),
         tested_flag.as_deref(),
@@ -188,6 +193,10 @@ pub fn cmd_build(args: &[String]) {
         Ok(v) => v,
         Err(e) => err(&e),
     };
+    let mut manifest_bytes = manifest_bytes;
+    if let Some(pb) = &perm_flags.path_base {
+        manifest_set_key(&mut manifest_bytes, "path-base", pb);
+    }
     for w in &manifest_warnings {
         ui::warn(w);
     }
@@ -206,6 +215,8 @@ pub fn cmd_build(args: &[String]) {
         minify,
         sourcemap,
         embed_dir,
+        perm_flags.fetch,
+        runtime_explicit,
     );
 }
 
@@ -221,6 +232,8 @@ fn pack(
     minify: bool,
     sourcemap: bool,
     embed_dir: bool,
+    fetch: bool,
+    runtime_explicit: bool,
 ) {
     #[cfg(not(feature = "bundle"))]
     {
@@ -233,6 +246,8 @@ fn pack(
             minify,
             sourcemap,
             embed_dir,
+            fetch,
+            runtime_explicit,
         );
         err("inka was built without bundling support (rebuild with `--features bundle`)");
     }
@@ -250,6 +265,7 @@ fn pack(
             external,
             minify,
             sourcemap,
+            fetch,
         })
         .unwrap_or_else(|e| err(&e));
 
@@ -294,6 +310,32 @@ fn pack(
         let archive = encode_archive(&files);
         let mut manifest_payload = manifest_bytes;
         manifest_set_key(&mut manifest_payload, "module", module);
+
+        // Capabilities the artifact needs at run time. The runtime advertises
+        // these (optional symbol) and the launcher verifies them; the floor is
+        // also raised so an old runtime is rejected by version too.
+        let mut features: Vec<String> = Vec::new();
+        if files.iter().any(|(rel, _)| rel.ends_with(".node")) {
+            features.push("native-addon".to_string());
+        }
+        if !embed_pkgs.is_empty() {
+            features.push("raw-cjs".to_string());
+        }
+        if manifest_has_allow_import(&manifest_payload) {
+            features.push("import-perm".to_string());
+        }
+        if !features.is_empty() {
+            manifest_set_key(&mut manifest_payload, "requires", &features.join(","));
+        }
+        if !runtime_explicit {
+            let floor = inka_format::floor_for(&features);
+            manifest_set_key(
+                &mut manifest_payload,
+                "runtime",
+                &format!("inka_runtime>={floor}"),
+            );
+        }
+
         let launcher = find_launcher();
         let launcher_bytes = fs::read(&launcher)
             .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
@@ -304,9 +346,10 @@ fn pack(
         out.extend_from_slice(&launcher_bytes);
         out.extend_from_slice(&archive);
         out.extend_from_slice(&manifest_payload);
-        out.extend_from_slice(MAGIC_V4);
-        out.extend_from_slice(&(archive.len() as u64).to_le_bytes());
-        out.extend_from_slice(&(manifest_payload.len() as u64).to_le_bytes());
+        out.extend_from_slice(&encode_footer(
+            archive.len() as u64,
+            manifest_payload.len() as u64,
+        ));
 
         write_executable(output, &out)
             .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));
@@ -377,19 +420,6 @@ fn write_executable(output: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
-#[cfg(feature = "bundle")]
-fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for (path, data) in files {
-        out.extend_from_slice(&(path.len() as u64).to_le_bytes());
-        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
-        out.extend_from_slice(path.as_bytes());
-        out.extend_from_slice(data);
-    }
-    out
-}
-
 fn next_val(it: &mut std::slice::Iter<'_, String>, flag: &str) -> PathBuf {
     match it.next() {
         Some(v) => PathBuf::from(v),
@@ -415,44 +445,6 @@ fn strip_extension(path: &Path) -> Option<PathBuf> {
     Some(out)
 }
 
-fn manifest_has_key(bytes: &[u8], key: &str) -> bool {
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .any(|l| l.trim_start().starts_with(&format!("{key}=")))
-}
-
-/// Replace (or append) a `key=` line in a manifest buffer.
-fn manifest_set_key(bytes: &mut Vec<u8>, key: &str, value: &str) {
-    let text = String::from_utf8_lossy(bytes);
-    let mut replaced = false;
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with(&format!("{key}=")) {
-            out.push(format!("{key}={value}"));
-            replaced = true;
-        } else {
-            out.push(line.to_string());
-        }
-    }
-    if !replaced {
-        if !out.is_empty() {
-            out.push(String::new()); // blank line separator
-        }
-        out.push(format!("{key}={value}"));
-    }
-    let mut joined = out.join("\n");
-    if !joined.ends_with('\n') {
-        joined.push('\n');
-    }
-    *bytes = joined.into_bytes();
-}
-
-/// Derive the embedded manifest from project config and CLI overrides. There is
-/// no on-disk manifest: permission lines come from explicit CLI flags (which
-/// override config) or package.json / deno.json(.jsonc) build-intent sources,
-/// and the runtime requirement from config plus `--runtime`/`--tested-against`.
-/// Returns the manifest bytes and any non-fatal warnings.
 /// Validate a `--runtime`/`--tested-against` value: no newline (manifest
 /// injection) and the version grammar the launcher understands.
 fn check_version_arg(flag: &str, value: &str) -> Result<(), String> {
@@ -464,16 +456,15 @@ fn check_version_arg(flag: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Derive the embedded manifest from project config and CLI overrides. Returns
+/// the bytes, non-fatal warnings, and whether the runtime requirement was set
+/// explicitly (so `pack` may raise the default floor for required capabilities).
 fn resolve_manifest(
     cwd: &Path,
     runtime_flag: Option<&str>,
     tested_flag: Option<&str>,
     perm_flags: &Flags,
-) -> Result<(Vec<u8>, Vec<String>), String> {
-    // Must track `crates/inka-runtime/runtime-version`: an artifact must never
-    // select a runtime too old to enforce its permission DSL or resolution.
-    const DEFAULT_RUNTIME: &str = ">=0.266.7";
-
+) -> Result<(Vec<u8>, Vec<String>, bool), String> {
     // CLI permission flags override any config-derived permission source.
     let (cli_dsl, cli_warns) = if perm_flags.selects() {
         permissions::dsl(cwd, perm_flags)?
@@ -487,24 +478,34 @@ fn resolve_manifest(
     let mut warnings = cli_warns;
     warnings.extend(syn.warnings);
 
-    // Runtime precedence: --runtime > config `inka.runtime` > default floor. The
-    // floor is always embedded so an artifact can never select a runtime too old
-    // to enforce its permission DSL.
+    // Runtime precedence: --runtime > config `inka.runtime` > the security
+    // floor. The floor is always embedded so an artifact can never select a
+    // runtime too old to enforce its permission DSL. `pack` may raise it later
+    // (for required capabilities) when the value was not set explicitly.
+    let runtime_explicit = runtime_flag.is_some() || manifest_has_key(&bytes, "runtime");
     if let Some(r) = runtime_flag {
         check_version_arg("--runtime", r)?;
         manifest_set_key(&mut bytes, "runtime", &crate::config::runtime_value(r));
     } else if !manifest_has_key(&bytes, "runtime") {
+        let default = format!(">={}", inka_format::SECURITY_FLOOR);
         manifest_set_key(
             &mut bytes,
             "runtime",
-            &crate::config::runtime_value(DEFAULT_RUNTIME),
+            &crate::config::runtime_value(&default),
         );
     }
     if let Some(t) = tested_flag {
         check_version_arg("--tested-against", t)?;
         manifest_set_key(&mut bytes, "tested-against", t);
     }
-    Ok((bytes, warnings))
+    Ok((bytes, warnings, runtime_explicit))
+}
+
+#[cfg(feature = "bundle")]
+fn manifest_has_allow_import(bytes: &[u8]) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| l.trim_start().starts_with("allow-import="))
 }
 
 #[cfg(feature = "bundle")]
@@ -565,7 +566,7 @@ mod tests {
         tested: Option<&str>,
         pset: Option<&str>,
     ) -> String {
-        let (bytes, _) = resolve_manifest(cwd, runtime, tested, &flags(pset)).unwrap();
+        let (bytes, _, _) = resolve_manifest(cwd, runtime, tested, &flags(pset)).unwrap();
         String::from_utf8(bytes).unwrap()
     }
 
@@ -573,7 +574,7 @@ mod tests {
     fn default_runtime_floor_always_embedded() {
         let cwd = scratch();
         let m = manifest(&cwd, None, None, None);
-        assert!(m.contains("runtime=inka_runtime>=0.266.7"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.5"), "{m}");
         assert!(!m.contains("allow-"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
@@ -623,10 +624,10 @@ mod tests {
             allow_all: true,
             ..Default::default()
         };
-        let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
+        let (bytes, _, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("permissions=all"), "{m}");
-        assert!(m.contains("runtime=inka_runtime>=0.266.7"), "{m}");
+        assert!(m.contains("runtime=inka_runtime>=0.266.5"), "{m}");
         let _ = fs::remove_dir_all(&cwd);
     }
 
@@ -642,7 +643,7 @@ mod tests {
             allow: vec![("env".to_string(), "*".to_string())],
             ..Default::default()
         };
-        let (bytes, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
+        let (bytes, _, _) = resolve_manifest(&cwd, None, None, &f).unwrap();
         let m = String::from_utf8(bytes).unwrap();
         assert!(m.contains("allow-env=*"), "{m}");
         assert!(!m.contains("allow-read"), "CLI should override config: {m}");
@@ -664,18 +665,5 @@ mod tests {
         std::os::unix::fs::symlink(&src, &link).unwrap();
         assert!(check_output(&src, &link).is_err());
         let _ = fs::remove_dir_all(&cwd);
-    }
-
-    #[test]
-    fn module_line_appended_and_replaced() {
-        let mut appended = b"runtime=x\n".to_vec();
-        manifest_set_key(&mut appended, "module", "app.js");
-        assert_eq!(
-            String::from_utf8(appended).unwrap(),
-            "runtime=x\n\nmodule=app.js\n"
-        );
-        let mut replaced = b"module=old.js\n".to_vec();
-        manifest_set_key(&mut replaced, "module", "sub/main.ts");
-        assert_eq!(String::from_utf8(replaced).unwrap(), "module=sub/main.ts\n");
     }
 }

@@ -9,6 +9,7 @@ inka build [source] [-s|--source <file>] [-o|--output <file>]
            [-A|--allow-all] [-R|-W|-N|-E|-S[=list]]
            [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]]
            [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir]
+           [--path-base <exe|cwd>]
 ```
 
 ## Defaults
@@ -41,6 +42,13 @@ tree-shaking is on. `node:` built-ins stay external (the engine provides them).
 - `--embed-dir` — also embed the whole current-directory tree (minus `.git`,
   `target`, `node_modules`, `.inka`, `dist`) for arbitrary asset files. Every
   dot-prefixed file/dir is skipped, and the ignore names apply at any depth.
+- `--path-base <exe|cwd>` — how relative `read`/`write` grants are anchored:
+  `cwd` (default; Deno's launch-directory semantics) or `exe` (the artifact's own
+  directory). See [Permissions](permissions.md#portable-grants-tokens-and-path-base).
+  `${EXE_DIR}`/`${PROJECT_DIR}` tokens in grant values work regardless.
+- `--fetch` — opt in to fetching remote (`jsr:`/`https:`) modules missing from the
+  Deno cache before bundling (otherwise inka is fully offline). See
+  [Dependencies & resolution](packages.md).
 
 `npm:` version pins are **enforced**: if the version in `node_modules` does not
 satisfy an `npm:pkg@<req>` specifier, the build fails (mirroring `inka run`).
@@ -81,13 +89,15 @@ embeds it. It tells the runtime what the artifact needs and may do:
 
 ```
 # runtime floor; also >, ==, or a bare exact version
-runtime=inka_runtime>=0.266.7
+runtime=inka_runtime>=0.266.5
 # optional cap: never auto-run on something newer
-tested-against=0.266.7
+tested-against=0.266.6
 # entry name (always derived from the build)
 module=main.js
+# capabilities the bundle needs (verified by the launcher)
+requires=raw-cjs,native-addon
 # permissions
-allow-read=./data,/etc
+allow-read=${EXE_DIR}/data,/etc
 ```
 
 The manifest is line-oriented; a `#` comment must be on its own line (trailing
@@ -95,8 +105,12 @@ text after a value is not stripped).
 
 There is **no on-disk manifest input**: `module=` is always the packed entry, and
 the runtime requirement comes from `inka.runtime` (or `--runtime`) with a default
-floor of `>=0.266.7`. The floor is always embedded, so an artifact can never
-select a runtime too old to enforce its permissions.
+**security floor** of `>=0.266.5` — the tuple that guarantees deny-by-default,
+realpath confinement, and the directory entry point. When the bundle needs a
+capability (`raw-cjs` for embedded external packages, `native-addon` for a
+`.node`, `import-perm` for an `allow-import` grant), `requires=` is added and the
+floor is raised to that capability's minimum, so an artifact never selects a
+runtime too old to run it. The floor is always embedded.
 
 ## Permissions from project config
 

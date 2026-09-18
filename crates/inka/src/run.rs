@@ -77,6 +77,19 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
                     fail("--runtime needs a version like 0.266.0");
                 }
             }
+            "--path-base" => {
+                i += 1;
+                if i >= args.len() {
+                    fail("--path-base needs \"exe\" or \"cwd\"");
+                }
+                f.path_base = Some(args[i].clone());
+            }
+            _ if a.starts_with("--path-base=") => {
+                f.path_base = Some(a["--path-base=".len()..].to_string());
+            }
+            "--fetch" => {
+                f.fetch = true;
+            }
             "-q" | "--quiet" | "-v" | "--verbose" => {
                 ui::apply_verbosity_flag(a);
             }
@@ -347,8 +360,33 @@ pub(crate) fn cmd_run(args: &[String]) {
         Ok(v) => v,
         Err(e) => fail(&e),
     };
+    // Expand portable tokens / `--path-base exe`: `${EXE_DIR}` anchors to the
+    // entry file's directory (the "program" location), `${PROJECT_DIR}` to the
+    // execution root. A run has no artifact of its own.
+    let entry_abs = root.join(&entry);
+    let exe_dir = entry_abs.parent().map(Path::to_path_buf);
+    let perms = inka_format::expand_permissions(
+        &perms,
+        flags.path_base.as_deref(),
+        exe_dir.as_deref(),
+        Some(root.as_path()),
+    );
     for n in &perm_notes {
         ui::warn(n);
+    }
+
+    // `--fetch`: warm the Deno cache for missing remote (`jsr:`/`https:`)
+    // modules before the (offline) runtime takes over.
+    #[cfg(feature = "bundle")]
+    if flags.fetch {
+        match inka_bundler::warm_cache(&root, &entry_abs) {
+            Ok(n) => ui::info(format!("fetched {n} remote module(s) into the Deno cache")),
+            Err(e) => fail(&e),
+        }
+    }
+    #[cfg(not(feature = "bundle"))]
+    if flags.fetch {
+        fail("inka was built without fetching support (rebuild with `--features bundle`)");
     }
 
     // Informational guard: config declares build-intent or default permissions

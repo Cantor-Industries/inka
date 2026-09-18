@@ -16,6 +16,7 @@ on:
     paths:
       - 'crates/inka-runtime/**'
       - 'crates/inka-bundler/**'
+      - 'crates/inka-format/**'
       - 'crates/inka/**'
       - 'crates/inka-launcher/**'
       - 'scripts/ci/**'
@@ -27,6 +28,7 @@ on:
     paths:
       - 'crates/inka-runtime/**'
       - 'crates/inka-bundler/**'
+      - 'crates/inka-format/**'
       - 'crates/inka/**'
       - 'crates/inka-launcher/**'
       - 'scripts/ci/**'
@@ -61,6 +63,9 @@ jobs:
           cargo build --locked --release -p inka-launcher
           cargo build --locked --release -p inka-runtime
 
+      - name: Runtime ABI symbols
+        run: scripts/ci/abi-symbols.sh "$CARGO_TARGET_DIR/release/libinka_runtime.so"
+
       # The hosted `ci.yml` cannot afford the rolldown cold build, so the
       # bundler and every `#[cfg(feature = "bundle")]` test are exercised here.
       - name: Bundler + bundle-feature lint and tests
@@ -84,11 +89,14 @@ jobs:
       - name: Warm Deno cache (jsr matrix case)
         run: |
           set -euo pipefail
-          command -v deno >/dev/null || { echo "error: deno is required on the runner" >&2; exit 1; }
           export DENO_DIR="${RUNNER_TEMP:-/tmp}/inka-deno"
           mkdir -p "$DENO_DIR"
           echo "DENO_DIR=$DENO_DIR" >> "$GITHUB_ENV"
-          deno cache 'jsr:@std/assert@1'
+          # Exercise the opt-in fetch path (`inka cache`) rather than `deno cache`.
+          warm="${RUNNER_TEMP:-/tmp}/inka-warm"
+          mkdir -p "$warm"
+          printf 'import "jsr:@std/assert@1";\n' > "$warm/warm.ts"
+          "$CARGO_TARGET_DIR/release/inka" cache "$warm/warm.ts"
 
       - name: Runtime contract matrix
         run: |

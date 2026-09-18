@@ -66,6 +66,9 @@ deno_core::extension!(
 struct PkgLoader {
     /// Root of the extracted artifact tree.
     artifact_root: PathBuf,
+    /// Permissions used to honor an explicit read grant for out-of-tree module
+    /// reads (e.g. `npm link`); deny-by-default still confines otherwise.
+    permissions: PermissionsContainer,
     /// CJS/Node services used to serve an ESM facade for CommonJS modules.
     node_services: node_services::NodeServices,
     /// Offline module-graph resolution (`inka run`): the cached `jsr:`/remote
@@ -170,6 +173,7 @@ impl ModuleLoader for PkgLoader {
     ) -> ModuleLoadResponse {
         let specifier = module_specifier.clone();
         let artifact_root = self.artifact_root.clone();
+        let permissions = self.permissions.clone();
         let node_services = self.node_services.clone();
         let deno_dir = self.resolver.deno_dir().to_path_buf();
         let fut = async move {
@@ -178,11 +182,6 @@ impl ModuleLoader for PkgLoader {
                 return load_cached_remote(&specifier, &deno_dir).await;
             }
             let mut path = module_url_to_path(&specifier)?;
-            if !path.starts_with(&artifact_root) {
-                return Err(JsErrorBox::generic(format!(
-                    "refusing to load module outside the execution tree: {specifier}"
-                )));
-            }
             // Deno-style resolution: an extensionless specifier like "./math"
             // may point at math.ts / math.js / ...
             if !path.is_file() && path.extension().is_none() {
@@ -210,16 +209,19 @@ impl ModuleLoader for PkgLoader {
                     }
                 }
             }
-            // Realpath confinement: the lexical check above can be defeated by a
-            // symlink planted inside the tree, so resolve symlinks and require the
-            // real file to stay under the canonical execution root.
+            // Realpath confinement: the lexical path can be defeated by a
+            // symlink planted inside the tree, so resolve symlinks and require
+            // the real file to stay under the canonical execution root — unless
+            // an explicit read grant covers it (out-of-tree `npm link`).
             let real = std::fs::canonicalize(&path).map_err(|source| {
                 JsErrorBox::from_err(std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("Cannot load module \"{specifier}\": {source}"),
                 ))
             })?;
-            if !real.starts_with(&artifact_root) {
+            if !real.starts_with(&artifact_root)
+                && !node_services::read_granted(&permissions, &real)
+            {
                 return Err(JsErrorBox::generic(format!(
                     "refusing to load module outside the execution tree: {specifier}"
                 )));
@@ -592,6 +594,13 @@ async fn run_module_async(
     let services = build_services(permissions, loader, node_services);
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
+    // inka is bring-your-own-`node_modules` (BYONM): npm packages resolve from
+    // the execution tree's `node_modules`, never Deno's global npm cache. This
+    // flag drives `usesLocalNodeModulesDir` in deno_node's `require()`
+    // resolution; without it CJS falls back to the deno-dir lookup path, which
+    // mishandles out-of-tree (symlinked) packages. It does not affect the
+    // remote (`jsr:`/`https:`) cache under `$DENO_DIR/remote`.
+    options.bootstrap.has_node_modules_dir = true;
     // Leave bootstrap.location unset (like `deno run`): setting it makes the worker
     // expose a live `globalThis.location` whose origin is "null" for the staged
     // file:// module, which breaks web code that builds URL bases from it (e.g.
@@ -686,7 +695,8 @@ fn run_tree(
         let roots = node_services::ExecutionRoots {
             root: Some(root.clone()),
         };
-        let (node_services, ext_services) = node_services::NodeServices::new(roots);
+        let (node_services, ext_services) =
+            node_services::NodeServices::new(roots, permissions.clone());
 
         // Deno's workspace resolver owns the import map and the
         // package.json/workspace mapping. Discovery and construction are
@@ -719,6 +729,7 @@ fn run_tree(
         let resolver_state = resolver::build(&root, &file, import_map).await;
         let loader: Rc<dyn ModuleLoader> = Rc::new(PkgLoader {
             artifact_root: root.clone(),
+            permissions: permissions.clone(),
             node_services,
             resolver: Rc::new(resolver_state),
             workspace: Rc::new(workspace),
@@ -751,6 +762,30 @@ fn version_cstr() -> &'static CStr {
 #[no_mangle]
 pub extern "C" fn inka_runtime_version() -> *const c_char {
     std::panic::catch_unwind(|| version_cstr().as_ptr()).unwrap_or(std::ptr::null())
+}
+
+// ---- capabilities ----------------------------------------------------------
+
+/// Capability names this runtime supports. The requireable names come from
+/// `inka-format` (single source shared with `build`/the launcher); `free-string`
+/// is a runtime-only capability (the optional `inka_runtime_free_string`).
+fn runtime_features_string() -> String {
+    let mut names = inka_format::known_features();
+    names.push("free-string");
+    names.join(",")
+}
+
+fn features_cstr() -> &'static CStr {
+    static V: OnceLock<CString> = OnceLock::new();
+    V.get_or_init(|| CString::new(runtime_features_string()).expect("nul in features"))
+}
+
+/// The set of capabilities this runtime supports, comma-separated. Optional:
+/// a launcher from before this symbol exists ignores its absence and falls back
+/// to the manifest's version floor.
+#[no_mangle]
+pub extern "C" fn inka_runtime_features() -> *const c_char {
+    std::panic::catch_unwind(|| features_cstr().as_ptr()).unwrap_or(std::ptr::null())
 }
 
 // ---- handle ----------------------------------------------------------------
@@ -970,5 +1005,17 @@ mod tests {
         assert!(!import_allowed("allow-read=/etc"));
         // `permissions=all` trimmed by deny-import denies import.
         assert!(!import_allowed("permissions=all\ndeny-import=*"));
+    }
+
+    #[test]
+    fn advertises_every_requireable_feature() {
+        let advertised = runtime_features_string();
+        for f in inka_format::known_features() {
+            assert!(
+                advertised.split(',').any(|x| x == f),
+                "runtime must advertise '{f}': {advertised}"
+            );
+        }
+        assert!(advertised.split(',').any(|x| x == "free-string"));
     }
 }

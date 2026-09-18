@@ -1,0 +1,8 @@
+[package]
+name = "inka-format"
+license = "MIT"
+version = "0.8.0"
+edition = "2021"
+publish = false
+
+[dependencies]

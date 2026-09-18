@@ -14,6 +14,8 @@ best matching installed tuple.
 - `inka_runtime_run_module_dir()` — run: a `dir` root + `entry` path,
   resolving relative imports, with runtime TS transpile per file,
 - `inka_runtime_free_string()` — free an `err_msg` string the runtime returned.
+- `inka_runtime_features()` — comma-separated engine capability names, checked
+  against an artifact's `requires=` (optional symbol; older launchers ignore it).
 
 The run entry point is wrapped in `catch_unwind`, so a panic surfaces as an
 error code + message rather than aborting the host.
@@ -28,7 +30,10 @@ Deny-by-default. The manifest/`inka run` DSL (`permissions=all|none`,
 disabled. Categories are `read`, `write`, `net`, `env`, `run`, `sys`, `ffi`,
 `import` (`import` covers cached remote/`jsr:` modules; the network stays
 disabled). Resolution is rooted at the execution tree, and
-every `file:` load is confined to its realpath (symlinks cannot escape).
+every `file:` load is confined to its realpath (symlinks cannot escape) —
+unless an explicit read grant (`--allow-read`/`-A`) covers the target, which
+allows out-of-tree linked packages (`npm link`) while deny-by-default still
+confines.
 `DENO_DIR` is read for `jsr:` and other cached remote modules; it must be an
 absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 

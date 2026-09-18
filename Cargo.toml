@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/inka", "crates/inka-launcher", "crates/inka-runtime", "crates/inka-runtime-stub", "crates/inka-bundler"]
+members = ["crates/inka", "crates/inka-format", "crates/inka-launcher", "crates/inka-runtime", "crates/inka-runtime-stub", "crates/inka-bundler"]
 
 # `panic = "unwind"` (the default, set explicitly) so the runtime's exported ABI
 # entry points can `catch_unwind` and the launcher/runtime temp-tree guards can

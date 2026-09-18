@@ -1,7 +1,7 @@
 [package]
 name = "inka-launcher"
 license = "MIT"
-version = "0.7.1"
+version = "0.8.0"
 edition = "2021"
 publish = false
 
@@ -10,4 +10,5 @@ name = "inka-launcher"
 path = "src/main.rs"
 
 [dependencies]
+inka-format = { path = "../inka-format" }
 libloading = "0.8"

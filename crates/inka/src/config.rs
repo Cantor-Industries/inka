@@ -147,6 +147,17 @@ fn inka_block_runtime(cfg: &ConfigFiles) -> (Option<String>, Option<String>) {
     (runtime, tested)
 }
 
+/// The effective `inka.path-base` (`exe` or `cwd`); deno.json wins.
+fn inka_block_path_base(cfg: &ConfigFiles) -> Option<String> {
+    let read = |f: Option<&Value>| {
+        f.and_then(|v| v.get("inka"))
+            .and_then(|i| i.get("path-base"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    read(cfg.deno.as_ref()).or_else(|| read(cfg.pkg.as_ref()))
+}
+
 /// True when a rendered comma-list carries at least one non-empty item.
 /// Guards against a value like `""`, `" "`, or `","` being mistaken for a grant
 /// (the runtime treats an empty list as "all", which would be an over-grant).
@@ -264,9 +275,14 @@ fn apply_category_map(
 }
 
 /// True when a permission descriptor looks like a relative filesystem path
-/// (not `*`, not absolute, not a URL/scheme).
+/// (not `*`, not absolute, not a URL/scheme, and not a portable token like
+/// `${EXE_DIR}` whose base is supplied at run time).
 fn is_relative_path(item: &str) -> bool {
-    !item.is_empty() && item != "*" && !item.starts_with('/') && !item.contains("://")
+    !item.is_empty()
+        && item != "*"
+        && !item.starts_with('/')
+        && !item.contains("://")
+        && !item.contains("${")
 }
 
 /// Accept the runtime-requirement grammar the launcher understands: an optional
@@ -715,6 +731,14 @@ pub fn synthesize_manifest(
             ));
         }
         lines.push(format!("tested-against={t}"));
+    }
+    if let Some(pb) = inka_block_path_base(&cfg) {
+        if pb != "exe" && pb != "cwd" {
+            return Err(format!(
+                "inka.path-base must be \"exe\" or \"cwd\", got '{pb}'"
+            ));
+        }
+        lines.push(format!("path-base={pb}"));
     }
 
     if let Some(dsl) = cli_dsl {
@@ -1289,6 +1313,33 @@ mod tests {
         );
         let (_, warns) = read_synth(&cwd, None);
         assert!(!has_note(&warns, "relative path"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn token_path_does_not_warn_relative() {
+        let cwd = scratch_dir("tokenrel");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "compile": { "permissions": { "read": ["${EXE_DIR}/data"] } } }"#,
+        );
+        let (s, warns) = read_synth(&cwd, None);
+        assert!(s.contains("allow-read=${EXE_DIR}/data"), "{s}");
+        assert!(!has_note(&warns, "relative path"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn inka_path_base_is_emitted_and_validated() {
+        let cwd = scratch_dir("pathbase");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(&cwd, "deno.json", r#"{ "inka": { "path-base": "exe" } }"#);
+        let (s, _) = read_synth(&cwd, None);
+        assert!(s.contains("path-base=exe"), "{s}");
+        write(&cwd, "deno.json", r#"{ "inka": { "path-base": "bogus" } }"#);
+        assert!(synthesize_manifest(&cwd, None, None).is_err());
         let _ = std::fs::remove_dir_all(&cwd);
     }
 

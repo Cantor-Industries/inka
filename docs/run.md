@@ -27,6 +27,12 @@ only, no prompting. This table uses the runtime's categories (`read`, `write`,
 | `--deny-<cat>[=list]` | deny within an allowed category |
 | `-P`, `-P=<name>`, `--permission-set <name>` | apply a named permission set from the config (bare `-P` = the `default` set) |
 | `--runtime <ver>` | use a specific installed runtime tuple instead of the newest |
+| `--path-base <exe\|cwd>` | anchor relative read/write grants to the entry dir (`exe`) instead of the cwd |
+| `--fetch` | fetch missing remote (`jsr:`/`https:`) modules into the cache first |
+
+`allow-read`/`allow-write` values may contain the `${EXE_DIR}` (entry dir) and
+`${PROJECT_DIR}` (execution root) tokens — see
+[Permissions](permissions.md#portable-grants-tokens-and-path-base).
 
 Examples:
 

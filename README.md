@@ -31,7 +31,9 @@ inka doctor
 
 `doctor` shows your installed runtimes plus project status (`package.json`/
 `deno.json`/`deno.jsonc`, `node_modules`, `DENO_DIR`, bundling capability,
-launcher). If it's clean, you're ready.
+launcher). Pass an executable (`inka doctor ./app`) to inspect a built
+artifact's module, runtime requirement, permissions, and payload instead. If
+it's clean, you're ready.
 
 > Newer runtime versions are fine — inka rolls forward to the newest installed
 > tuple that satisfies each executable's manifest. Keep current with `inka

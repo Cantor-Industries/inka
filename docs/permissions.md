@@ -106,6 +106,33 @@ paths tie the artifact to a machine's path layout. `inka build` warns when a
 **config-sourced** set bakes a relative `read`/`write` grant; grants passed
 directly on the CLI (`--allow-read=./x`) are not checked.
 
+### Portable grants: tokens and `path-base`
+
+An inka extension makes a grant travel with the artifact. Two tokens are
+expanded host-side (by the launcher, or by `inka run`), before the DSL reaches
+the engine:
+
+- `${EXE_DIR}` — the directory containing the executable. For `inka run` it is
+  the entry file's directory.
+- `${PROJECT_DIR}` — the execution root (the project dir for `inka run`).
+
+```
+allow-read=${EXE_DIR}/data       # the artifact's own data/ directory
+allow-write=${PROJECT_DIR}/out
+```
+
+`--path-base exe` (on `build` or `run`) instead anchors **every** relative
+`read`/`write` grant to `${EXE_DIR}`, so `--allow-read=./data` becomes
+`<exe-dir>/data`. The default is `cwd`: no expansion of bare relative paths, so
+strict Deno semantics are preserved unless you opt in. The setting can also be
+baked from `inka.path-base` (`"exe"` or `"cwd"`) in `deno.json`/`package.json`.
+
+Host-side expansion means Deno itself still sees ordinary absolute paths; the
+only observable difference is that `Deno.permissions` reports the expanded path
+(Deno already normalizes relative paths to absolute internally). A token with
+no directory available (e.g. `${EXE_DIR}` in a context without an executable) is
+left literally intact rather than silently rewritten.
+
 A permission item containing a raw newline (or a comma inside an array item) is
 rejected at build time, as is an invalid `inka.runtime`/`--runtime` version
 spec — malformed values never silently weaken the manifest.
@@ -120,6 +147,14 @@ spec — malformed values never silently weaken the manifest.
   deny-by-default change ran permission-less artifacts allow-all; current builds
   deny. Rebuild old artifacts against the current runtime to inherit the new
   default (or declare `permissions=all`).
+- **Out-of-tree module reads need a grant.** Module loading is confined to the
+  execution tree's realpath; an out-of-tree symlinked package (e.g. `npm link`)
+  is refused by default and loads only when an explicit `read` grant covers it —
+  for both ESM `import` and CJS `require()`. `-A` therefore allows linked
+  packages, matching Deno.
+- **Capabilities are verified.** An artifact's `requires=` is checked against the
+  runtime's advertised capabilities (`inka_runtime_features()`); a runtime that
+  lacks one is refused (exit 4) rather than failing at an arbitrary point later.
 - `inka run` grants are per-invocation flags (see [`inka run`](run.md)); `run`
   honors `-P` only and never applies `compile.permissions`/auto-defaults. When
   the config defines a build-intent source, `run` prints a hint naming the

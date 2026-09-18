@@ -19,39 +19,20 @@ mod ui;
 mod update;
 
 use std::env;
-use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use deno_terminal::colors;
+use inka_format::{archive_index, constraint_allows, parse_manifest, read_layout};
 use sha2::{Digest, Sha256};
 
 pub(crate) const FILENAME_PREFIX: &str = "libinka_runtime-";
 pub(crate) const FILENAME_SUFFIX: &str = ".so";
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct Version(pub(crate) u64, pub(crate) u64, pub(crate) u64);
-
-impl fmt::Display for Version {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.0, self.1, self.2)
-    }
-}
-
-pub(crate) fn parse_version(s: &str) -> Option<Version> {
-    let s = s.trim();
-    let mut parts = s.split('.');
-    let a = parts.next()?.parse().ok()?;
-    let b = parts.next().unwrap_or("0").parse().ok()?;
-    let c = parts.next().unwrap_or("0").parse().ok()?;
-    // reject trailing garbage like "0.0.0-stub" for install targets
-    if parts.next().is_some() {
-        return None;
-    }
-    Some(Version(a, b, c))
-}
+/// Version parsing/rendering lives in `inka-format`, shared with the launcher.
+pub(crate) use inka_format::{parse_version, Version};
 
 /// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,
 /// else the current directory.
@@ -117,7 +98,7 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
 }
 
 /// Top-level commands, in help order and for suggestions.
-pub(crate) const COMMANDS: [&str; 5] = ["build", "run", "update", "doctor", "help"];
+pub(crate) const COMMANDS: [&str; 6] = ["build", "run", "cache", "update", "doctor", "help"];
 
 fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
@@ -139,6 +120,7 @@ fn main() {
         "help" => cmd_help(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
+        "cache" => cmd_cache(&args[1..]),
         "update" => update::cmd_update(&args[1..]),
         "doctor" => cmd_doctor(&args[1..]),
         other if other.starts_with('-') => {
@@ -167,6 +149,7 @@ fn cmd_help(args: &[String]) {
         Some("--help") => help::print(help::top(), help::Mode::Long),
         Some("build") => help::print(help::build(), help::Mode::Long),
         Some("run") => help::print(help::run(), help::Mode::Long),
+        Some("cache") => help::print(help::cache(), help::Mode::Long),
         Some("update") => help::print(help::update(), help::Mode::Long),
         Some("doctor") => help::print(help::doctor(), help::Mode::Long),
         Some("help") => help::print(help::help(), help::Mode::Long),
@@ -518,26 +501,307 @@ fn launcher_path() -> Option<PathBuf> {
     None
 }
 
-fn cmd_doctor(args: &[String]) {
+/// `inka cache <file>`: fetch missing remote (`jsr:`/`https:`) modules into the
+/// Deno cache so later (offline) builds/runs resolve them. Opt-in network.
+#[cfg(feature = "bundle")]
+fn cmd_cache(args: &[String]) {
+    let mut positional: Vec<&str> = Vec::new();
     for a in args {
-        if a == "-h" {
-            help::print(help::doctor(), help::Mode::Short);
+        match a.as_str() {
+            "-h" => {
+                help::print(help::cache(), help::Mode::Short);
+                std::process::exit(0);
+            }
+            "--help" => {
+                help::print(help::cache(), help::Mode::Long);
+                std::process::exit(0);
+            }
+            other if ui::apply_verbosity_flag(other) => {}
+            other if other.starts_with('-') => {
+                ui::log_error(format!("unknown option '{other}'"));
+                ui::hint("run `inka cache --help` for usage");
+                std::process::exit(2);
+            }
+            other => positional.push(other),
+        }
+    }
+    let file = match positional.as_slice() {
+        [f] => PathBuf::from(f),
+        [] => {
+            ui::log_error("no file given");
+            ui::hint("run `inka cache --help` for usage");
+            std::process::exit(2);
+        }
+        _ => {
+            ui::log_error("inka cache takes one entry file");
+            std::process::exit(2);
+        }
+    };
+    let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let entry = if file.is_absolute() {
+        file.clone()
+    } else {
+        cwd.join(&file)
+    };
+    if !entry.is_file() {
+        ui::log_error(format!("source file not found: {}", file.display()));
+        std::process::exit(1);
+    }
+    ui::title("cache");
+    ui::section("Fetch");
+    ui::row("entry", file.display());
+    match inka_bundler::warm_cache(&cwd, &entry) {
+        Ok(n) => {
+            ui::ok("fetched", format!("{n} remote module(s)"));
+            ui::status_ok("cache warmed");
+        }
+        Err(e) => {
+            ui::log_error(e);
+            std::process::exit(1);
+        }
+    }
+}
+
+#[cfg(not(feature = "bundle"))]
+fn cmd_cache(args: &[String]) {
+    for a in args {
+        if a == "-h" || a == "--help" {
+            help::print(help::cache(), help::Mode::Short);
             std::process::exit(0);
         }
-        if a == "--help" {
-            help::print(help::doctor(), help::Mode::Long);
-            std::process::exit(0);
+    }
+    ui::log_error("inka was built without fetching support (rebuild with `--features bundle`)");
+    std::process::exit(1);
+}
+
+fn cmd_doctor(args: &[String]) {
+    let mut positional: Vec<&str> = Vec::new();
+    let mut json = false;
+    for a in args {
+        match a.as_str() {
+            "-h" => {
+                help::print(help::doctor(), help::Mode::Short);
+                std::process::exit(0);
+            }
+            "--help" => {
+                help::print(help::doctor(), help::Mode::Long);
+                std::process::exit(0);
+            }
+            "--json" => json = true,
+            other if ui::apply_verbosity_flag(other) => {}
+            other if other.starts_with('-') => {
+                ui::log_error(format!("unknown option '{other}'"));
+                ui::hint("run `inka doctor --help` for usage");
+                std::process::exit(2);
+            }
+            other => positional.push(other),
         }
-        if ui::apply_verbosity_flag(a) {
-            continue;
-        }
-        if a.starts_with('-') {
-            ui::log_error(format!("unknown option '{a}'"));
+    }
+    match positional.as_slice() {
+        [] => doctor_machine(),
+        [artifact] => doctor_artifact(Path::new(artifact), json),
+        _ => {
+            ui::log_error("doctor takes at most one artifact path");
             ui::hint("run `inka doctor --help` for usage");
             std::process::exit(2);
         }
     }
+}
 
+/// Why an artifact could not be inspected.
+#[derive(Debug)]
+enum ArtifactError {
+    /// No `INKFOOT5` trailer (the file is not an inka executable).
+    NotArtifact(String),
+    /// An inka trailer whose archive/manifest is malformed or unparseable.
+    Malformed(String),
+}
+
+/// Parsed artifact contents for inspection.
+struct ArtifactInfo {
+    manifest: inka_format::Manifest,
+    entries: Vec<(String, usize)>,
+    size: usize,
+}
+
+/// Parse a full artifact image into its manifest and payload index (pure, so it
+/// is testable without touching the filesystem or exiting).
+fn parse_artifact(bytes: &[u8]) -> Result<ArtifactInfo, ArtifactError> {
+    let layout = read_layout(bytes).map_err(ArtifactError::NotArtifact)?;
+    let manifest =
+        parse_manifest(&bytes[layout.manifest_off..layout.manifest_off + layout.manifest_len]);
+    let entries =
+        archive_index(&bytes[layout.archive_off..layout.archive_off + layout.archive_len])
+            .map_err(ArtifactError::Malformed)?;
+    if let Some(bad) = &manifest.malformed {
+        return Err(ArtifactError::Malformed(format!(
+            "unparseable version constraint: {bad}"
+        )));
+    }
+    Ok(ArtifactInfo {
+        manifest,
+        entries,
+        size: bytes.len(),
+    })
+}
+
+/// The newest installed runtime satisfying a manifest's constraints.
+fn select_runtime(
+    m: &inka_format::Manifest,
+    runtimes: &[(Version, PathBuf)],
+) -> Option<(Version, PathBuf)> {
+    runtimes
+        .iter()
+        .filter(|(v, _)| constraint_allows(m, *v))
+        .max_by_key(|(v, _)| *v)
+        .map(|(v, p)| (*v, p.clone()))
+}
+
+/// Inspect an inka executable: parse its trailer/manifest and report whether a
+/// compatible runtime is installed. A non-artifact is a hard error (exit 2); a
+/// malformed version constraint exits 3; no compatible runtime exits 3.
+fn doctor_artifact(path: &Path, json: bool) {
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
+        Err(e) => {
+            ui::log_error(format!("cannot read {}: {e}", path.display()));
+            std::process::exit(1);
+        }
+    };
+    let ArtifactInfo {
+        manifest,
+        entries,
+        size,
+    } = match parse_artifact(&bytes) {
+        Ok(v) => v,
+        Err(ArtifactError::NotArtifact(e)) => {
+            ui::log_error(format!("{}: {e}", path.display()));
+            std::process::exit(2);
+        }
+        Err(ArtifactError::Malformed(e)) => {
+            ui::log_error(format!("{}: {e}", path.display()));
+            std::process::exit(3);
+        }
+    };
+
+    let dirs = runtime_search_dirs();
+    let runtimes = installed_parts_all(&dirs);
+    let selected = select_runtime(&manifest, &runtimes);
+    let unpacked: usize = entries.iter().map(|(_, n)| *n).sum();
+
+    if json {
+        let doc = serde_json::json!({
+            "path": path.display().to_string(),
+            "size": size,
+            "format": "INKFOOT5",
+            "module": manifest.module,
+            "runtime": required_runtime(&manifest),
+            "tested_against": manifest.tested.map(|v| v.to_string()),
+            "requires": manifest.requires,
+            "path_base": manifest.path_base,
+            "permissions": manifest.perms,
+            "files": entries
+                .iter()
+                .map(|(p, n)| serde_json::json!({ "path": p, "size": n }))
+                .collect::<Vec<_>>(),
+            "selected_runtime": selected
+                .as_ref()
+                .map(|(v, p)| serde_json::json!({ "version": v.to_string(), "path": p.display().to_string() })),
+        });
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_string())
+        );
+        if selected.is_none() {
+            std::process::exit(3);
+        }
+        return;
+    }
+
+    ui::title("doctor");
+    ui::section("Artifact");
+    ui::row("path", path.display());
+    ui::row("size", ui::human_size(size as u64));
+    ui::row("format", "INKFOOT5");
+    ui::row("module", &manifest.module);
+    ui::row("runtime", required_runtime(&manifest));
+    if let Some(t) = manifest.tested {
+        ui::row("tested-against", t.to_string());
+    }
+    if !manifest.requires.is_empty() {
+        ui::row("requires", &manifest.requires);
+    }
+    if let Some(pb) = &manifest.path_base {
+        ui::row("path-base", pb);
+    }
+
+    ui::section("Permissions");
+    if manifest.perms.trim().is_empty() {
+        ui::warn_row("grants", "none (deny-by-default)");
+    } else {
+        for line in manifest.perms.lines() {
+            ui::row("", line);
+        }
+    }
+
+    ui::section("Payload");
+    ui::row("files", entries.len().to_string());
+    ui::row("unpacked", ui::human_size(unpacked as u64));
+    let shown = 5.min(entries.len());
+    for (p, n) in entries.iter().take(shown) {
+        println!(
+            "  {} {} {}",
+            colors::gray("·"),
+            p,
+            colors::gray(format!("({})", ui::human_size(*n as u64)))
+        );
+    }
+    if entries.len() > shown {
+        println!(
+            "  {}",
+            colors::gray(format!("… {} more", entries.len() - shown))
+        );
+    }
+
+    ui::section("Runtime");
+    match &selected {
+        Some((v, p)) => ui::ok("compatible", format!("{v}  {}", colors::gray(p.display()))),
+        None => ui::bad_row("compatible", "none found"),
+    }
+    for (v, p) in &runtimes {
+        let marker = if Some(*v) == selected.as_ref().map(|(v, _)| *v) {
+            colors::green("→").to_string()
+        } else {
+            " ".to_string()
+        };
+        println!(
+            "  {marker} {:<10} {}",
+            colors::green(v.to_string()),
+            colors::gray(p.display())
+        );
+    }
+    if selected.is_none() {
+        ui::hint("run `inka update` to install a compatible runtime");
+        ui::status_bad("no compatible runtime");
+        std::process::exit(3);
+    }
+    ui::status_ok("artifact ok");
+}
+
+/// Human-readable runtime requirement from a manifest's constraint slots.
+fn required_runtime(m: &inka_format::Manifest) -> String {
+    if let Some(e) = m.exact {
+        format!("inka_runtime == {e}")
+    } else if let Some(g) = m.gt {
+        format!("inka_runtime > {g}")
+    } else if let Some(x) = m.min {
+        format!("inka_runtime >= {x}")
+    } else {
+        "inka_runtime (any)".to_string()
+    }
+}
+
+fn doctor_machine() {
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
     let mut warnings: Vec<String> = Vec::new();
@@ -725,5 +989,92 @@ mod tests {
             PathBuf::from("/home/u/.cache/deno")
         );
         assert_eq!(deno_dir_root(None, None), PathBuf::from("./.cache/deno"));
+    }
+
+    /// A minimal INKFOOT5 image: launcher stub + archive + manifest + footer.
+    fn artifact_image(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
+        let owned: Vec<(String, Vec<u8>)> = files
+            .iter()
+            .map(|(p, b)| (p.to_string(), b.to_vec()))
+            .collect();
+        let archive = inka_format::encode_archive(&owned);
+        let mut image = vec![0x7f, b'E', b'L', b'F'];
+        image.extend_from_slice(&archive);
+        image.extend_from_slice(manifest.as_bytes());
+        image.extend_from_slice(&inka_format::encode_footer(
+            archive.len() as u64,
+            manifest.len() as u64,
+        ));
+        image
+    }
+
+    #[test]
+    fn parse_artifact_reads_manifest_and_index() {
+        let image = artifact_image(
+            "runtime=inka_runtime>=0.266.2\npermissions=all\nallow-read=./data\nmodule=main.js\n",
+            &[
+                ("main.js", b"console.log(1)"),
+                ("node_modules/x/index.js", b"x"),
+            ],
+        );
+        let info = parse_artifact(&image).unwrap();
+        assert_eq!(info.manifest.module, "main.js");
+        assert_eq!(info.manifest.perms, "permissions=all\nallow-read=./data");
+        assert_eq!(info.manifest.min, Some(Version(0, 266, 2)));
+        assert_eq!(info.entries.len(), 2);
+        assert_eq!(info.entries[1], ("node_modules/x/index.js".to_string(), 1));
+        assert_eq!(info.size, image.len());
+    }
+
+    #[test]
+    fn parse_artifact_rejects_non_artifact() {
+        assert!(matches!(
+            parse_artifact(b"hello world, not an artifact\n"),
+            Err(ArtifactError::NotArtifact(_))
+        ));
+    }
+
+    #[test]
+    fn parse_artifact_rejects_malformed_version() {
+        let image = artifact_image("runtime=inka_runtime>=nope\n", &[("main.js", b"x")]);
+        assert!(matches!(
+            parse_artifact(&image),
+            Err(ArtifactError::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn select_runtime_respects_floor_and_cap() {
+        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
+        let runtimes: Vec<(Version, PathBuf)> = [0, 1, 2, 4, 5]
+            .into_iter()
+            .map(|c| (Version(0, 266, c), PathBuf::from(format!("/r/{c}"))))
+            .collect();
+        // Newest satisfying the cap is 0.266.4 (0.266.5 is above tested-against).
+        assert_eq!(select_runtime(&m, &runtimes).unwrap().0, Version(0, 266, 4));
+
+        // No satisfying runtime -> None.
+        let m_exact = parse_manifest(b"runtime=inka_runtime==0.266.9\n");
+        assert!(select_runtime(&m_exact, &runtimes).is_none());
+    }
+
+    #[test]
+    fn required_runtime_renders_each_operator() {
+        assert_eq!(
+            required_runtime(&parse_manifest(b"runtime=inka_runtime>=0.266.2\n")),
+            "inka_runtime >= 0.266.2"
+        );
+        assert_eq!(
+            required_runtime(&parse_manifest(b"runtime=inka_runtime>0.266.2\n")),
+            "inka_runtime > 0.266.2"
+        );
+        assert_eq!(
+            required_runtime(&parse_manifest(b"runtime=inka_runtime==0.266.2\n")),
+            "inka_runtime == 0.266.2"
+        );
+        assert_eq!(
+            required_runtime(&parse_manifest(b"module=main.js\n")),
+            "inka_runtime (any)"
+        );
     }
 }

@@ -1,0 +1,649 @@
+//! The inka artifact format, shared by `inka build` (the writer), the launcher
+//! (the reader), and `inka doctor <artifact>` (the inspector).
+//!
+//! An artifact is `[launcher bytes][archive][manifest][footer]`. The footer is
+//! the last 24 bytes: an 8-byte magic plus two little-endian `u64` lengths
+//! (archive, manifest). The archive is a sequence of
+//! `{path_len u64}{data_len u64}{path}{data}` entries.
+//!
+//! Keeping encode and decode in one place removes the build/launcher copies
+//! that could drift; the launcher and the CLI both depend on this crate.
+
+use std::fmt;
+use std::path::Path;
+
+pub const FOOTER_LEN: usize = 24;
+pub const MAGIC: &[u8; 8] = b"INKFOOT5";
+
+// ---- version ---------------------------------------------------------------
+
+/// A dotted `major.minor.patch` version. Ordering is numeric per component.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct Version(pub u64, pub u64, pub u64);
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+    }
+}
+
+/// Parse `x`, `x.y`, or `x.y.z` (whitespace tolerated). Rejects a fourth
+/// component and any non-numeric part, so a suffix like `0.0.0-stub` fails.
+pub fn parse_version(s: &str) -> Option<Version> {
+    let s = s.trim();
+    let mut parts = s.split('.');
+    let a = parts.next()?.trim().parse().ok()?;
+    let b = parts.next().unwrap_or("0").trim().parse().ok()?;
+    let c = parts.next().unwrap_or("0").trim().parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(Version(a, b, c))
+}
+
+// ---- archive + footer ------------------------------------------------------
+
+/// Validate one archive path: relative, no NUL, no `..` component.
+pub fn validate_rel_path(path: &str) -> Result<(), String> {
+    if path.is_empty() || std::path::Path::new(path).is_absolute() {
+        return Err(format!("invalid archive path '{path}' (must be relative)"));
+    }
+    if path.contains('\0') {
+        return Err("archive path contains a NUL byte".into());
+    }
+    for comp in path.split('/') {
+        if comp == ".." {
+            return Err(format!("archive path '{path}' escapes the artifact tree"));
+        }
+    }
+    Ok(())
+}
+
+/// Walk the archive entries, calling `f(path, data)` for each. Both slices borrow
+/// from `blob`, so the metadata-only caller never copies payload bytes.
+fn walk_archive<'a>(blob: &'a [u8], mut f: impl FnMut(&'a str, &'a [u8])) -> Result<(), String> {
+    let mut rest: &'a [u8] = blob;
+    while !rest.is_empty() {
+        if rest.len() < 16 {
+            return Err("malformed archive entry header".into());
+        }
+        let path_len = usize::try_from(u64::from_le_bytes(rest[0..8].try_into().unwrap()))
+            .map_err(|_| "archive entry path length out of range".to_string())?;
+        let data_len = usize::try_from(u64::from_le_bytes(rest[8..16].try_into().unwrap()))
+            .map_err(|_| "archive entry data length out of range".to_string())?;
+        rest = &rest[16..];
+        let end = path_len
+            .checked_add(data_len)
+            .ok_or_else(|| "archive entry lengths overflow".to_string())?;
+        if path_len == 0 || end > rest.len() {
+            return Err("malformed archive entry lengths".into());
+        }
+        let path = std::str::from_utf8(&rest[..path_len])
+            .map_err(|_| "archive entry path is not valid UTF-8".to_string())?;
+        validate_rel_path(path)?;
+        f(path, &rest[path_len..end]);
+        rest = &rest[end..];
+    }
+    Ok(())
+}
+
+/// Decode the full archive, copying every payload.
+pub fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut out = Vec::new();
+    walk_archive(blob, |path, data| {
+        out.push((path.to_string(), data.to_vec()))
+    })?;
+    Ok(out)
+}
+
+/// Decode only entry names and payload lengths (no copies), for inspection.
+pub fn archive_index(blob: &[u8]) -> Result<Vec<(String, usize)>, String> {
+    let mut out = Vec::new();
+    walk_archive(blob, |path, data| out.push((path.to_string(), data.len())))?;
+    Ok(out)
+}
+
+/// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
+pub fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for (path, data) in files {
+        out.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        out.extend_from_slice(path.as_bytes());
+        out.extend_from_slice(data);
+    }
+    out
+}
+
+/// The 24-byte footer: `MAGIC` + archive length + manifest length (LE `u64`).
+pub fn encode_footer(archive_len: u64, manifest_len: u64) -> [u8; FOOTER_LEN] {
+    let mut footer = [0u8; FOOTER_LEN];
+    footer[0..8].copy_from_slice(MAGIC);
+    footer[8..16].copy_from_slice(&archive_len.to_le_bytes());
+    footer[16..24].copy_from_slice(&manifest_len.to_le_bytes());
+    footer
+}
+
+/// Byte ranges of the two payload sections inside an artifact.
+#[derive(Clone, Copy, Debug)]
+pub struct Layout {
+    pub archive_off: usize,
+    pub archive_len: usize,
+    pub manifest_off: usize,
+    pub manifest_len: usize,
+}
+
+/// Read the footer and locate the archive/manifest ranges. Does not copy.
+pub fn read_layout(bytes: &[u8]) -> Result<Layout, String> {
+    if bytes.len() < FOOTER_LEN {
+        return Err("file smaller than footer".into());
+    }
+    let footer = &bytes[bytes.len() - FOOTER_LEN..];
+    if &footer[0..8] != MAGIC {
+        return Err("not an inka artifact (missing INKFOOT5 trailer)".into());
+    }
+    let alen = usize::try_from(u64::from_le_bytes(footer[8..16].try_into().unwrap()))
+        .map_err(|_| "artifact archive length out of range".to_string())?;
+    let mlen = usize::try_from(u64::from_le_bytes(footer[16..24].try_into().unwrap()))
+        .map_err(|_| "artifact manifest length out of range".to_string())?;
+    if alen.saturating_add(mlen).saturating_add(FOOTER_LEN) > bytes.len() {
+        return Err("trailer lengths out of range".into());
+    }
+    let manifest_off = bytes.len() - FOOTER_LEN - mlen;
+    let archive_off = manifest_off - alen;
+    Ok(Layout {
+        archive_off,
+        archive_len: alen,
+        manifest_off,
+        manifest_len: mlen,
+    })
+}
+
+/// The decoded artifact: extracted files plus the raw manifest bytes.
+pub struct Trailer<'a> {
+    pub files: Vec<(String, Vec<u8>)>,
+    pub manifest: &'a [u8],
+}
+
+/// Decode the trailer (archive + manifest) from a full artifact image.
+pub fn parse_trailer(bytes: &[u8]) -> Result<Trailer<'_>, String> {
+    let layout = read_layout(bytes)?;
+    let manifest = &bytes[layout.manifest_off..layout.manifest_off + layout.manifest_len];
+    let files = parse_archive(&bytes[layout.archive_off..layout.archive_off + layout.archive_len])?;
+    Ok(Trailer { files, manifest })
+}
+
+// ---- manifest --------------------------------------------------------------
+
+/// Recognized manifest keys, parsed from the line-oriented payload. Unknown
+/// keys are ignored so a newer writer stays readable by an older reader.
+#[derive(Default)]
+pub struct Manifest {
+    pub min: Option<Version>,
+    pub gt: Option<Version>,
+    pub exact: Option<Version>,
+    pub tested: Option<Version>,
+    /// A present-but-unparseable `runtime=`/`tested-against=` value. Must not
+    /// silently drop to "accept anything".
+    pub malformed: Option<String>,
+    pub module: String,
+    /// Canonical permission lines (`permissions=…`, `allow-*=…`, `deny-*=…`),
+    /// joined with `\n`, forwarded verbatim to the runtime.
+    pub perms: String,
+    /// Comma-separated runtime capability names the artifact requires.
+    pub requires: String,
+    /// `exe` or `cwd`; how relative permission paths are anchored.
+    pub path_base: Option<String>,
+}
+
+pub fn parse_manifest(bytes: &[u8]) -> Manifest {
+    let mut m = Manifest {
+        module: "main.js".into(),
+        ..Default::default()
+    };
+    for raw in String::from_utf8_lossy(bytes).lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some(eq) = line.find('=') else { continue };
+        let key = line[..eq].trim();
+        let val = line[eq + 1..].trim();
+        match key {
+            "runtime" => {
+                let rest = val.strip_prefix("inka_runtime").unwrap_or(val).trim_start();
+                let (slot, text) = if let Some(x) = rest.strip_prefix(">=") {
+                    (Slot::Min, x)
+                } else if let Some(x) = rest.strip_prefix(">") {
+                    (Slot::Gt, x)
+                } else if let Some(x) = rest.strip_prefix("==") {
+                    (Slot::Exact, x)
+                } else {
+                    (Slot::Exact, rest)
+                };
+                match parse_version(text) {
+                    Some(v) => match slot {
+                        Slot::Min => m.min = Some(v),
+                        Slot::Gt => m.gt = Some(v),
+                        Slot::Exact => m.exact = Some(v),
+                    },
+                    None => m.malformed = Some(format!("runtime={val}")),
+                }
+            }
+            "tested-against" => match parse_version(val) {
+                Some(v) => m.tested = Some(v),
+                None => m.malformed = Some(format!("tested-against={val}")),
+            },
+            "module" => m.module = val.to_string(),
+            "requires" => m.requires = val.to_string(),
+            "path-base" => m.path_base = Some(val.to_string()),
+            "permissions" => {
+                if !m.perms.is_empty() {
+                    m.perms.push('\n');
+                }
+                m.perms.push_str(&format!("permissions={val}"));
+            }
+            _ if key.starts_with("allow-") || key.starts_with("deny-") => {
+                if !m.perms.is_empty() {
+                    m.perms.push('\n');
+                }
+                m.perms.push_str(&format!("{key}={val}"));
+            }
+            _ => {}
+        }
+    }
+    m
+}
+
+enum Slot {
+    Min,
+    Gt,
+    Exact,
+}
+
+/// Does `v` satisfy every constraint in the manifest (floor, strict `>`, exact,
+/// and the `tested-against` cap)?
+pub fn constraint_allows(m: &Manifest, v: Version) -> bool {
+    if let Some(e) = m.exact {
+        if v != e {
+            return false;
+        }
+    }
+    if let Some(g) = m.gt {
+        if v <= g {
+            return false;
+        }
+    }
+    if let Some(mn) = m.min {
+        if v < mn {
+            return false;
+        }
+    }
+    if let Some(t) = m.tested {
+        if v > t {
+            return false;
+        }
+    }
+    true
+}
+
+// ---- permission path tokens ------------------------------------------------
+
+/// Token naming the executable's directory; expanded host-side at launch/run.
+pub const EXE_DIR_TOKEN: &str = "${EXE_DIR}";
+/// Token naming the project/execution root.
+pub const PROJECT_DIR_TOKEN: &str = "${PROJECT_DIR}";
+
+/// Expand portable path tokens and (when `path_base == "exe"`) anchor relative
+/// read/write grants to `exe_dir`, in a permission DSL.
+///
+/// This runs in the host (launcher / `inka run`), never in the engine: the DSL
+/// forwarded to the runtime carries Deno-normalized absolute paths, so Deno's
+/// own relative-to-cwd semantics are preserved by default (`path_base` unset)
+/// while an artifact can opt into portability. Non read/write lines pass
+/// through unchanged.
+pub fn expand_permissions(
+    dsl: &str,
+    path_base: Option<&str>,
+    exe_dir: Option<&Path>,
+    project_dir: Option<&Path>,
+) -> String {
+    let mut out: Vec<String> = Vec::new();
+    for raw in dsl.split('\n') {
+        let line = raw.trim();
+        let Some((key, value)) = line.split_once('=') else {
+            out.push(line.to_string());
+            continue;
+        };
+        let (kind, cat) = if let Some(c) = key.strip_prefix("allow-") {
+            ("allow", c)
+        } else if let Some(c) = key.strip_prefix("deny-") {
+            ("deny", c)
+        } else {
+            out.push(line.to_string());
+            continue;
+        };
+        if cat != "read" && cat != "write" {
+            out.push(line.to_string());
+            continue;
+        }
+        let items: Vec<String> = value
+            .split(',')
+            .map(|item| anchor_item(item.trim(), path_base, exe_dir, project_dir))
+            .collect();
+        out.push(format!("{kind}-{cat}={}", items.join(",")));
+    }
+    out.join("\n")
+}
+
+fn anchor_item(
+    item: &str,
+    path_base: Option<&str>,
+    exe_dir: Option<&Path>,
+    project_dir: Option<&Path>,
+) -> String {
+    let mut s = item.to_string();
+    if let Some(exe) = exe_dir {
+        s = s.replace(EXE_DIR_TOKEN, &exe.to_string_lossy());
+    }
+    if let Some(project) = project_dir {
+        s = s.replace(PROJECT_DIR_TOKEN, &project.to_string_lossy());
+    }
+    if path_base == Some("exe") {
+        if let Some(exe) = exe_dir {
+            let plain_relative = !s.is_empty()
+                && s != "*"
+                && !s.starts_with('/')
+                && !s.contains("://")
+                && !s.contains('$');
+            if plain_relative {
+                s = exe.join(&s).to_string_lossy().into_owned();
+            }
+        }
+    }
+    s
+}
+
+// ---- runtime capabilities --------------------------------------------------
+
+/// The lowest runtime tuple that enforces the current security model
+/// (deny-by-default, realpath confinement, `_dir`-only entry). Artifacts always
+/// require at least this tuple. Verified against the installed 0.266.5/0.266.6.
+pub const SECURITY_FLOOR: Version = Version(0, 266, 5);
+
+/// Capability names a runtime can advertise and an artifact can require, each
+/// with the first tuple that provided it. Keep in sync with the runtime's
+/// `inka_runtime_features()` (a runtime test asserts the names match).
+pub const FEATURE_FLOORS: &[(&str, Version)] = &[
+    ("raw-cjs", Version(0, 266, 5)),
+    ("native-addon", Version(0, 266, 5)),
+    ("import-perm", Version(0, 266, 5)),
+    ("tsconfig-run", Version(0, 266, 5)),
+    ("workspace", Version(0, 266, 5)),
+];
+
+/// Every capability name this inka release knows how to require.
+pub fn known_features() -> Vec<&'static str> {
+    FEATURE_FLOORS.iter().map(|(n, _)| *n).collect()
+}
+
+/// Parse a comma-separated `requires=` value (empty items dropped, order kept).
+pub fn parse_requires(s: &str) -> Vec<String> {
+    s.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// The minimum tuple that provides every requested capability, never below
+/// `SECURITY_FLOOR`. Unknown names are ignored (forward compatibility).
+pub fn floor_for(features: &[String]) -> Version {
+    let mut floor = SECURITY_FLOOR;
+    for f in features {
+        if let Some((_, v)) = FEATURE_FLOORS.iter().find(|(n, _)| n == f) {
+            if *v > floor {
+                floor = *v;
+            }
+        }
+    }
+    floor
+}
+
+/// Does the manifest contain a `key=` line (anywhere)?
+pub fn manifest_has_key(bytes: &[u8], key: &str) -> bool {
+    String::from_utf8_lossy(bytes)
+        .lines()
+        .any(|l| l.trim_start().starts_with(&format!("{key}=")))
+}
+
+/// Replace (or append) a `key=` line in a manifest buffer.
+pub fn manifest_set_key(bytes: &mut Vec<u8>, key: &str, value: &str) {
+    let text = String::from_utf8_lossy(bytes);
+    let mut replaced = false;
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{key}=")) {
+            out.push(format!("{key}={value}"));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !replaced {
+        if !out.is_empty() {
+            out.push(String::new()); // blank line separator
+        }
+        out.push(format!("{key}={value}"));
+    }
+    let mut joined = out.join("\n");
+    if !joined.ends_with('\n') {
+        joined.push('\n');
+    }
+    *bytes = joined.into_bytes();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(path: &str, data: &[u8]) -> Vec<u8> {
+        let mut v = Vec::new();
+        v.extend_from_slice(&(path.len() as u64).to_le_bytes());
+        v.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        v.extend_from_slice(path.as_bytes());
+        v.extend_from_slice(data);
+        v
+    }
+
+    #[test]
+    fn archive_roundtrip() {
+        let files = vec![
+            ("main.js".to_string(), b"hi".to_vec()),
+            ("node_modules/x/index.js".to_string(), b"x".to_vec()),
+        ];
+        let blob = encode_archive(&files);
+        assert_eq!(parse_archive(&blob).unwrap(), files);
+        assert_eq!(
+            archive_index(&blob).unwrap(),
+            vec![
+                ("main.js".to_string(), 2),
+                ("node_modules/x/index.js".to_string(), 1),
+            ]
+        );
+    }
+
+    #[test]
+    fn archive_overflow_header_is_rejected() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&u64::MAX.to_le_bytes());
+        blob.extend_from_slice(&1u64.to_le_bytes());
+        assert!(parse_archive(&blob).is_err());
+    }
+
+    #[test]
+    fn archive_rejects_parent_dir() {
+        assert!(parse_archive(&entry("../evil", b"x")).is_err());
+        assert!(parse_archive(&entry("/abs", b"x")).is_err());
+    }
+
+    #[test]
+    fn footer_roundtrip_and_magic() {
+        let files = vec![("main.js".to_string(), b"hello".to_vec())];
+        let archive = encode_archive(&files);
+        let manifest = b"module=main.js\n";
+        let mut image = vec![0x7f, 0x45, 0x4c, 0x46]; // launcher bytes
+        image.extend_from_slice(&archive);
+        image.extend_from_slice(manifest);
+        image.extend_from_slice(&encode_footer(archive.len() as u64, manifest.len() as u64));
+
+        let layout = read_layout(&image).unwrap();
+        assert_eq!(layout.archive_len, archive.len());
+        assert_eq!(layout.manifest_len, manifest.len());
+        let t = parse_trailer(&image).unwrap();
+        assert_eq!(t.files, files);
+        assert_eq!(t.manifest, manifest);
+        assert_eq!(manifest_index(&image), vec![("main.js".to_string(), 5)]);
+        assert!(parse_manifest(t.manifest).module == "main.js");
+    }
+
+    #[test]
+    fn layout_rejects_non_artifact() {
+        assert!(read_layout(b"not an artifact at all").is_err());
+        let mut not_magic = vec![0u8; 32];
+        not_magic[24..32].copy_from_slice(b"XXXXXXXX");
+        assert!(read_layout(&not_magic).is_err());
+    }
+
+    #[test]
+    fn manifest_version_operators_and_constraints() {
+        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\n");
+        assert_eq!(m.min, Some(Version(0, 266, 2)));
+        assert!(m.gt.is_none() && m.exact.is_none() && m.malformed.is_none());
+
+        let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
+        assert_eq!(m.gt, Some(Version(0, 266, 2)));
+        assert!(
+            !constraint_allows(&m, Version(0, 266, 2)),
+            "> rejects equal"
+        );
+        assert!(constraint_allows(&m, Version(0, 266, 3)));
+
+        let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
+        assert_eq!(m.exact, Some(Version(0, 266, 2)));
+        assert!(!constraint_allows(&m, Version(0, 266, 3)));
+
+        let m = parse_manifest(b"runtime=0.266.2\n");
+        assert_eq!(m.exact, Some(Version(0, 266, 2)));
+
+        let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
+        assert!(constraint_allows(&m, Version(0, 266, 2)));
+        assert!(constraint_allows(&m, Version(0, 266, 4)));
+        assert!(!constraint_allows(&m, Version(0, 266, 5)), "cap");
+    }
+
+    #[test]
+    fn malformed_version_is_detected() {
+        assert!(parse_manifest(b"runtime=inka_runtime>=garbage\n")
+            .malformed
+            .is_some());
+        assert!(parse_manifest(b"tested-against=nope\n").malformed.is_some());
+    }
+
+    #[test]
+    fn manifest_perms_requires_and_path_base() {
+        let m = parse_manifest(
+            b"permissions=all\nallow-read=${EXE_DIR}/data\ndeny-read=/etc\nrequires=native-addon,raw-cjs\npath-base=exe\n",
+        );
+        assert_eq!(
+            m.perms,
+            "permissions=all\nallow-read=${EXE_DIR}/data\ndeny-read=/etc"
+        );
+        assert_eq!(m.requires, "native-addon,raw-cjs");
+        assert_eq!(m.path_base.as_deref(), Some("exe"));
+    }
+
+    #[test]
+    fn manifest_set_key_appends_and_replaces() {
+        let mut appended = b"runtime=x\n".to_vec();
+        manifest_set_key(&mut appended, "module", "app.js");
+        assert_eq!(
+            String::from_utf8(appended).unwrap(),
+            "runtime=x\n\nmodule=app.js\n"
+        );
+        let mut replaced = b"module=old.js\n".to_vec();
+        manifest_set_key(&mut replaced, "module", "sub/main.ts");
+        assert_eq!(String::from_utf8(replaced).unwrap(), "module=sub/main.ts\n");
+        assert!(manifest_has_key(b"module=x\n", "module"));
+        assert!(!manifest_has_key(b"module=x\n", "runtime"));
+    }
+
+    #[test]
+    fn parse_version_strictness() {
+        assert_eq!(parse_version("0.266.7"), Some(Version(0, 266, 7)));
+        assert_eq!(parse_version("1.2"), Some(Version(1, 2, 0)));
+        assert_eq!(parse_version(" 1 "), Some(Version(1, 0, 0)));
+        assert_eq!(parse_version("1.2.3.4"), None);
+        assert_eq!(parse_version("0.0.0-stub"), None);
+    }
+
+    #[test]
+    fn floor_and_requires() {
+        assert_eq!(floor_for(&[]), SECURITY_FLOOR);
+        assert_eq!(
+            parse_requires("raw-cjs, native-addon"),
+            vec!["raw-cjs", "native-addon"]
+        );
+        assert!(parse_requires("").is_empty());
+        // Unknown names are ignored and never lower the floor.
+        assert_eq!(floor_for(&["nope".to_string()]), SECURITY_FLOOR);
+        // Every known feature is satisfied at the security floor today.
+        let all: Vec<String> = known_features().iter().map(|s| s.to_string()).collect();
+        assert_eq!(floor_for(&all), SECURITY_FLOOR);
+    }
+
+    /// Helper mirroring `read_layout` + `archive_index` for the roundtrip test.
+    fn manifest_index(image: &[u8]) -> Vec<(String, usize)> {
+        let layout = read_layout(image).unwrap();
+        archive_index(&image[layout.archive_off..layout.archive_off + layout.archive_len]).unwrap()
+    }
+
+    #[test]
+    fn expand_permissions_tokens() {
+        let exe = Path::new("/opt/app");
+        let proj = Path::new("/work/proj");
+        let dsl = "permissions=all\nallow-read=${EXE_DIR}/data,./rel\nallow-write=${PROJECT_DIR}/out\ndeny-read=/etc";
+        let out = expand_permissions(dsl, None, Some(exe), Some(proj));
+        assert_eq!(
+            out,
+            "permissions=all\nallow-read=/opt/app/data,./rel\nallow-write=/work/proj/out\ndeny-read=/etc"
+        );
+    }
+
+    #[test]
+    fn expand_permissions_path_base_exe_anchors_relative() {
+        let exe = Path::new("/opt/app");
+        let dsl = "allow-read=./data,*,/abs,${EXE_DIR}/x";
+        let out = expand_permissions(dsl, Some("exe"), Some(exe), None);
+        assert_eq!(out, "allow-read=/opt/app/./data,*,/abs,/opt/app/x");
+    }
+
+    #[test]
+    fn expand_permissions_leaves_unknown_token_untouched() {
+        // Without an exe dir the token must survive (visible, not silently "/x").
+        let out = expand_permissions("allow-read=${EXE_DIR}/x", None, None, None);
+        assert_eq!(out, "allow-read=${EXE_DIR}/x");
+    }
+
+    #[test]
+    fn expand_permissions_ignores_non_read_write_lines() {
+        let out = expand_permissions(
+            "allow-net=example.com\nallow-env=*",
+            Some("exe"),
+            Some(Path::new("/opt/app")),
+            None,
+        );
+        assert_eq!(out, "allow-net=example.com\nallow-env=*");
+    }
+}
