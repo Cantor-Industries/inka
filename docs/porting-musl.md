@@ -4,7 +4,7 @@
 > the agreed design so the work can be picked up later without re-doing the
 > research. Nothing here is implemented yet. It is intentionally detailed.
 >
-> References use the tree at 0.8.0 (runtime tuple `0.266.8`). Line numbers may
+> References use the tree at 0.8.0 (runtime tuple `0.267.1`). Line numbers may
 > drift; search by symbol if they no longer match.
 
 ## Goal
@@ -45,12 +45,12 @@ Nothing here blocks musl.
 
 ### 2. V8 already ships musl prebuilts — the usual blocker is gone
 
-The engine is Deno-based: `deno_runtime 0.266.0` → `deno_core 0.411.0` →
-`deno_v8 0.3.0` (a facade) → `v8` crate (rusty_v8) `150.4.0`.
+The engine is Deno-based: `deno_runtime 0.267.0` → `deno_core 0.412.0` →
+`deno_v8 0.4.0` (a facade) → `v8` crate (rusty_v8) `150.4.0`.
 
 - `deno_core` enables the `v8` backend with `{ simdutf }` and **no**
   `v8_enable_pointer_compression` / `v8_enable_sandbox`
-  (`deno_core-0.411.0/Cargo.toml`: `[dependencies.v8] package = "deno_v8"`,
+  (`deno_core-0.412.0/Cargo.toml`: `[dependencies.v8] package = "deno_v8"`,
   `features = ["simdutf"]`; `deno_v8`'s `simdutf` feature forwards to
   `rusty_v8/simdutf`).
 - Denoland's `rusty_v8` release `v150.4.0` publishes, among others:
@@ -169,7 +169,7 @@ Notes for the spike:
    - Map `uname -m` (`x86_64`, `aarch64`) + libc → target triple; install the
      runtime into the matching subdir; stop hardcoding
      `x86_64-unknown-linux-gnu`.
-4. **Tuple**: unchanged (`0.266.8`). The engine behavior is identical; libc is a
+4. **Tuple**: unchanged (`0.267.1`). The engine behavior is identical; libc is a
    build flavor, not a new engine revision.
 
 ### Phase 2 — release / CI

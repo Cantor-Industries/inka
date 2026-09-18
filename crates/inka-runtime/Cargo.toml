@@ -12,23 +12,23 @@ crate-type = ["cdylib"]
 [dependencies]
 async-trait = "=0.1.73"
 deno_ast = { version = "=0.53.3", features = ["cjs"] }
-deno_cache_dir = "=0.50.0"
-deno_config = "=0.108.0"
-deno_core = "=0.411.0"
+deno_cache_dir = "=0.51.0"
+deno_config = "=0.109.0"
+deno_core = "=0.412.0"
 deno_error = "=0.7.1"
 deno_graph = "=0.111.0"
-deno_resolver = "=0.89.0"
-deno_runtime = { version = "=0.266.0", features = ["transpile"] }
+deno_resolver = "=0.90.0"
+deno_runtime = { version = "=0.267.0", features = ["transpile"] }
 deno_semver = "=0.10.1"
 deno_terminal = { version = "=0.2.3", features = ["colors"] }
 import_map = "=0.25.0"
 inka-format = { path = "../inka-format" }
-node_resolver = "=0.96.0"
+node_resolver = "=0.97.0"
 oxc_resolver = "=11.24.3"
 sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }
 tokio = { version = "=1.53.1", features = ["rt", "time", "sync", "process", "fs", "net", "io-util", "io-std", "macros", "signal"] }
 url = "2"
 
 [build-dependencies]
-deno_core = "=0.411.0"
-deno_runtime = { version = "=0.266.0", features = ["snapshot"] }
+deno_core = "=0.412.0"
+deno_runtime = { version = "=0.267.0", features = ["snapshot"] }

@@ -12,8 +12,8 @@ use deno_runtime::ops::bootstrap::SnapshotOptions;
 use deno_runtime::snapshot::create_runtime_snapshot;
 use deno_runtime::snapshot::LazyExtensionFileKind;
 
-// Deno's bundled TypeScript compiler version at the deno_runtime 0.266.0
-// tag (deno v2.9.6). No crate in the dep tree exposes it machine-readably;
+// Deno's bundled TypeScript compiler version at the deno_runtime 0.267.0
+// tag (deno v2.9.7). No crate in the dep tree exposes it machine-readably;
 // sync by hand when bumping deno_runtime.
 const TS_VERSION: &str = "6.0.3";
 

@@ -3,16 +3,20 @@
   published body by the release workflow (`.github/workflows/release.yml`), so
   it is safe to keep internal guidance here.
 
-  The body uses `{{REL}}` (tag minus `v`, e.g. `0.7.1`) and `{{RUNTIME}}`
-  (`crates/inka-runtime/runtime-version`, e.g. `0.266.7`) placeholders; the
+  The body uses `{{REL}}` (tag minus `v`, e.g. `0.8.0`) and `{{RUNTIME}}`
+  (`crates/inka-runtime/runtime-version`, e.g. `0.267.1`) placeholders; the
   workflow substitutes them when staging the release. Do not hardcode versions.
 -->
 # inka {{REL}} — runtime tuple {{RUNTIME}}
 
-A CLI quality-of-life release. Downloads show a progress bar, every command now
-uses one consistent, colored output vocabulary, `inka` with no arguments prints
-a proper help screen, and `inka list` is gone (use `inka doctor`). The runtime
-tuple moves to `{{RUNTIME}}` (engine messages drop the `[inka]` prefix).
+The runtime-invariants release. Resolution now hinges on a single shared
+`inka-format` crate and explicit, verifiable invariants: artifacts declare the
+engine capabilities they need (`requires=`), the launcher checks those against
+what the installed runtime advertises, and out-of-tree packages load only under
+an explicit read grant. `inka doctor` can inspect a built executable, permission
+grants can be made portable across machines, and network fetching is available
+opt-in while the default stays fully offline. The engine is rebased on **Deno
+2.9.7**; the runtime tuple moves to `{{RUNTIME}}`.
 
 ## Upgrade
 
@@ -25,37 +29,63 @@ Then keep the toolchain and runtime current with `inka update`.
 
 ## Breaking changes
 
-- **`inka list` removed.** It duplicated `inka doctor`, which reports the same
-  installed runtimes plus project status. Use `inka doctor`.
-- **New artifacts require runtime `>={{RUNTIME}}`.** Existing artifacts (floor
-  `>=0.266.6`) keep working and roll forward to the new tuple.
+- **New runtime tuple `{{RUNTIME}}` (Deno 2.9.7).** `inka update` installs it;
+  existing artifacts keep working and roll forward to the newest tuple that
+  satisfies their manifest.
+- **New artifacts declare `requires=` capabilities.** `inka build` records the
+  engine capabilities a bundle uses (e.g. `raw-cjs` for an embedded external
+  package, `native-addon` for a `.node`, `import-perm` for an `allow-import`
+  grant) and raises the manifest floor accordingly. The launcher verifies them
+  against the runtime's advertised set, so an artifact fails early and precisely
+  on a runtime that cannot run it instead of failing at run time.
+- **The default floor is now the security floor (`>=0.266.5`), not the current
+  tuple.** A simple artifact therefore runs on any installed runtime from
+  `0.266.5` up; a capability-dependent one requires the tuple that provides it.
+- **`inka doctor <path>` treats a non-artifact as a hard error (exit 2).** The
+  no-argument machine report (`inka doctor`) is unchanged.
 
 ## What's new
 
-- **Progress bar.** `inka update` draws a Deno-style bar
-  (`Downloading libinka_runtime-…so  [####>------]  45%  12.4MiB/27.1MiB`) while
-  fetching the toolchain and runtime. Shown only on a terminal; suppressed by
-  `NO_COLOR` or `-q`. `install.sh` shows curl's meter on a terminal.
-- **Consistent, styled output.** Every command (`build`, `run`, `update`,
-  `doctor`) uses the same sectioned report with `✓`/`!`/`✗`/`→` glyphs.
-  Diagnostics are labeled `error:` (red) / `warning:` (yellow) / `hint:` (cyan),
-  including multi-line runtime errors and launcher/artifact errors — the
-  `[inka]` prefix is gone everywhere. Color follows `NO_COLOR`/`FORCE_COLOR` and
-  is on only for a TTY, so piped/CI output stays plain.
-- **Help rewrite.** Running `inka` with no arguments prints the full help;
-  `-h` is a short summary and `--help` the full one; `inka help <command>` works
-  for every command. Unknown commands get a `did you mean` suggestion.
-- `inka doctor` is grouped (`Runtimes`, `Project`) and no longer repeats the
-  runtime search directories.
+- **Inspect a built executable.** `inka doctor ./app` reports the artifact's
+  module, runtime floor/cap, `requires=`, `path-base`, permissions, payload
+  files, and whether a compatible runtime is installed. `--json` emits the same
+  as machine-readable JSON; a malformed constraint or no compatible runtime
+  exits 3.
+- **Portable permission grants.** `${EXE_DIR}`/`${PROJECT_DIR}` tokens and
+  `--path-base exe|cwd` (or `inka.path-base` in config) anchor relative
+  read/write grants so an artifact's permissions travel with it. Tokens are
+  expanded host-side (launcher / `inka run`); Deno's cwd-relative semantics stay
+  the default. Relative CLI grants now warn when they are not anchored.
+- **Capability negotiation.** The runtime advertises its capabilities via
+  `inka_runtime_features()`, and `crates/inka-format` owns the security floor and
+  each feature's minimum tuple; `inka build` computes the floor as the maximum of
+  those. This keeps old tuples usable for simple artifacts while making a
+  capability mismatch explicit.
+- **Out-of-tree packages via an explicit grant.** `npm link`-style symlinked
+  packages that resolve outside the execution tree are served only when an
+  explicit `--allow-read`/`-A` grant covers them — for both ESM `import` and CJS
+  `require()`. Deny-by-default confinement is unchanged.
+- **Opt-in fetching.** `inka cache <file>` warms `$DENO_DIR/remote` for the
+  remote (`jsr:`/`https:`) modules an entry needs, and `--fetch` does the same
+  for a one-off `build`/`run`. The default remains fully offline.
+- **CommonJS bring-your-own-`node_modules` fix.** `require()` now uses the
+  standard `node_modules` lookup (including out-of-tree symlinked packages).
+  inka still resolves npm only from local `node_modules`, never Deno's global npm
+  cache.
 
 ## Under the hood
 
-- `inka update` streams artifacts to disk (download, hash, atomic rename)
-  instead of buffering the whole runtime `.so` in memory; checksum behavior is
-  unchanged.
-- New `ui` and `help` modules (backed by `deno_terminal`) for styling,
-  verbosity, progress, and declarative help; the launcher uses a tiny built-in
-  ANSI helper (no new dependency).
+- **New `inka-format` crate** — one dependency-free home for the `INKFOOT5`
+  footer/archive encode + parse, the zero-copy archive index, manifest
+  parse/render, `Version`, and `constraint_allows`, shared by `inka build`, the
+  launcher, and `inka doctor`. Removes the build/launcher copies that could
+  drift.
+- **Engine rebased on Deno 2.9.7**: `deno_runtime 0.267.0`, `deno_core 0.412.0`,
+  `node_resolver 0.97.0`, `deno_resolver 0.90.0`; V8 `150.4.0`, TypeScript
+  `6.0.3` unchanged. The Deno pin/seam audit and the full runtime contract
+  matrix were re-run against the new tuple.
+- **Frozen ABI gate.** `scripts/ci/abi-symbols.sh` asserts the exported
+  `inka_runtime_*` set, making an accidental ABI removal explicit.
 
 ## Assets
 
