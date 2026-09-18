@@ -23,6 +23,12 @@ STAGE="$(cd "$1" && pwd)"
 RUNTIME="$(ls "$STAGE"/libinka_runtime-*.so 2>/dev/null | head -1 | sed 's/.*libinka_runtime-\([0-9][0-9A-Za-z.-]*\)\.so/\1/')"
 [ -n "$RUNTIME" ] || { echo "error: no libinka_runtime-*.so in $STAGE" >&2; exit 1; }
 
+# A prerelease engine tuple is only selected in the beta channel; opt in so the
+# smoke run exercises the staged engine.
+case "$RUNTIME" in
+    *-beta.*|*-rc.*) export INKA_CHANNEL=beta ;;
+esac
+
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-smoke.XXXXXX")"
 # The --external test hides a project node_modules; restore it on any exit.
 cleanup() {

@@ -85,6 +85,10 @@ jobs:
           mkdir -p "$home"
           cp "$CARGO_TARGET_DIR/release/libinka_runtime.so" "$home/libinka_runtime-$runtime.so"
           echo "INKA_RUNTIME_HOME=$home" >> "$GITHUB_ENV"
+          # A prerelease tuple is only selected in the beta channel.
+          case "$runtime" in
+            *-beta.*|*-rc.*) echo "INKA_CHANNEL=beta" >> "$GITHUB_ENV" ;;
+          esac
 
       - name: Warm Deno cache (jsr matrix case)
         run: |

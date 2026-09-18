@@ -17,6 +17,13 @@ INKA="${1:-$ROOT/target/debug/inka}"
 
 [ -x "$INKA" ] || { echo "error: inka binary not found: $INKA" >&2; exit 1; }
 
+# A prerelease engine tuple is only selected in the beta channel; opt in so the
+# matrix exercises the staged engine (runtime-ci always stages runtime-version).
+_RT="$(tr -d '[:space:]' < "$ROOT/crates/inka-runtime/runtime-version" 2>/dev/null || true)"
+case "$_RT" in
+    *-beta.*|*-rc.*) export INKA_CHANNEL=beta ;;
+esac
+
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-matrix.XXXXXX")"
 SECRET_DIR=""
 SKIPS=0
