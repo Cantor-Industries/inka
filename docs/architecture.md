@@ -70,9 +70,13 @@ build time (see [Permissions](permissions.md)).
 
 The launcher searches `$INKA_RUNTIME_HOME` and `~/.local/share/inka/runtime`,
 then picks the **newest** tuple that satisfies the manifest's `runtime=` floor
-and `tested-against=` cap. The runtime's self-reported `inka_runtime_version()`
-must match the version in its filename, or the launcher refuses to load it. No
-match → exit 3. Updating the machine's runtime updates every artifact at once.
+and `tested-against=` cap. A prerelease tuple (`X.Y.Z-beta.N`/`-rc.N`) is only
+eligible when the artifact records `channel=beta` (written by
+`inka build --beta`) or `INKA_CHANNEL=beta` is set, so a stable artifact never
+rolls forward onto a beta engine; a stable release of the same base supersedes
+its betas. The runtime's self-reported `inka_runtime_version()` must match the
+version in its filename, or the launcher refuses to load it. No match → exit 3.
+Updating the machine's runtime updates every artifact at once.
 
 ## C ABI
 

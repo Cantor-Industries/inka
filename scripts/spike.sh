@@ -24,6 +24,9 @@ echo "== install runtime tuples =="
 cp "$BIN/libinka_runtime_stub.so" "$RTDIR/libinka_runtime-0.0.0.so"
 INKA_STUB_VERSION=0.1.0 cargo build --release -p inka-runtime-stub
 cp "$BIN/libinka_runtime_stub.so" "$RTDIR/libinka_runtime-0.1.0.so"
+# A prerelease tuple, to exercise beta-channel gating in the launcher.
+INKA_STUB_VERSION=0.2.0-beta.1 cargo build --release -p inka-runtime-stub
+cp "$BIN/libinka_runtime_stub.so" "$RTDIR/libinka_runtime-0.2.0-beta.1.so"
 
 echo "== pack demo artifacts (inka build) =="
 # Cap both artifacts below any real installed runtime so the launcher is forced
@@ -38,7 +41,18 @@ echo "== pack demo artifacts (inka build) =="
   --runtime '>=0.0.0' \
   --tested-against 0.0.0 \
   -o demo/hello-pinned
-chmod +x demo/hello demo/hello-pinned
+# A cap that admits the beta tuple: stable must skip it, `--beta` must use it.
+"$BIN/inka" build \
+  --source demo/main.js \
+  --runtime '>=0.0.0' \
+  --tested-against 0.2.0 \
+  -o demo/hello-cap
+"$BIN/inka" build --beta \
+  --source demo/main.js \
+  --runtime '>=0.0.0' \
+  --tested-against 0.2.0 \
+  -o demo/hello-beta
+chmod +x demo/hello demo/hello-pinned demo/hello-cap demo/hello-beta
 
 expect_runtime() { # <exe> <version> <label>
     local out
@@ -58,9 +72,15 @@ echo "== roll-forward (>=0.0.0, capped 0.1.0) -> 0.1.0 =="
 expect_runtime ./demo/hello 0.1.0 "roll-forward"
 echo "== pinned (tested-against 0.0.0) -> 0.0.0 =="
 expect_runtime ./demo/hello-pinned 0.0.0 "pinned"
+echo
+echo "== stable artifact skips the beta tuple -> 0.1.0 =="
+expect_runtime ./demo/hello-cap 0.1.0 "stable skips beta"
+echo "== --beta artifact selects the prerelease -> 0.2.0-beta.1 =="
+expect_runtime ./demo/hello-beta 0.2.0-beta.1 "beta channel"
 
 echo
 echo "== sizes =="
-ls -l "$BIN/inka" "$BIN/inka-launcher" "$RTDIR"/libinka_runtime-*.so demo/hello demo/hello-pinned | awk '{print $5"\t"$9}'
+ls -l "$BIN/inka" "$BIN/inka-launcher" "$RTDIR"/libinka_runtime-*.so \
+    demo/hello demo/hello-pinned demo/hello-cap demo/hello-beta | awk '{print $5"\t"$9}'
 
 echo "spike: OK"

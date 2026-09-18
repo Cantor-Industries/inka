@@ -1,12 +1,12 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch]
-inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] <file> [args...]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta]
+inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta] <file> [args...]
 inka cache   <file>
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
-             [--no-toolchain|--toolchain-only] [--no-runtime]
-inka doctor  [artifact] [--json]
+             [--no-toolchain|--toolchain-only] [--no-runtime] [--beta]
+inka doctor  [artifact] [--json] [--beta]
 inka help    [command]
 inka --version, -V
 ```
@@ -18,7 +18,8 @@ self-contained module, then pack it onto the launcher with a manifest.
 Permissions bake from explicit build-intent sources — CLI flags (`-A`/`--allow-*`,
 `-P=<set>`, which override config), `deno.json` `compile.permissions`, or an
 `inka.permissions` marker in `deno.json`/`package.json`; otherwise the artifact
-is deny-by-default. See [Build](build.md).
+is deny-by-default. `--beta` records `channel=beta` in the manifest, so the
+artifact may select a prerelease runtime tuple. See [Build](build.md).
 
 ## `run`
 
@@ -26,7 +27,7 @@ Execute a `.ts`/`.js` file through the installed runtime without building.
 Permissions are deny-by-default; `-A` allows all, `-P[=name]` applies a named
 config set, `--allow-<cat>[=list]` / `--deny-<cat>[=list]` are granular
 (`cat`: `read|write|net|env|run|sys|ffi|import`). `--runtime <ver>` picks a specific
-tuple; `--` ends options. See [Run](run.md).
+tuple; `--beta` uses a prerelease (beta) tuple; `--` ends options. See [Run](run.md).
 
 ## `cache`
 
@@ -50,10 +51,16 @@ Reconcile the toolchain and shared runtime with the release channel:
 `--no-toolchain`/`--toolchain-only` control the toolchain; `--no-runtime` skips
 the runtime.
 
+`--beta` installs the newest beta release (toolchain + runtime) instead of the
+stable channel; the beta base is resolved from the GitHub Releases API
+(`INKA_REPO`, default `Cantor-Industries/inka`). `--from`/`INKA_RELEASE_BASE`
+still override the channel. A beta install is replaced by the stable release
+when you run plain `inka update`.
+
 Base resolution: `--from` → `$INKA_RELEASE_BASE` → `$INKA_RT_SOURCE` → the
-built-in GitHub latest-release URL. `--sha256` pins a checksum; `--insecure`
-skips verification; `--home <dir>` sets the runtime install dir. See
-[Install & upgrade](install-and-upgrade.md).
+built-in GitHub latest-release URL (or the newest beta with `--beta`).
+`--sha256` pins a checksum; `--insecure` skips verification; `--home <dir>` sets
+the runtime install dir. See [Install & upgrade](install-and-upgrade.md).
 
 ## `doctor`
 
@@ -89,6 +96,9 @@ honor them.
 | `INKA_RUNTIME_HOME` | override the per-user runtime dir |
 | `DENO_DIR` | Deno cache read for `jsr:`/remote resolution (default `~/.cache/deno`); must be an absolute path — the cache is **trusted input** (cached remote/JS is loaded as code) |
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
+| `INKA_CHANNEL` | `stable` (default) or `beta`; `beta` opts into prerelease runtime tuples |
+| `INKA_REPO` | `owner/repo` for beta discovery (default `Cantor-Industries/inka`) |
+| `INKA_GITHUB_TOKEN` / `GITHUB_TOKEN` | token for the GitHub Releases API (raises the rate limit) |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
 | `INKA_DEBUG` | verbose runtime/resolution logging |
 | `INK_LOG` | log level: `error`\|`warn`\|`info`\|`debug`\|`trace` (default `info`) |

@@ -20,7 +20,7 @@ STAGE="$(cd "$1" && pwd)"
 [ -x "$STAGE/inka" ] || { echo "error: no inka binary in $STAGE" >&2; exit 1; }
 [ -f "$STAGE/install.sh" ] || { echo "error: no install.sh in $STAGE" >&2; exit 1; }
 
-RUNTIME="$(ls "$STAGE"/libinka_runtime-*.so 2>/dev/null | head -1 | sed 's/.*libinka_runtime-\([0-9.]*\)\.so/\1/')"
+RUNTIME="$(ls "$STAGE"/libinka_runtime-*.so 2>/dev/null | head -1 | sed 's/.*libinka_runtime-\([0-9][0-9A-Za-z.-]*\)\.so/\1/')"
 [ -n "$RUNTIME" ] || { echo "error: no libinka_runtime-*.so in $STAGE" >&2; exit 1; }
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/inka-smoke.XXXXXX")"

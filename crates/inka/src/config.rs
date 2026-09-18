@@ -286,19 +286,18 @@ fn is_relative_path(item: &str) -> bool {
 }
 
 /// Accept the runtime-requirement grammar the launcher understands: an optional
-/// `>=`/`>`/`==` prefix followed by a dotted numeric version (`0.266.2`).
-/// Rejects empty, trailing junk, and injected newlines.
+/// `>=`/`>`/`==` prefix followed by a version (`0.266.2`, optionally suffixed
+/// `-beta.N`/`-rc.N`). Rejects empty and injected newlines.
 pub(crate) fn valid_version_spec(spec: &str) -> bool {
+    if spec.contains('\n') || spec.contains('\r') {
+        return false;
+    }
     let rest = spec
         .strip_prefix(">=")
         .or_else(|| spec.strip_prefix("=="))
         .or_else(|| spec.strip_prefix('>'))
         .unwrap_or(spec);
-    if rest.is_empty() || rest.contains('\n') || rest.contains('\r') {
-        return false;
-    }
-    rest.split('.')
-        .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    !rest.is_empty() && crate::parse_version(rest).is_some()
 }
 
 /// Turn a runtime spec (`>=0.266.7`, `==0.266.7`, or a bare `0.266.7`) into the

@@ -38,6 +38,7 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 | Option | Effect |
 |---|---|
 | `--version <tag>` | pin the release (assets fetched from that tag) |
+| `--beta` | install the newest beta release (toolchain + runtime) |
 | `--from <dir-or-url>` | release base override (mirror / local staging) |
 | `--prefix <dir>` | toolchain prefix (default `$HOME/.local`) |
 | `-y`, `--yes` | non-interactive (accepted for compatibility) |
@@ -57,6 +58,42 @@ than `latest`:
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/Cantor-Industries/inka/releases/download/v0.4.0/install.sh | sh
 ```
+
+## Beta releases
+
+Beta builds are published as GitHub **prereleases**, so the default channel
+(`releases/latest`) never picks them up. Tags look like
+`v<version>-beta.<n>-<short-hash>` (for example `v0.8.1-beta.2-49efc7f`), and a
+beta that changes the engine carries a prerelease runtime tuple
+(`<tuple>-beta.<n>`).
+
+Install the newest beta (toolchain + runtime):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh -s -- --beta
+# or, already installed:
+inka update --beta
+```
+
+Install a **specific** beta by tag (no API lookup, exact assets):
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh \
+  | sh -s -- --version v0.8.1-beta.2-49efc7f
+```
+
+`--beta` resolves the newest prerelease through the GitHub Releases API
+(`INKA_REPO`, default `Cantor-Industries/inka`); set `INKA_GITHUB_TOKEN` (or
+`GITHUB_TOKEN`) if you hit the unauthenticated rate limit. `--from` and
+`INKA_RELEASE_BASE` still override the channel (useful for mirrors/staging).
+
+**Prerelease runtime tuples are excluded from normal selection.** Opt an
+invocation in with `inka build --beta` (records `channel=beta` in the artifact),
+`inka run --beta`, or `INKA_CHANNEL=beta`. Running plain `inka update` returns
+the toolchain and runtime to the stable channel; the eventual stable release
+supersedes every beta of the same base.
 
 `install.sh --help` lists everything.
 
@@ -165,7 +202,8 @@ Two independent version lines:
 - **Toolchain** — the release tag (`v0.4.0`); the `inka` crate version tracks it.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
   revision: `0.267.0` → `0.267.1`, …; when the base moves to
-  `0.268.0`, revisions restart at `0.268.1`. See
+  `0.268.0`, revisions restart at `0.268.1`. Beta engine builds carry a
+  prerelease suffix (`0.267.2-beta.1`, ordered before the final `0.267.2`). See
   `crates/inka-runtime/runtime-version`.
 
 Artifacts roll forward to the newest installed runtime tuple that satisfies

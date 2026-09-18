@@ -42,6 +42,7 @@ jobs:
     outputs:
       rel: ${{ steps.versions.outputs.rel }}
       runtime: ${{ steps.versions.outputs.runtime }}
+      channel: ${{ steps.versions.outputs.channel }}
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -67,14 +68,20 @@ jobs:
           REL="$(printf '%s\n' "$out" | sed -n 's/^release=//p')"
           RUNTIME="$(printf '%s\n' "$out" | sed -n 's/^runtime=//p')"
           DENO="$(printf '%s\n' "$out" | sed -n 's/^deno=//p')"
+          CHANNEL="$(printf '%s\n' "$out" | sed -n 's/^channel=//p')"
+          BASE="$(printf '%s\n' "$out" | sed -n 's/^base=//p')"
           [ -n "$REL" ] && [ -n "$RUNTIME" ] && [ -n "$DENO" ] \
+            && [ -n "$CHANNEL" ] && [ -n "$BASE" ] \
             || { echo "error: could not parse version.sh output" >&2; exit 1; }
           echo "rel=$REL" >> "$GITHUB_OUTPUT"
           echo "runtime=$RUNTIME" >> "$GITHUB_OUTPUT"
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
           echo "REL=$REL" >> "$GITHUB_ENV"
           echo "RUNTIME=$RUNTIME" >> "$GITHUB_ENV"
           echo "DENO=$DENO" >> "$GITHUB_ENV"
-          echo "release=$REL runtime=$RUNTIME deno=$DENO"
+          echo "CHANNEL=$CHANNEL" >> "$GITHUB_ENV"
+          echo "BASE=$BASE" >> "$GITHUB_ENV"
+          echo "release=$REL runtime=$RUNTIME deno=$DENO channel=$CHANNEL base=$BASE"
 
       - name: Build toolchain
         run: |
@@ -109,8 +116,13 @@ jobs:
           # Both values are validated to [0-9A-Za-z.+~-] (version.sh), so they
           # are safe as sed replacement text.
           cp install.sh "$STAGE/install.sh"
+          # Beta releases use a beta-flavored body that names the exact tag and
+          # how to install it; stable releases use the normal notes.
+          NOTES=RELEASE_NOTES.md
+          [ "$CHANNEL" = beta ] && NOTES=RELEASE_NOTES_BETA.md
           sed -e "s/{{REL}}/$REL/g" -e "s/{{RUNTIME}}/$RUNTIME/g" \
-            RELEASE_NOTES.md \
+            -e "s/{{TAG}}/$GITHUB_REF_NAME/g" -e "s/{{CHANNEL}}/$CHANNEL/g" \
+            "$NOTES" \
             | sed '1,/^-->$/d' > "$STAGE/RELEASE_NOTES.md"
 
           # sha256 sidecars (bare hex, as the installer/update expect).
@@ -124,6 +136,9 @@ jobs:
           cat > "$STAGE/versions.json" <<EOF
           {
             "release": "$REL",
+            "channel": "$CHANNEL",
+            "base": "$BASE",
+            "tag": "$GITHUB_REF_NAME",
             "toolchain": {
               "version": "$REL",
               "target": "$TARGET",
@@ -157,6 +172,7 @@ jobs:
           name: inka ${{ needs.build.outputs.rel }}
           body_path: ${{ env.STAGE }}/RELEASE_NOTES.md
           draft: false
+          prerelease: ${{ needs.build.outputs.channel == 'beta' }}
           files: |
             ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz
             ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz.sha256

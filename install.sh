@@ -16,6 +16,7 @@
 # options:
 #   -y, --yes              non-interactive (accepted for compatibility)
 #       --version <tag>    install a specific release tag (default: latest)
+#       --beta             install the newest beta release (toolchain + runtime)
 #       --from <dir-or-url> release base override (mirrors, local staging)
 #       --prefix <dir>     toolchain prefix (default: $HOME/.local)
 #       --no-modify-path   do not edit shell rc files
@@ -56,6 +57,7 @@ usage: install.sh [options]
 options:
   -y, --yes               non-interactive (accepted for compatibility)
       --version <tag>     install a specific release tag (default: latest)
+      --beta              install the newest beta release
       --from <dir-or-url> release base override (mirrors, local staging)
       --prefix <dir>      toolchain prefix (default: $HOME/.local)
       --no-modify-path    do not edit shell rc files
@@ -161,6 +163,46 @@ fetch_text() {
     esac
 }
 
+# Fetch an absolute URL to stdout (GitHub API). Adds an Authorization header when
+# INKA_GITHUB_TOKEN/GITHUB_TOKEN is set (raises the API rate limit).
+fetch_url() {
+    _url=$1
+    _token="${INKA_GITHUB_TOKEN:-${GITHUB_TOKEN:-}}"
+    _auth=""
+    case "$_url" in
+        *api.github.com*) [ -n "$_token" ] && _auth="Authorization: Bearer $_token" ;;
+    esac
+    if have curl; then
+        if [ -n "$_auth" ]; then
+            curl --proto '=https' --tlsv1.2 -fsSL -H "$_auth" "$_url"
+        else
+            curl --proto '=https' --tlsv1.2 -fsSL "$_url"
+        fi
+    elif have wget; then
+        if [ -n "$_auth" ]; then
+            wget --https-only -qO- --header="$_auth" "$_url"
+        else
+            wget --https-only -qO- "$_url"
+        fi
+    else
+        die "need curl or wget to download over HTTP"
+    fi
+}
+
+# Resolve the download base of the newest beta release. GitHub returns releases
+# newest-first, so the first `-beta.N`/`-rc.N` tag is the latest beta. The tag
+# charset is validated before it is used in a URL.
+resolve_beta_base() {
+    _body="$(fetch_url "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null)" || return 1
+    _tag="$(printf '%s\n' "$_body" \
+        | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9][^"]*-(beta|rc)\.[^"]*"' \
+        | sed -E 's/.*"([^"]*)"$/\1/' | head -1)"
+    case "$_tag" in
+        ""|*[!0-9A-Za-z.+~-]*) return 1 ;;
+    esac
+    printf '%s' "https://github.com/$REPO/releases/download/$_tag"
+}
+
 sha256_of() {
     if have sha256sum; then
         sha256sum "$1" | awk '{print $1}'
@@ -221,6 +263,7 @@ remove_path_block() {
 YES=0
 VERSION=""
 FROM=""
+BETA=0
 PREFIX="${INKA_PREFIX:-$HOME/.local}"
 MODIFY_PATH=1
 NO_RUNTIME=0
@@ -231,6 +274,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         -y|--yes) YES=1 ;;
         --version) VERSION="${2:?--version needs a tag}"; shift ;;
+        --beta) BETA=1 ;;
         --from) FROM="${2:?--from needs a value}"; shift ;;
         --prefix) PREFIX="${2:?--prefix needs a dir}"; shift ;;
         --no-modify-path) MODIFY_PATH=0 ;;
@@ -277,6 +321,11 @@ elif [ -n "$VERSION" ]; then
     esac
     VERSION="v$_ver"
     BASE="https://github.com/$REPO/releases/download/$VERSION"
+elif [ "$BETA" = 1 ]; then
+    _beta_base="$(resolve_beta_base)" \
+        || die "could not resolve a beta release for $REPO (pass --version <tag> instead)"
+    info "resolved beta release ${_beta_base##*/}"
+    BASE="$_beta_base"
 elif [ -n "${INKA_RELEASE_BASE:-}" ]; then
     BASE="$INKA_RELEASE_BASE"
 else

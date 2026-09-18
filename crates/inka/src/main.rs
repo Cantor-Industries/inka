@@ -100,6 +100,14 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
 /// Top-level commands, in help order and for suggestions.
 pub(crate) const COMMANDS: [&str; 6] = ["build", "run", "cache", "update", "doctor", "help"];
 
+/// True when `INKA_CHANNEL=beta` (case-insensitive) opts this invocation into
+/// prerelease runtime tuples. `--beta` is the per-command equivalent.
+pub(crate) fn env_is_beta() -> bool {
+    env::var("INKA_CHANNEL")
+        .map(|v| v.eq_ignore_ascii_case("beta"))
+        .unwrap_or(false)
+}
+
 fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
     // closes the pipe, and the default action (terminate quietly) is preferable to
@@ -191,6 +199,12 @@ pub(crate) fn fetch_text(base: &str, file: &str) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
+/// Fetch an absolute URL as UTF-8 text (e.g. the GitHub Releases API).
+pub(crate) fn fetch_url(url: &str) -> Result<String, String> {
+    let bytes = fetch_http(url)?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
 fn fetch_one(base: &str, file: &str, is_url: bool) -> Result<Vec<u8>, String> {
     if is_url {
         fetch_http(&format!("{}/{}", base.trim_end_matches('/'), file))
@@ -251,7 +265,7 @@ fn http_get_optional(url: &str) -> Result<Option<Vec<u8>>, String> {
 }
 
 /// Download over HTTP(S), preferring `curl` and falling back to `wget`.
-fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
     match curl_get(url) {
         Ok(bytes) => Ok(bytes),
         Err(curl_err) => match wget_get(url) {
@@ -263,6 +277,25 @@ fn fetch_http(url: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+/// An optional token for api.github.com (raises the unauthenticated 60/hr rate
+/// limit). Read from `INKA_GITHUB_TOKEN` then `GITHUB_TOKEN`.
+fn github_token() -> Option<String> {
+    env::var("INKA_GITHUB_TOKEN")
+        .ok()
+        .or_else(|| env::var("GITHUB_TOKEN").ok())
+        .filter(|s| !s.is_empty())
+}
+
+/// Add an `Authorization` header for GitHub API requests when a token is set.
+/// Only applied to `api.github.com`, so the token is never sent elsewhere.
+fn apply_github_auth(cmd: &mut Command, url: &str) {
+    if url.contains("api.github.com") {
+        if let Some(tok) = github_token() {
+            cmd.arg("-H").arg(format!("Authorization: Bearer {tok}"));
+        }
+    }
+}
+
 fn curl_get(url: &str) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("curl");
     // Pin TLS for https (avoid downgrade); allow plain http for local mirrors.
@@ -271,6 +304,7 @@ fn curl_get(url: &str) -> Result<Vec<u8>, String> {
         // `--proto` does not necessarily cover redirects; pin those explicitly.
         cmd.args(["--proto-redir", "=https", "--max-redirs", "5"]);
     }
+    apply_github_auth(&mut cmd, url);
     let out = cmd
         .args(["-fsSL", "--connect-timeout", "30", "--max-time", "900", url])
         .output()
@@ -285,6 +319,12 @@ fn wget_get(url: &str) -> Result<Vec<u8>, String> {
     let mut cmd = Command::new("wget");
     if url.starts_with("https://") {
         cmd.arg("--https-only");
+    }
+    if url.contains("api.github.com") {
+        if let Some(tok) = github_token() {
+            cmd.arg("--header")
+                .arg(format!("Authorization: Bearer {tok}"));
+        }
     }
     let out = cmd
         .args(["-qO-", "--timeout=30", url])
@@ -577,6 +617,7 @@ fn cmd_cache(args: &[String]) {
 fn cmd_doctor(args: &[String]) {
     let mut positional: Vec<&str> = Vec::new();
     let mut json = false;
+    let mut beta = false;
     for a in args {
         match a.as_str() {
             "-h" => {
@@ -588,6 +629,7 @@ fn cmd_doctor(args: &[String]) {
                 std::process::exit(0);
             }
             "--json" => json = true,
+            "--beta" => beta = true,
             other if ui::apply_verbosity_flag(other) => {}
             other if other.starts_with('-') => {
                 ui::log_error(format!("unknown option '{other}'"));
@@ -597,8 +639,9 @@ fn cmd_doctor(args: &[String]) {
             other => positional.push(other),
         }
     }
+    let beta = beta || env_is_beta();
     match positional.as_slice() {
-        [] => doctor_machine(),
+        [] => doctor_machine(beta),
         [artifact] => doctor_artifact(Path::new(artifact), json),
         _ => {
             ui::log_error("doctor takes at most one artifact path");
@@ -645,14 +688,16 @@ fn parse_artifact(bytes: &[u8]) -> Result<ArtifactInfo, ArtifactError> {
     })
 }
 
-/// The newest installed runtime satisfying a manifest's constraints.
+/// The newest installed runtime satisfying a manifest's constraints. Prerelease
+/// tuples are only eligible when `allow_prerelease` (beta channel) is set.
 fn select_runtime(
     m: &inka_format::Manifest,
     runtimes: &[(Version, PathBuf)],
+    allow_prerelease: bool,
 ) -> Option<(Version, PathBuf)> {
     runtimes
         .iter()
-        .filter(|(v, _)| constraint_allows(m, *v))
+        .filter(|(v, _)| (!v.is_prerelease() || allow_prerelease) && constraint_allows(m, *v))
         .max_by_key(|(v, _)| *v)
         .map(|(v, p)| (*v, p.clone()))
 }
@@ -686,7 +731,8 @@ fn doctor_artifact(path: &Path, json: bool) {
 
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
-    let selected = select_runtime(&manifest, &runtimes);
+    let allow_prerelease = manifest.channel.as_deref() == Some("beta") || env_is_beta();
+    let selected = select_runtime(&manifest, &runtimes, allow_prerelease);
     let unpacked: usize = entries.iter().map(|(_, n)| *n).sum();
 
     if json {
@@ -699,6 +745,7 @@ fn doctor_artifact(path: &Path, json: bool) {
             "tested_against": manifest.tested.map(|v| v.to_string()),
             "requires": manifest.requires,
             "path_base": manifest.path_base,
+            "channel": manifest.channel,
             "permissions": manifest.perms,
             "files": entries
                 .iter()
@@ -733,6 +780,9 @@ fn doctor_artifact(path: &Path, json: bool) {
     }
     if let Some(pb) = &manifest.path_base {
         ui::row("path-base", pb);
+    }
+    if let Some(ch) = &manifest.channel {
+        ui::row("channel", ch);
     }
 
     ui::section("Permissions");
@@ -774,10 +824,16 @@ fn doctor_artifact(path: &Path, json: bool) {
         } else {
             " ".to_string()
         };
+        let pre = if v.is_prerelease() {
+            colors::gray(" (beta)").to_string()
+        } else {
+            String::new()
+        };
         println!(
-            "  {marker} {:<10} {}",
+            "  {marker} {:<10} {}{}",
             colors::green(v.to_string()),
-            colors::gray(p.display())
+            colors::gray(p.display()),
+            pre
         );
     }
     if selected.is_none() {
@@ -801,7 +857,7 @@ fn required_runtime(m: &inka_format::Manifest) -> String {
     }
 }
 
-fn doctor_machine() {
+fn doctor_machine(beta: bool) {
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
     let mut warnings: Vec<String> = Vec::new();
@@ -816,19 +872,36 @@ fn doctor_machine() {
             "run `inka update`".to_string(),
         ));
     } else {
-        let selected = runtimes.last().map(|(v, _)| *v);
+        // Stable selection ignores prerelease tuples unless the beta channel is
+        // active, mirroring the launcher's artifact selection.
+        let selected = if beta {
+            runtimes.last().map(|(v, _)| *v)
+        } else {
+            runtimes
+                .iter()
+                .rev()
+                .find(|(v, _)| !v.is_prerelease())
+                .map(|(v, _)| *v)
+        };
         for (v, p) in &runtimes {
             let marker = if Some(*v) == selected {
                 colors::green("→").to_string()
             } else {
                 " ".to_string()
             };
+            let pre = if v.is_prerelease() {
+                colors::gray(" (beta)").to_string()
+            } else {
+                String::new()
+            };
             println!(
-                "  {marker} {:<10} {}",
+                "  {marker} {:<10} {}{}",
                 colors::green(v.to_string()),
-                colors::gray(p.display())
+                colors::gray(p.display()),
+                pre
             );
         }
+        ui::row("channel", if beta { "beta" } else { "stable" });
     }
 
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -1020,7 +1093,7 @@ mod tests {
         let info = parse_artifact(&image).unwrap();
         assert_eq!(info.manifest.module, "main.js");
         assert_eq!(info.manifest.perms, "permissions=all\nallow-read=./data");
-        assert_eq!(info.manifest.min, Some(Version(0, 266, 2)));
+        assert_eq!(info.manifest.min, Some(Version::new(0, 266, 2)));
         assert_eq!(info.entries.len(), 2);
         assert_eq!(info.entries[1], ("node_modules/x/index.js".to_string(), 1));
         assert_eq!(info.size, image.len());
@@ -1048,14 +1121,33 @@ mod tests {
         let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
         let runtimes: Vec<(Version, PathBuf)> = [0, 1, 2, 4, 5]
             .into_iter()
-            .map(|c| (Version(0, 266, c), PathBuf::from(format!("/r/{c}"))))
+            .map(|c| (Version::new(0, 266, c), PathBuf::from(format!("/r/{c}"))))
             .collect();
         // Newest satisfying the cap is 0.266.4 (0.266.5 is above tested-against).
-        assert_eq!(select_runtime(&m, &runtimes).unwrap().0, Version(0, 266, 4));
+        assert_eq!(
+            select_runtime(&m, &runtimes, false).unwrap().0,
+            Version::new(0, 266, 4)
+        );
 
         // No satisfying runtime -> None.
         let m_exact = parse_manifest(b"runtime=inka_runtime==0.266.9\n");
-        assert!(select_runtime(&m_exact, &runtimes).is_none());
+        assert!(select_runtime(&m_exact, &runtimes, false).is_none());
+
+        // A prerelease tuple is skipped unless the beta channel is allowed.
+        let mut with_beta = runtimes.clone();
+        with_beta.push((
+            parse_version("0.267.2-beta.1").unwrap(),
+            PathBuf::from("/r/beta"),
+        ));
+        let open = parse_manifest(b"module=main.js\n");
+        assert_eq!(
+            select_runtime(&open, &with_beta, false).unwrap().0,
+            Version::new(0, 266, 5)
+        );
+        assert_eq!(
+            select_runtime(&open, &with_beta, true).unwrap().0,
+            parse_version("0.267.2-beta.1").unwrap()
+        );
     }
 
     #[test]

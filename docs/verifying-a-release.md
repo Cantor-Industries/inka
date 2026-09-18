@@ -13,8 +13,17 @@ A GitHub Release exists for the tag (`v0.5.0`, …) with these assets:
 - `.sha256` sidecars for the above, and `versions.json`.
 
 `versions.json` records the release, a `toolchain` block (version/target/archive/
-sha256), the `runtime` tuple + its `deno_runtime` base, and the runtime `sha256`
-— cross-check these against the published assets.
+sha256), the `runtime` tuple + its `deno_runtime` base, the runtime `sha256`, and
+the `channel`/`base`/`tag` — cross-check these against the published assets.
+
+For a **beta** tag (`v<version>-beta.<n>-<short-hash>`) the GitHub Release must be
+marked *prerelease*, `versions.json.channel` must be `beta`, `release` must be the
+toolchain version (`0.8.1-beta.2`) and `tag` the exact tag. Verify it installs
+with `install.sh --beta` (newest beta) and with
+`install.sh --version v0.8.1-beta.2-<short-hash>` (this exact beta), and that a
+stable selection does **not** pick the prerelease runtime tuple
+(`inka doctor` shows it as `(beta)`; only `inka run --beta`/`channel=beta` use
+it).
 
 ## 2. The release download base
 

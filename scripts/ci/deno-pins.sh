@@ -18,8 +18,14 @@ RUNTIME="$(tr -d '[:space:]' < "$RUNTIME_VERSION_FILE")"
 DENO="$(sed -n 's/.*deno_runtime = { version = "=\([0-9][0-9.]*\)".*/\1/p' "$CARGO_TOML" | head -1)"
 [ -n "$DENO" ] || { echo "error: could not parse the deno_runtime pin from $CARGO_TOML" >&2; exit 1; }
 
-# The tuple's major.minor must match the pinned deno_runtime base.
-runtime_base="${RUNTIME%.*}"
+# The tuple's major.minor must match the pinned deno_runtime base. A prerelease
+# suffix (`0.267.2-beta.1`) is stripped first.
+rt_base="$RUNTIME"
+case "$RUNTIME" in
+    *-beta.*) rt_base="${RUNTIME%%-beta.*}" ;;
+    *-rc.*) rt_base="${RUNTIME%%-rc.*}" ;;
+esac
+runtime_base="${rt_base%.*}"
 deno_base="${DENO%.*}"
 if [ "$runtime_base" != "$deno_base" ]; then
     echo "error: runtime-version $RUNTIME does not share the deno_runtime base $DENO" >&2

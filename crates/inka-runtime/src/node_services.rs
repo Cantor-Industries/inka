@@ -46,6 +46,9 @@ use node_resolver::{
 };
 use sys_traits::impls::RealSys;
 
+use deno_semver::jsr::JsrPackageReqReference;
+use deno_semver::npm::NpmPackageReqReference;
+use deno_semver::package::PackageReq;
 use deno_semver::{Version, VersionReq};
 
 /// Filesystem root a `require()` may reach without an explicit read grant: the
@@ -195,66 +198,65 @@ fn valid_package_name(name: &str) -> bool {
 struct PkgSpec {
     /// npm package name, e.g. `zod` or `@jsr/std__assert`.
     name: String,
-    /// Optional version requirement text as written (no leading `@`).
+    /// Optional version requirement text as written (no leading `@`); `None`
+    /// for the wildcard requirement.
     req: Option<String>,
     /// Optional subpath (no leading `/`).
     sub: Option<String>,
 }
 
+/// Parse an `npm:`/`jsr:` specifier with `deno_semver` — the same parser Deno
+/// and the bundler use. It accepts both the bare form (`npm:pkg@1/sub`) and the
+/// URL form with a leading slash (`npm:/pkg@1/sub`) that Deno's import map
+/// produces when it expands a package entry for subpath imports. A `jsr:`
+/// package is normalized to jsr's npm-compatibility mirror
+/// (`jsr:@scope/name` -> `@jsr/scope__name`).
 fn parse_pkg_specifier(spec: &str) -> Result<PkgSpec, String> {
-    let body = if let Some(rest) = spec.strip_prefix("npm:") {
-        rest.to_string()
-    } else if let Some(rest) = spec.strip_prefix("jsr:") {
-        // jsr:@scope/name -> npm @jsr/scope__name (jsr's npm-compatibility mirror).
-        let rest = rest.trim();
-        let (scope, after) = rest.split_once('/').ok_or_else(|| {
-            format!("invalid jsr specifier '{spec}' (expected jsr:@scope/name[...])")
-        })?;
-        let scope = scope.strip_prefix('@').unwrap_or(scope);
-        let (name, tail) = split_name_suffix(after);
-        format!("@jsr/{scope}__{name}{tail}")
+    let (name, req, sub) = if spec.starts_with("npm:") {
+        let r = NpmPackageReqReference::from_str(spec)
+            .map_err(|e| format!("invalid npm specifier '{spec}': {e}"))?;
+        (
+            r.req().name.as_str().to_string(),
+            version_req_text(r.req()),
+            r.sub_path().map(str::to_string),
+        )
+    } else if spec.starts_with("jsr:") {
+        let r = JsrPackageReqReference::from_str(spec)
+            .map_err(|e| format!("invalid jsr specifier '{spec}': {e}"))?;
+        (
+            jsr_npm_mirror_name(r.req().name.as_str(), spec)?,
+            version_req_text(r.req()),
+            r.sub_path().map(str::to_string),
+        )
     } else {
         return Err(format!("not a package specifier: '{spec}'"));
     };
-    parse_npm_body(&body)
-}
-
-/// Splits `name` from the rest of a package body (`name[@req][/sub]`).
-fn split_name_suffix(after: &str) -> (&str, &str) {
-    match after.find(['@', '/']) {
-        Some(i) => (&after[..i], &after[i..]),
-        None => (after, ""),
-    }
-}
-
-fn parse_npm_body(body: &str) -> Result<PkgSpec, String> {
-    let body = body.trim();
-    let (name, rest) = if body.starts_with('@') {
-        let (scope, after) = body
-            .split_once('/')
-            .ok_or_else(|| format!("malformed scoped package '{body}'"))?;
-        let (nm, rest) = split_name_suffix(after);
-        (format!("{scope}/{nm}"), rest)
-    } else {
-        let (nm, rest) = split_name_suffix(body);
-        (nm.to_string(), rest)
-    };
-    let mut req = None;
-    let mut sub = None;
-    if let Some(tail) = rest.strip_prefix('@') {
-        let (r, s) = match tail.split_once('/') {
-            Some((r, s)) => (r, Some(s.to_string())),
-            None => (tail, None),
-        };
-        req = Some(r.to_string());
-        sub = s;
-    } else if let Some(s) = rest.strip_prefix('/') {
-        sub = Some(s.to_string());
-    }
     if !valid_package_name(&name) {
         return Err(format!("invalid package name '{name}'"));
     }
     Ok(PkgSpec { name, req, sub })
+}
+
+/// The version requirement text, or `None` for the wildcard (`*`) requirement
+/// (which the pin check skips).
+fn version_req_text(req: &PackageReq) -> Option<String> {
+    let text = req.version_req.version_text();
+    if text == "*" {
+        None
+    } else {
+        Some(text.to_string())
+    }
+}
+
+/// `jsr:@scope/name` -> the npm-compatibility mirror `@jsr/scope__name`.
+fn jsr_npm_mirror_name(name: &str, spec: &str) -> Result<String, String> {
+    let invalid = || format!("invalid jsr specifier '{spec}' (expected jsr:@scope/name[...])");
+    let rest = name.strip_prefix('@').ok_or_else(invalid)?;
+    let (scope, pkg) = rest.split_once('/').ok_or_else(invalid)?;
+    if scope.is_empty() || pkg.is_empty() {
+        return Err(invalid());
+    }
+    Ok(format!("@jsr/{scope}__{pkg}"))
 }
 
 fn version_satisfies(v: &Version, req: &str) -> bool {
@@ -745,6 +747,41 @@ mod tests {
         ] {
             assert!(!valid_package_name(bad), "{bad} should be invalid");
         }
+    }
+
+    #[test]
+    fn parse_pkg_specifier_accepts_bare_and_import_map_forms() {
+        // Bare `npm:pkg@ver/sub`.
+        let s = parse_pkg_specifier("npm:effect@3.22.1").unwrap();
+        assert_eq!(s.name, "effect");
+        assert_eq!(s.req.as_deref(), Some("3.22.1"));
+        assert_eq!(s.sub, None);
+
+        // The URL form with a leading slash that Deno's import map emits for
+        // subpath imports (`"@scope/pkg": "npm:@scope/pkg@ver"` expands to
+        // `npm:/@scope/pkg@ver/sub`). This was `invalid package name ''`.
+        let s = parse_pkg_specifier("npm:/@jdsl/language-service@0.87.4/api").unwrap();
+        assert_eq!(s.name, "@jdsl/language-service");
+        assert_eq!(s.req.as_deref(), Some("0.87.4"));
+        assert_eq!(s.sub.as_deref(), Some("api"));
+
+        // Scoped, no version, no subpath.
+        let s = parse_pkg_specifier("npm:/@scope/pkg").unwrap();
+        assert_eq!(s.name, "@scope/pkg");
+        assert_eq!(s.req, None);
+        assert_eq!(s.sub, None);
+
+        // jsr normalizes to the npm-compatibility mirror.
+        let s = parse_pkg_specifier("jsr:@std/assert@1").unwrap();
+        assert_eq!(s.name, "@jsr/std__assert");
+        assert_eq!(s.req.as_deref(), Some("1"));
+        let s = parse_pkg_specifier("jsr:/@std/path@1/posix").unwrap();
+        assert_eq!(s.name, "@jsr/std__path");
+        assert_eq!(s.sub.as_deref(), Some("posix"));
+
+        // Malformed / empty is rejected rather than silently accepted.
+        assert!(parse_pkg_specifier("npm:").is_err());
+        assert!(parse_pkg_specifier("plain").is_err());
     }
 
     #[cfg(unix)]

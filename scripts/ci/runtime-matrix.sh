@@ -508,6 +508,17 @@ run "package entry .js -> .ts" "rewrite rewrite-ok" p_rewrite.js \
 'import { value } from "@scope/rewrite";
 console.log("rewrite", value());'
 
+echo "== npm import map subpath (URL-form npm:/pkg@ver/sub) =="
+# Deno's import map expands `"debug": "npm:debug@4.3.7"` into a prefix entry
+# whose value is the URL form `npm:/debug@4.3.7/`; importing a subpath then
+# yields `npm:/debug@4.3.7/src/browser.js`. The runtime must parse that with
+# `deno_semver` (a leading slash used to produce `invalid package name ''`).
+printf '%s\n' '{"imports":{"debug":"npm:debug@4.3.7"}}' > deno.json
+run "npm import-map subpath" "npm-subpath-ok function" p_npm_subpath.js \
+'import createDebug from "debug/src/browser.js";
+console.log("npm-subpath-ok", typeof createDebug);'
+rm -f deno.json
+
 echo "== jsr / import map (offline Deno cache) =="
 mkdir -p jsrproj
 printf '%s\n' '{"imports":{"@std/assert":"jsr:@std/assert@1"}}' > jsrproj/deno.json

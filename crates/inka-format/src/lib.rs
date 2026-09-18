@@ -17,28 +17,98 @@ pub const MAGIC: &[u8; 8] = b"INKFOOT5";
 
 // ---- version ---------------------------------------------------------------
 
-/// A dotted `major.minor.patch` version. Ordering is numeric per component.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
-pub struct Version(pub u64, pub u64, pub u64);
+/// A prerelease channel identifier. Ordering is prerelease < release, and
+/// `beta` precedes `rc`; the numeric counter orders successive prereleases, so
+/// `0.267.2-beta.9 < 0.267.2-beta.10 < 0.267.2-rc.1 < 0.267.2`.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash, Default)]
+pub enum Pre {
+    Beta(u64),
+    Rc(u64),
+    #[default]
+    Release,
+}
 
-impl fmt::Display for Version {
+impl fmt::Display for Pre {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}.{}", self.0, self.1, self.2)
+        match self {
+            Pre::Beta(n) => write!(f, "-beta.{n}"),
+            Pre::Rc(n) => write!(f, "-rc.{n}"),
+            Pre::Release => Ok(()),
+        }
     }
 }
 
-/// Parse `x`, `x.y`, or `x.y.z` (whitespace tolerated). Rejects a fourth
-/// component and any non-numeric part, so a suffix like `0.0.0-stub` fails.
+/// A `major.minor.patch` version with an optional prerelease (`-beta.N`/`-rc.N`).
+/// Ordering is semver-like: a prerelease sorts below its release and above any
+/// earlier patch, and the counter compares numerically.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub struct Version {
+    pub major: u64,
+    pub minor: u64,
+    pub patch: u64,
+    pub pre: Pre,
+}
+
+impl Version {
+    /// A release version (`pre` = `Release`).
+    pub const fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self {
+            major,
+            minor,
+            patch,
+            pre: Pre::Release,
+        }
+    }
+
+    /// True for a prerelease (`-beta.N`/`-rc.N`).
+    pub fn is_prerelease(&self) -> bool {
+        !matches!(self.pre, Pre::Release)
+    }
+}
+
+impl fmt::Display for Version {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}.{}.{}{}",
+            self.major, self.minor, self.patch, self.pre
+        )
+    }
+}
+
+/// Parse `x`, `x.y`, or `x.y.z`, optionally suffixed `-beta.N` or `-rc.N`
+/// (whitespace tolerated). Rejects a fourth numeric component and any other
+/// suffix, so a value like `0.0.0-stub` still fails.
 pub fn parse_version(s: &str) -> Option<Version> {
     let s = s.trim();
-    let mut parts = s.split('.');
-    let a = parts.next()?.trim().parse().ok()?;
-    let b = parts.next().unwrap_or("0").trim().parse().ok()?;
-    let c = parts.next().unwrap_or("0").trim().parse().ok()?;
+    let (numeric, pre) = match s.split_once('-') {
+        Some((num, tag)) => (num.trim(), parse_pre(tag.trim())?),
+        None => (s, Pre::Release),
+    };
+    let mut parts = numeric.split('.');
+    let major = parts.next()?.trim().parse().ok()?;
+    let minor = parts.next().unwrap_or("0").trim().parse().ok()?;
+    let patch = parts.next().unwrap_or("0").trim().parse().ok()?;
     if parts.next().is_some() {
         return None;
     }
-    Some(Version(a, b, c))
+    Some(Version {
+        major,
+        minor,
+        patch,
+        pre,
+    })
+}
+
+/// Parse a `beta.N`/`rc.N` prerelease tag (the text after the `-`).
+fn parse_pre(tag: &str) -> Option<Pre> {
+    let (label, num) = tag.split_once('.')?;
+    let n: u64 = num.trim().parse().ok()?;
+    match label {
+        "beta" => Some(Pre::Beta(n)),
+        "rc" => Some(Pre::Rc(n)),
+        _ => None,
+    }
 }
 
 // ---- archive + footer ------------------------------------------------------
@@ -194,6 +264,9 @@ pub struct Manifest {
     pub requires: String,
     /// `exe` or `cwd`; how relative permission paths are anchored.
     pub path_base: Option<String>,
+    /// `beta` when the artifact was built with `inka build --beta`, so the
+    /// launcher may select a prerelease runtime tuple.
+    pub channel: Option<String>,
 }
 
 pub fn parse_manifest(bytes: &[u8]) -> Manifest {
@@ -237,6 +310,7 @@ pub fn parse_manifest(bytes: &[u8]) -> Manifest {
             "module" => m.module = val.to_string(),
             "requires" => m.requires = val.to_string(),
             "path-base" => m.path_base = Some(val.to_string()),
+            "channel" => m.channel = Some(val.to_string()),
             "permissions" => {
                 if !m.perms.is_empty() {
                     m.perms.push('\n');
@@ -369,17 +443,17 @@ fn anchor_item(
 /// The lowest runtime tuple that enforces the current security model
 /// (deny-by-default, realpath confinement, `_dir`-only entry). Artifacts always
 /// require at least this tuple. Verified against the installed 0.266.5/0.266.6.
-pub const SECURITY_FLOOR: Version = Version(0, 266, 5);
+pub const SECURITY_FLOOR: Version = Version::new(0, 266, 5);
 
 /// Capability names a runtime can advertise and an artifact can require, each
 /// with the first tuple that provided it. Keep in sync with the runtime's
 /// `inka_runtime_features()` (a runtime test asserts the names match).
 pub const FEATURE_FLOORS: &[(&str, Version)] = &[
-    ("raw-cjs", Version(0, 266, 5)),
-    ("native-addon", Version(0, 266, 5)),
-    ("import-perm", Version(0, 266, 5)),
-    ("tsconfig-run", Version(0, 266, 5)),
-    ("workspace", Version(0, 266, 5)),
+    ("raw-cjs", Version::new(0, 266, 5)),
+    ("native-addon", Version::new(0, 266, 5)),
+    ("import-perm", Version::new(0, 266, 5)),
+    ("tsconfig-run", Version::new(0, 266, 5)),
+    ("workspace", Version::new(0, 266, 5)),
 ];
 
 /// Every capability name this inka release knows how to require.
@@ -519,28 +593,28 @@ mod tests {
     #[test]
     fn manifest_version_operators_and_constraints() {
         let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\n");
-        assert_eq!(m.min, Some(Version(0, 266, 2)));
+        assert_eq!(m.min, Some(Version::new(0, 266, 2)));
         assert!(m.gt.is_none() && m.exact.is_none() && m.malformed.is_none());
 
         let m = parse_manifest(b"runtime=inka_runtime>0.266.2\n");
-        assert_eq!(m.gt, Some(Version(0, 266, 2)));
+        assert_eq!(m.gt, Some(Version::new(0, 266, 2)));
         assert!(
-            !constraint_allows(&m, Version(0, 266, 2)),
+            !constraint_allows(&m, Version::new(0, 266, 2)),
             "> rejects equal"
         );
-        assert!(constraint_allows(&m, Version(0, 266, 3)));
+        assert!(constraint_allows(&m, Version::new(0, 266, 3)));
 
         let m = parse_manifest(b"runtime=inka_runtime==0.266.2\n");
-        assert_eq!(m.exact, Some(Version(0, 266, 2)));
-        assert!(!constraint_allows(&m, Version(0, 266, 3)));
+        assert_eq!(m.exact, Some(Version::new(0, 266, 2)));
+        assert!(!constraint_allows(&m, Version::new(0, 266, 3)));
 
         let m = parse_manifest(b"runtime=0.266.2\n");
-        assert_eq!(m.exact, Some(Version(0, 266, 2)));
+        assert_eq!(m.exact, Some(Version::new(0, 266, 2)));
 
         let m = parse_manifest(b"runtime=inka_runtime>=0.266.2\ntested-against=0.266.4\n");
-        assert!(constraint_allows(&m, Version(0, 266, 2)));
-        assert!(constraint_allows(&m, Version(0, 266, 4)));
-        assert!(!constraint_allows(&m, Version(0, 266, 5)), "cap");
+        assert!(constraint_allows(&m, Version::new(0, 266, 2)));
+        assert!(constraint_allows(&m, Version::new(0, 266, 4)));
+        assert!(!constraint_allows(&m, Version::new(0, 266, 5)), "cap");
     }
 
     #[test]
@@ -554,7 +628,7 @@ mod tests {
     #[test]
     fn manifest_perms_requires_and_path_base() {
         let m = parse_manifest(
-            b"permissions=all\nallow-read=${EXE_DIR}/data\ndeny-read=/etc\nrequires=native-addon,raw-cjs\npath-base=exe\n",
+            b"permissions=all\nallow-read=${EXE_DIR}/data\ndeny-read=/etc\nrequires=native-addon,raw-cjs\npath-base=exe\nchannel=beta\n",
         );
         assert_eq!(
             m.perms,
@@ -562,6 +636,7 @@ mod tests {
         );
         assert_eq!(m.requires, "native-addon,raw-cjs");
         assert_eq!(m.path_base.as_deref(), Some("exe"));
+        assert_eq!(m.channel.as_deref(), Some("beta"));
     }
 
     #[test]
@@ -581,11 +656,51 @@ mod tests {
 
     #[test]
     fn parse_version_strictness() {
-        assert_eq!(parse_version("0.266.7"), Some(Version(0, 266, 7)));
-        assert_eq!(parse_version("1.2"), Some(Version(1, 2, 0)));
-        assert_eq!(parse_version(" 1 "), Some(Version(1, 0, 0)));
+        assert_eq!(parse_version("0.266.7"), Some(Version::new(0, 266, 7)));
+        assert_eq!(parse_version("1.2"), Some(Version::new(1, 2, 0)));
+        assert_eq!(parse_version(" 1 "), Some(Version::new(1, 0, 0)));
         assert_eq!(parse_version("1.2.3.4"), None);
         assert_eq!(parse_version("0.0.0-stub"), None);
+        // Only `beta.N`/`rc.N` prereleases are accepted.
+        assert_eq!(
+            parse_version("0.267.2-beta.1"),
+            Some(Version {
+                major: 0,
+                minor: 267,
+                patch: 2,
+                pre: Pre::Beta(1),
+            })
+        );
+        assert_eq!(
+            parse_version("0.8.1-rc.10"),
+            Some(Version {
+                major: 0,
+                minor: 8,
+                patch: 1,
+                pre: Pre::Rc(10),
+            })
+        );
+        assert_eq!(parse_version("0.267.2-beta"), None);
+        assert_eq!(parse_version("0.267.2-alpha.1"), None);
+    }
+
+    #[test]
+    fn prerelease_ordering_and_display() {
+        let beta1 = parse_version("0.267.2-beta.1").unwrap();
+        let beta9 = parse_version("0.267.2-beta.9").unwrap();
+        let beta10 = parse_version("0.267.2-beta.10").unwrap();
+        let rc1 = parse_version("0.267.2-rc.1").unwrap();
+        let release = parse_version("0.267.2").unwrap();
+        let prior = parse_version("0.267.1").unwrap();
+
+        // Prereleases sort below their release and above the prior patch.
+        assert!(prior < beta1 && beta1 < beta10 && beta10 < rc1 && rc1 < release);
+        // Numeric counters compare numerically, not lexically.
+        assert!(beta9 < beta10);
+        // Round-trips through Display.
+        assert_eq!(beta10.to_string(), "0.267.2-beta.10");
+        assert_eq!(release.to_string(), "0.267.2");
+        assert!(beta1.is_prerelease() && !release.is_prerelease());
     }
 
     #[test]

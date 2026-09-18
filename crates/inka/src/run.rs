@@ -90,6 +90,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
             "--fetch" => {
                 f.fetch = true;
             }
+            "--beta" => {
+                f.beta = true;
+            }
             "-q" | "--quiet" | "-v" | "--verbose" => {
                 ui::apply_verbosity_flag(a);
             }
@@ -124,8 +127,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
 }
 
 /// Choose the runtime .so: newest installed, or an exact --runtime <ver>.
-/// Only option tokens before the file (or before `--`) are considered.
-fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
+/// Only option tokens before the file (or before `--`) are considered. A
+/// prerelease tuple is only eligible when `beta` (the beta channel) is set.
+fn choose_runtime(args: &[String], beta: bool) -> (PathBuf, Option<Version>) {
     let dirs = crate::runtime_search_dirs();
     let runtimes = crate::installed_parts_all(&dirs);
     let mut i = 0;
@@ -160,7 +164,11 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
         }
         i += 1;
     }
-    match runtimes.last() {
+    let selected = runtimes
+        .iter()
+        .filter(|(v, _)| !v.is_prerelease() || beta)
+        .max_by_key(|(v, _)| *v);
+    match selected {
         Some((v, p)) => (p.clone(), Some(*v)),
         None => {
             let searched = dirs
@@ -168,9 +176,15 @@ fn choose_runtime(args: &[String]) -> (PathBuf, Option<Version>) {
                 .map(|d| d.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            fail(&format!(
-                "no runtime installed (searched: {searched}); run `inka update` first"
-            ))
+            if beta {
+                fail(&format!(
+                    "no runtime installed (searched: {searched}); run `inka update --beta` first"
+                ))
+            } else {
+                fail(&format!(
+                    "no runtime installed (searched: {searched}); run `inka update` first"
+                ))
+            }
         }
     }
 }
@@ -418,7 +432,7 @@ pub(crate) fn cmd_run(args: &[String]) {
         }
     }
 
-    let (lib, chosen) = choose_runtime(args);
+    let (lib, chosen) = choose_runtime(args, flags.beta || crate::env_is_beta());
     ui::debug(format!(
         "running {} in {} with runtime {}",
         entry,

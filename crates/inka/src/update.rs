@@ -102,11 +102,58 @@ impl Drop for TempDir {
     }
 }
 
-fn resolve_base(from: Option<String>) -> String {
-    from.or_else(|| env::var("INKA_RELEASE_BASE").ok())
+fn resolve_base(from: Option<String>, beta: bool) -> Result<String, String> {
+    if let Some(b) = from
+        .or_else(|| env::var("INKA_RELEASE_BASE").ok())
         .or_else(|| env::var("INKA_RT_SOURCE").ok())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| DEFAULT_CHANNEL.to_string())
+    {
+        return Ok(b);
+    }
+    if beta {
+        return beta_base();
+    }
+    Ok(DEFAULT_CHANNEL.to_string())
+}
+
+/// The canonical owner/repo, overridable with `INKA_REPO`.
+const DEFAULT_REPO: &str = "Cantor-Industries/inka";
+
+fn repo() -> String {
+    env::var("INKA_REPO")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_REPO.to_string())
+}
+
+/// The download base of the newest published beta release: query the GitHub
+/// Releases API and take the newest prerelease with a `-beta.`/`-rc.` tag. Set
+/// `INKA_GITHUB_TOKEN` (or `GITHUB_TOKEN`) to raise the API rate limit.
+fn beta_base() -> Result<String, String> {
+    let repo = repo();
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
+    let body = crate::fetch_url(&url)
+        .map_err(|e| format!("cannot query the beta channel for {repo}: {e}"))?;
+    let releases: Value = serde_json::from_str(&body)
+        .map_err(|e| format!("invalid GitHub releases response from {repo}: {e}"))?;
+    let tag =
+        latest_beta_tag(&releases).ok_or_else(|| format!("no beta release found for {repo}"))?;
+    Ok(format!("https://github.com/{repo}/releases/download/{tag}"))
+}
+
+/// The tag of the newest beta from a GitHub `releases` array (newest first): the
+/// first prerelease whose tag carries a `-beta.`/`-rc.` suffix.
+fn latest_beta_tag(releases: &Value) -> Option<String> {
+    releases.as_array().and_then(|arr| {
+        arr.iter().find_map(|r| {
+            let pre = r
+                .get("prerelease")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let tag = r.get("tag_name").and_then(Value::as_str)?;
+            (pre && (tag.contains("-beta.") || tag.contains("-rc."))).then(|| tag.to_string())
+        })
+    })
 }
 
 /// Where this update writes the engine: `--home`, else `INKA_RUNTIME_HOME`, else
@@ -156,6 +203,7 @@ pub(crate) fn cmd_update(args: &[String]) {
     let mut home = None;
     let mut toolchain = ToolchainMode::Auto;
     let mut components = Components::default();
+    let mut beta = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -167,6 +215,7 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--no-toolchain" => toolchain = ToolchainMode::Skip,
             "--toolchain-only" => toolchain = ToolchainMode::Only,
             "--no-runtime" => components.runtime = false,
+            "--beta" => beta = true,
             "-q" | "--quiet" | "-v" | "--verbose" => {
                 ui::apply_verbosity_flag(a);
             }
@@ -188,7 +237,11 @@ pub(crate) fn cmd_update(args: &[String]) {
         }
     }
 
-    let base = resolve_base(from);
+    let beta = beta || crate::env_is_beta();
+    let base = match resolve_base(from, beta) {
+        Ok(b) => b,
+        Err(e) => fail(&e),
+    };
     ui::title("update");
     match version {
         Some(v) => update_pinned(
@@ -199,8 +252,16 @@ pub(crate) fn cmd_update(args: &[String]) {
             home.as_deref(),
             &components,
             toolchain,
+            beta,
         ),
-        None => update_latest(&base, insecure, home.as_deref(), &components, toolchain),
+        None => update_latest(
+            &base,
+            insecure,
+            home.as_deref(),
+            &components,
+            toolchain,
+            beta,
+        ),
     }
 }
 
@@ -225,16 +286,27 @@ fn installed_toolchain_version(dir: &Path) -> String {
 /// Fetch `versions.json` and self-update the installer-managed toolchain when a
 /// newer release is available. No-op (Ok) when there is no `VERSION` marker or
 /// the release carries no `toolchain` metadata. Never downgrades.
-fn update_toolchain(base: &str, insecure: bool) -> Result<bool, String> {
+fn update_toolchain(base: &str, insecure: bool, beta: bool) -> Result<bool, String> {
     let versions_text = fetch_text(base, "versions.json")
         .map_err(|e| format!("cannot read versions.json from {base}: {e}"))?;
     let v: Value = serde_json::from_str(&versions_text)
         .map_err(|e| format!("invalid versions.json from {base}: {e}"))?;
-    update_toolchain_from(&v, base, insecure)
+    update_toolchain_from(&v, base, insecure, beta || versions_channel_beta(&v))
+}
+
+/// `true` when a `versions.json` declares the beta channel. Lets `--from`/env
+/// (mirrors, CI staging) honor the staged channel without an explicit `--beta`.
+fn versions_channel_beta(v: &Value) -> bool {
+    v.get("channel").and_then(Value::as_str) == Some("beta")
 }
 
 /// Toolchain self-update against an already-parsed `versions.json`.
-fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, String> {
+fn update_toolchain_from(
+    v: &Value,
+    base: &str,
+    insecure: bool,
+    beta: bool,
+) -> Result<bool, String> {
     let Some(dir) = toolchain_dir() else {
         return Ok(false);
     };
@@ -257,15 +329,14 @@ fn update_toolchain_from(v: &Value, base: &str, insecure: bool) -> Result<bool, 
     }
 
     ui::section("Toolchain");
-    if let (Some(i), Some(l)) = (parse_version(&installed), parse_version(latest)) {
-        if i >= l {
-            ui::ok(
-                "toolchain",
-                format!("{installed} is current (latest {latest})"),
-            );
-            return Ok(false);
-        }
-    } else if installed == latest {
+    // Channel-scoped currency: a stable install only counts for the stable
+    // channel, a prerelease only for the beta channel. A beta install is
+    // therefore replaced when the stable channel is requested, and vice versa.
+    let up_to_date = match (parse_version(&installed), parse_version(latest)) {
+        (Some(i), Some(l)) => i.is_prerelease() == beta && i >= l,
+        _ => installed == latest,
+    };
+    if up_to_date {
         ui::ok(
             "toolchain",
             format!("{installed} is current (latest {latest})"),
@@ -360,22 +431,28 @@ fn toolchain_warn(e: String) -> bool {
 
 /// Best-effort toolchain self-update used by both update paths. Returns whether
 /// the toolchain was actually replaced.
-fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode) -> bool {
+fn maybe_update_toolchain(base: &str, insecure: bool, mode: ToolchainMode, beta: bool) -> bool {
     if mode == ToolchainMode::Skip {
         return false;
     }
-    match update_toolchain(base, insecure) {
+    match update_toolchain(base, insecure, beta) {
         Ok(changed) => changed,
         Err(e) => toolchain_warn(e),
     }
 }
 
 /// As `maybe_update_toolchain`, against an already-parsed `versions.json`.
-fn maybe_update_toolchain_from(v: &Value, base: &str, insecure: bool, mode: ToolchainMode) -> bool {
+fn maybe_update_toolchain_from(
+    v: &Value,
+    base: &str,
+    insecure: bool,
+    mode: ToolchainMode,
+    beta: bool,
+) -> bool {
     if mode == ToolchainMode::Skip {
         return false;
     }
-    match update_toolchain_from(v, base, insecure) {
+    match update_toolchain_from(v, base, insecure, beta) {
         Ok(changed) => changed,
         Err(e) => toolchain_warn(e),
     }
@@ -402,6 +479,7 @@ fn update_latest(
     home: Option<&str>,
     components: &Components,
     toolchain: ToolchainMode,
+    beta: bool,
 ) {
     let versions_text = match fetch_text(base, "versions.json") {
         Ok(s) => s,
@@ -409,8 +487,11 @@ fn update_latest(
     };
     let v: Value = serde_json::from_str(&versions_text)
         .unwrap_or_else(|e| fail(&format!("invalid versions.json from {base}: {e}")));
+    // The staged channel is authoritative for `--from`/env bases, so a beta
+    // staging mirror is treated as current without requiring `--beta`.
+    let beta = beta || versions_channel_beta(&v);
 
-    let mut changed = maybe_update_toolchain_from(&v, base, insecure, toolchain);
+    let mut changed = maybe_update_toolchain_from(&v, base, insecure, toolchain, beta);
     if toolchain == ToolchainMode::Only {
         return;
     }
@@ -432,7 +513,14 @@ fn update_latest(
         None => crate::runtime_search_dirs(),
     };
     let runtimes = crate::installed_parts_all(&search);
-    let installed_runtime = runtimes.last().map(|(ver, _)| *ver);
+    // Channel-scoped currency: compare against the newest installed tuple of the
+    // same channel, so the beta channel can install a prerelease even when a
+    // same-base stable is present, and the stable channel never picks a beta.
+    let installed_runtime = runtimes
+        .iter()
+        .filter(|(ver, _)| ver.is_prerelease() == beta)
+        .map(|(ver, _)| *ver)
+        .max();
 
     let actions = plan_actions(installed_runtime, latest_runtime);
 
@@ -540,6 +628,7 @@ fn install_file(
 
 // ---- pinned -----------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn update_pinned(
     base: &str,
     version_str: &str,
@@ -548,14 +637,18 @@ fn update_pinned(
     home: Option<&str>,
     components: &Components,
     toolchain: ToolchainMode,
+    beta: bool,
 ) {
-    maybe_update_toolchain(base, insecure, toolchain);
+    maybe_update_toolchain(base, insecure, toolchain, beta);
     if toolchain == ToolchainMode::Only {
         return;
     }
 
-    let ver = parse_version(version_str)
-        .unwrap_or_else(|| fail(&format!("'{version_str}' is not a valid x.y.z version")));
+    let ver = parse_version(version_str).unwrap_or_else(|| {
+        fail(&format!(
+            "'{version_str}' is not a valid version (x.y.z or x.y.z-beta.N)"
+        ))
+    });
     let target = target_dir(home);
     ensure_dir(&target);
 
@@ -614,24 +707,24 @@ mod tests {
 
     #[test]
     fn plan_installs_when_nothing_installed() {
-        let a = plan_actions(None, Version(0, 266, 1));
+        let a = plan_actions(None, Version::new(0, 266, 1));
         assert_eq!(a, Actions { runtime: true });
     }
 
     #[test]
     fn plan_skips_when_current_or_newer() {
-        let a = plan_actions(Some(Version(0, 266, 1)), Version(0, 266, 1));
+        let a = plan_actions(Some(Version::new(0, 266, 1)), Version::new(0, 266, 1));
         assert_eq!(a, Actions { runtime: false });
 
         // Never downgrade: installed newer than the release.
-        let b = plan_actions(Some(Version(0, 270, 0)), Version(0, 266, 1));
+        let b = plan_actions(Some(Version::new(0, 270, 0)), Version::new(0, 266, 1));
         assert_eq!(b, Actions { runtime: false });
     }
 
     #[test]
     fn plan_installs_when_stale() {
         // The base tuple (0.266.0) is behind an inka revision (0.266.1).
-        let a = plan_actions(Some(Version(0, 266, 0)), Version(0, 266, 1));
+        let a = plan_actions(Some(Version::new(0, 266, 0)), Version::new(0, 266, 1));
         assert!(a.runtime);
     }
 
@@ -680,5 +773,50 @@ mod tests {
             assert!(p.is_dir());
         }
         assert!(!p.exists(), "TempDir should clean up on drop");
+    }
+
+    #[test]
+    fn latest_beta_tag_picks_newest_prerelease() {
+        let releases = serde_json::json!([
+            {"tag_name": "v0.9.0", "prerelease": false},
+            {"tag_name": "v0.8.1-beta.2-abc", "prerelease": true},
+            {"tag_name": "v0.8.1-beta.1-def", "prerelease": true},
+            {"tag_name": "v0.8.0", "prerelease": false},
+        ]);
+        assert_eq!(
+            latest_beta_tag(&releases).as_deref(),
+            Some("v0.8.1-beta.2-abc")
+        );
+        // No prerelease -> None.
+        let stable = serde_json::json!([{"tag_name": "v0.9.0", "prerelease": false}]);
+        assert_eq!(latest_beta_tag(&stable), None);
+        // A prerelease without a beta/rc suffix is ignored.
+        let odd = serde_json::json!([{"tag_name": "v0.9.0-nightly", "prerelease": true}]);
+        assert_eq!(latest_beta_tag(&odd), None);
+    }
+
+    #[test]
+    fn plan_actions_handles_prerelease() {
+        let beta = parse_version("0.267.2-beta.1").unwrap();
+        let release = parse_version("0.267.2").unwrap();
+        assert!(plan_actions(None, beta).runtime);
+        // A prerelease is older than its release, so a release upgrade applies.
+        assert!(plan_actions(Some(beta), release).runtime);
+        // And a release already supersedes an earlier beta.
+        assert!(!plan_actions(Some(release), beta).runtime);
+    }
+
+    #[test]
+    fn versions_channel_is_detected() {
+        assert!(versions_channel_beta(
+            &serde_json::json!({"channel": "beta"})
+        ));
+        assert!(!versions_channel_beta(
+            &serde_json::json!({"channel": "stable"})
+        ));
+        // Older releases have no channel field.
+        assert!(!versions_channel_beta(
+            &serde_json::json!({"release": "0.8.0"})
+        ));
     }
 }

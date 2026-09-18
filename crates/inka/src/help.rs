@@ -158,6 +158,7 @@ pub(crate) fn top() -> &'static Help {
                 "override the per-user runtime directory",
             ),
             ("DENO_DIR", "Deno cache for jsr:/remote (must be absolute)"),
+            ("INKA_CHANNEL", "release channel: stable (default) or beta"),
             ("INKA_LAUNCHER", "path to inka-launcher for `build`"),
             ("INK_LOG", "log level: error|warn|info|debug|trace"),
             ("INK_LOG_STYLE", "color: auto (default), always, never"),
@@ -221,6 +222,10 @@ pub(crate) fn build() -> &'static Help {
                 "anchor relative read/write grants (default cwd)",
             ),
             ("--fetch", "fetch jsr:/remote deps into the Deno cache"),
+            (
+                "--beta",
+                "build for the beta channel (channel=beta in the manifest)",
+            ),
             ("-h, --help", "show this help"),
         ],
         permissions: &[
@@ -267,6 +272,7 @@ pub(crate) fn run() -> &'static Help {
                 "anchor relative read/write grants (default cwd)",
             ),
             ("--fetch", "fetch missing jsr:/remote deps before running"),
+            ("--beta", "use a prerelease (beta) runtime tuple"),
             ("--", "end of options (the file may start with '-')"),
             ("-h, --help", "show this help"),
         ],
@@ -328,10 +334,15 @@ pub(crate) fn update() -> &'static Help {
             ("--no-toolchain", "do not touch the toolchain"),
             ("--toolchain-only", "only update the toolchain"),
             ("--no-runtime", "skip the runtime"),
+            ("--beta", "install the newest beta (toolchain + runtime)"),
             ("-h, --help", "show this help"),
         ],
         permissions: &[],
-        examples: &["inka update", "inka update 0.266.7 --from <base>"],
+        examples: &[
+            "inka update",
+            "inka update --beta",
+            "inka update 0.266.7 --from <base>",
+        ],
         env: &[],
     }
 }
@@ -348,6 +359,7 @@ pub(crate) fn doctor() -> &'static Help {
         )],
         options: &[
             ("--json", "machine-readable output (artifact mode)"),
+            ("--beta", "show/select the beta channel"),
             ("-h, --help", "show this help"),
         ],
         permissions: &[],

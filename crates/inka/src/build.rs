@@ -98,6 +98,7 @@ pub fn cmd_build(args: &[String]) {
                 external.push(a["--external=".len()..].to_string())
             }
             "--embed-dir" => embed_dir = true,
+            "--beta" => perm_flags.beta = true,
             "--fetch" => perm_flags.fetch = true,
             "--path-base" => perm_flags.path_base = Some(next_str(&mut it, a)),
             _ if a.starts_with("--path-base=") => {
@@ -196,6 +197,11 @@ pub fn cmd_build(args: &[String]) {
     let mut manifest_bytes = manifest_bytes;
     if let Some(pb) = &perm_flags.path_base {
         manifest_set_key(&mut manifest_bytes, "path-base", pb);
+    }
+    if perm_flags.beta || crate::env_is_beta() {
+        // Opt the artifact into the beta channel so the launcher may select a
+        // prerelease runtime tuple. Stable artifacts never do.
+        manifest_set_key(&mut manifest_bytes, "channel", "beta");
     }
     for w in &manifest_warnings {
         ui::warn(w);

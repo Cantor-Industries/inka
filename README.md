@@ -38,6 +38,11 @@ it's clean, you're ready.
 > Newer runtime versions are fine — inka rolls forward to the newest installed
 > tuple that satisfies each executable's manifest. Keep current with `inka
 > update` (toolchain + runtime).
+>
+> **Beta builds:** `inka update --beta` (or `install.sh --beta`) installs the
+> newest prerelease. Prerelease runtime tuples are only used by
+> `inka run --beta`, `inka build --beta`, or `INKA_CHANNEL=beta`; a stable
+> release supersedes every beta of the same version.
 
 ### Building from source (macOS and other platforms)
 

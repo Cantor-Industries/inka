@@ -386,6 +386,19 @@ fn warn_if_world_writable(dir: &Path) {
 fn warn_if_world_writable(_dir: &Path) {}
 
 fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
+    // Beta engineering tuples (`-beta.N`/`-rc.N`) are only eligible when the
+    // artifact or environment opts into the beta channel. A stable artifact
+    // therefore never rolls forward onto an installed prerelease runtime.
+    let allow_prerelease = m.channel.as_deref() == Some("beta") || beta_channel_env();
+    resolve_runtime_with(m, dirs, allow_prerelease)
+}
+
+/// `resolve_runtime` with an explicit prerelease policy (testable without env).
+fn resolve_runtime_with(
+    m: &Manifest,
+    dirs: &[PathBuf],
+    allow_prerelease: bool,
+) -> Option<(Version, PathBuf)> {
     let mut best: Option<(Version, PathBuf)> = None;
     for dir in dirs {
         if !dir.is_dir() {
@@ -409,6 +422,9 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
             let Some(v) = parse_version(vstr) else {
                 continue;
             };
+            if v.is_prerelease() && !allow_prerelease {
+                continue;
+            }
             if !constraint_allows(m, v) {
                 continue;
             }
@@ -418,6 +434,13 @@ fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)>
         }
     }
     best
+}
+
+/// `INKA_CHANNEL=beta` opts an invocation into prerelease runtime tuples.
+fn beta_channel_env() -> bool {
+    std::env::var("INKA_CHANNEL")
+        .map(|v| v.eq_ignore_ascii_case("beta"))
+        .unwrap_or(false)
 }
 
 fn required_string(m: &Manifest) -> String {
@@ -788,9 +811,13 @@ mod tests {
     #[test]
     fn reported_version_must_match_filename() {
         let lib = Path::new("/x/libinka_runtime-0.266.2.so");
-        assert!(check_reported_version(lib, "inka_runtime-0.266.2", Version(0, 266, 2)).is_ok());
-        assert!(check_reported_version(lib, "inka_runtime-0.266.3", Version(0, 266, 2)).is_err());
-        assert!(check_reported_version(lib, "garbage", Version(0, 266, 2)).is_err());
+        assert!(
+            check_reported_version(lib, "inka_runtime-0.266.2", Version::new(0, 266, 2)).is_ok()
+        );
+        assert!(
+            check_reported_version(lib, "inka_runtime-0.266.3", Version::new(0, 266, 2)).is_err()
+        );
+        assert!(check_reported_version(lib, "garbage", Version::new(0, 266, 2)).is_err());
     }
 
     #[test]
@@ -808,5 +835,35 @@ mod tests {
             missing_features(&req(&["raw-cjs"]), ""),
             vec!["raw-cjs".to_string()]
         );
+    }
+
+    #[test]
+    fn resolve_runtime_skips_prerelease_unless_allowed() {
+        let base = std::env::temp_dir().join(format!("inka-launcher-pre-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        for name in [
+            "libinka_runtime-0.267.1.so",
+            "libinka_runtime-0.267.2-beta.1.so",
+        ] {
+            fs::write(base.join(name), b"x").unwrap();
+        }
+        let dirs = vec![base.clone()];
+        let m = parse_manifest(b"module=main.js\n");
+
+        // Stable selection skips the prerelease tuple.
+        let (v, _) = resolve_runtime_with(&m, &dirs, false).unwrap();
+        assert_eq!(v, Version::new(0, 267, 1));
+
+        // Beta opt-in selects the newer prerelease.
+        let (v, _) = resolve_runtime_with(&m, &dirs, true).unwrap();
+        assert_eq!(v, parse_version("0.267.2-beta.1").unwrap());
+
+        // A stable release always wins over a beta of the same base.
+        fs::write(base.join("libinka_runtime-0.267.2.so"), b"x").unwrap();
+        let (v, _) = resolve_runtime_with(&m, &dirs, true).unwrap();
+        assert_eq!(v, Version::new(0, 267, 2));
+
+        let _ = fs::remove_dir_all(&base);
     }
 }
