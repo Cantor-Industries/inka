@@ -70,9 +70,14 @@ beta that changes the engine carries a prerelease runtime tuple
 Install the newest beta (toolchain + runtime):
 
 ```sh
+# The `--beta` flag exists in the 0.8.1+ installer. From an older (stable)
+# installer, use the beta release's own installer or an exact tag:
 curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh -s -- --beta
-# or, already installed:
+  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh \
+  | sh -s -- --version v0.8.1-beta.2-49efc7f
+# Once 0.8.1+ is the latest stable, the flag form works:
+#   .../releases/latest/download/install.sh | sh -s -- --beta
+# or, already installed (any 0.8.1+ toolchain):
 inka update --beta
 ```
 
@@ -89,11 +94,14 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 `GITHUB_TOKEN`) if you hit the unauthenticated rate limit. `--from` and
 `INKA_RELEASE_BASE` still override the channel (useful for mirrors/staging).
 
-**Prerelease runtime tuples are excluded from normal selection.** Opt an
-invocation in with `inka build --beta` (records `channel=beta` in the artifact),
-`inka run --beta`, or `INKA_CHANNEL=beta`. Running plain `inka update` returns
-the toolchain and runtime to the stable channel; the eventual stable release
-supersedes every beta of the same base.
+**The installed toolchain's channel is the default.** A beta toolchain selects
+prerelease runtime tuples for `run`/`build`/`doctor` and `inka update` stays on
+beta; a stable toolchain never picks a beta runtime. `--beta`/`--stable` (and
+`INKA_CHANNEL=beta`/`stable`) override the default, but **`--beta` is refused on
+a stable release** — `inka update --beta` is the channel switcher. `install.sh`
+(which is always the stable installer) deliberately returns an install to stable;
+plain `inka update` does not. The eventual stable release supersedes every beta
+of the same base.
 
 `install.sh --help` lists everything.
 
@@ -127,7 +135,9 @@ inka build app.ts         # -> ./app  (manifest derived from config, deny-by-def
 ## Upgrade
 
 ```sh
-inka update               # toolchain + runtime, newest
+inka update               # toolchain + runtime, following the toolchain channel
+inka update --beta        # switch to the beta channel (toolchain + runtime)
+inka update --stable      # return to the stable channel
 inka update <ver> --from <base>   # a specific runtime tuple (offline/pinned)
 ```
 
@@ -200,11 +210,17 @@ This removes the toolchain, the `PATH` block, and `~/.local/share/inka`
 Two independent version lines:
 
 - **Toolchain** — the release tag (`v0.4.0`); the `inka` crate version tracks it.
+  A beta is `v<base>-beta.<n>-<short-hash>`, released as a GitHub prerelease.
 - **Runtime tuple** — the `deno_runtime` base (`0.xxx.0`) plus an inka runtime
   revision: `0.267.0` → `0.267.1`, …; when the base moves to
   `0.268.0`, revisions restart at `0.268.1`. Beta engine builds carry a
   prerelease suffix (`0.267.2-beta.1`, ordered before the final `0.267.2`). See
   `crates/inka-runtime/runtime-version`.
+
+The two counters are **independent**: the toolchain release counter
+(`0.8.1-beta.N`) advances per toolchain beta, while the runtime tuple counter
+(`X.Y.Z-beta.N`) advances only when the engine changes. `rc` prereleases map to
+the beta channel.
 
 Artifacts roll forward to the newest installed runtime tuple that satisfies
 their manifest, so a runtime upgrade never requires rebuilding artifacts.

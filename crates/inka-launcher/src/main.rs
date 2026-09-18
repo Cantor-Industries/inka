@@ -387,10 +387,10 @@ fn warn_if_world_writable(_dir: &Path) {}
 
 fn resolve_runtime(m: &Manifest, dirs: &[PathBuf]) -> Option<(Version, PathBuf)> {
     // Beta engineering tuples (`-beta.N`/`-rc.N`) are only eligible when the
-    // artifact or environment opts into the beta channel. A stable artifact
-    // therefore never rolls forward onto an installed prerelease runtime.
-    let allow_prerelease = m.channel.as_deref() == Some("beta") || beta_channel_env();
-    resolve_runtime_with(m, dirs, allow_prerelease)
+    // artifact opts in (`channel=beta` or a prerelease version slot) or the
+    // environment opts in. A stable artifact therefore never rolls forward onto
+    // an installed prerelease runtime.
+    resolve_runtime_with(m, dirs, m.wants_prerelease() || beta_channel_env())
 }
 
 /// `resolve_runtime` with an explicit prerelease policy (testable without env).
@@ -622,9 +622,13 @@ fn load_and_run_dir(
     }
 }
 
+/// The baked release version, else the crate version for a dev build.
+fn release_version() -> &'static str {
+    option_env!("INKA_BUILD_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
-
     let me = fs::read_link("/proc/self/exe").expect("read /proc/self/exe");
     let bytes = fs::read(&me).expect("read own executable");
 
@@ -638,7 +642,7 @@ fn main() {
                 args.first().map(String::as_str),
                 Some("--version") | Some("-V")
             ) {
-                println!("inka-launcher {}", env!("CARGO_PKG_VERSION"));
+                println!("inka-launcher {}", release_version());
                 std::process::exit(0);
             }
             error(&e);
@@ -805,6 +809,33 @@ mod tests {
         // Zero threshold makes the (just created) marker-less tree "old".
         sweep_stale_temp_trees_at(&base, std::time::Duration::ZERO);
         assert!(!old.exists(), "old marker-less tree must be reaped");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn wants_prerelease_admits_beta_without_channel_key() {
+        let base = std::env::temp_dir().join(format!("inka-launcher-want-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        for name in [
+            "libinka_runtime-0.267.1.so",
+            "libinka_runtime-0.267.2-beta.1.so",
+        ] {
+            fs::write(base.join(name), b"x").unwrap();
+        }
+        let dirs = vec![base.clone()];
+        // A prerelease runtime constraint (no `channel=beta`) opts the artifact in.
+        let m = parse_manifest(b"runtime=inka_runtime>=0.267.2-beta.1\n");
+        assert!(m.wants_prerelease());
+        let (v, _) = resolve_runtime_with(&m, &dirs, m.wants_prerelease()).unwrap();
+        assert_eq!(v, parse_version("0.267.2-beta.1").unwrap());
+
+        // A stable constraint does not.
+        let stable = parse_manifest(b"runtime=inka_runtime>=0.267.0\n");
+        assert!(!stable.wants_prerelease());
+        let (v, _) = resolve_runtime_with(&stable, &dirs, stable.wants_prerelease()).unwrap();
+        assert_eq!(v, Version::new(0, 267, 1));
+
         let _ = fs::remove_dir_all(&base);
     }
 

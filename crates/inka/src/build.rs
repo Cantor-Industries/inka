@@ -99,6 +99,7 @@ pub fn cmd_build(args: &[String]) {
             }
             "--embed-dir" => embed_dir = true,
             "--beta" => perm_flags.beta = true,
+            "--stable" => perm_flags.stable = true,
             "--fetch" => perm_flags.fetch = true,
             "--path-base" => perm_flags.path_base = Some(next_str(&mut it, a)),
             _ if a.starts_with("--path-base=") => {
@@ -198,7 +199,18 @@ pub fn cmd_build(args: &[String]) {
     if let Some(pb) = &perm_flags.path_base {
         manifest_set_key(&mut manifest_bytes, "path-base", pb);
     }
-    if perm_flags.beta || crate::env_is_beta() {
+    // Channel: the effective channel (flag -> env -> toolchain) opts the
+    // artifact into beta on a beta toolchain, and a prerelease runtime or
+    // tested-against spec opts it in on its own. `--beta` on a stable release is
+    // refused by `resolve_or_exit`.
+    let requested = match crate::channel::flag_request(perm_flags.beta, perm_flags.stable) {
+        Ok(r) => r,
+        Err(e) => usage_err(&e),
+    };
+    let effective = crate::channel::resolve_or_exit(requested);
+    if effective == crate::channel::Channel::Beta
+        || inka_format::parse_manifest(&manifest_bytes).wants_prerelease()
+    {
         // Opt the artifact into the beta channel so the launcher may select a
         // prerelease runtime tuple. Stable artifacts never do.
         manifest_set_key(&mut manifest_bytes, "channel", "beta");

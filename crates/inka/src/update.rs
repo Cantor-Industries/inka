@@ -126,34 +126,79 @@ fn repo() -> String {
         .unwrap_or_else(|| DEFAULT_REPO.to_string())
 }
 
+/// Decide the update channel: an explicit flag/env channel wins; with a base
+/// override (`--from`/env) and no explicit channel, defer to the staged
+/// `versions.json.channel` (handled by the caller's `|| versions_channel_beta`);
+/// otherwise follow the toolchain channel so a beta install never downgrades.
+fn default_update_beta(
+    explicit: Option<crate::channel::Channel>,
+    base_override: bool,
+    toolchain: crate::channel::Channel,
+) -> bool {
+    match explicit {
+        Some(crate::channel::Channel::Beta) => true,
+        Some(crate::channel::Channel::Stable) => false,
+        _ => !base_override && toolchain == crate::channel::Channel::Beta,
+    }
+}
+
 /// The download base of the newest published beta release: query the GitHub
 /// Releases API and take the newest prerelease with a `-beta.`/`-rc.` tag. Set
 /// `INKA_GITHUB_TOKEN` (or `GITHUB_TOKEN`) to raise the API rate limit.
 fn beta_base() -> Result<String, String> {
     let repo = repo();
-    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=30");
-    let body = crate::fetch_url(&url)
-        .map_err(|e| format!("cannot query the beta channel for {repo}: {e}"))?;
+    let url = format!("https://api.github.com/repos/{repo}/releases?per_page=100");
+    let body = crate::fetch_url(&url).map_err(|e| {
+        format!(
+            "cannot query the beta channel for {repo}: {e}\n  \
+             if this is a rate limit, set INKA_GITHUB_TOKEN (or GITHUB_TOKEN)"
+        )
+    })?;
     let releases: Value = serde_json::from_str(&body)
         .map_err(|e| format!("invalid GitHub releases response from {repo}: {e}"))?;
     let tag =
         latest_beta_tag(&releases).ok_or_else(|| format!("no beta release found for {repo}"))?;
     Ok(format!("https://github.com/{repo}/releases/download/{tag}"))
 }
-
-/// The tag of the newest beta from a GitHub `releases` array (newest first): the
-/// first prerelease whose tag carries a `-beta.`/`-rc.` suffix.
+/// The orderable `-beta.N`/`-rc.N` version from a release tag, or `None`. Strips
+/// a leading `v` and, when the tag does not parse as-is, one trailing
+/// `-<short-hash>` segment (release tags are `v<base>-beta.<n>-<hash>`), and
+/// accepts only prereleases.
+fn tag_prerelease_version(tag: &str) -> Option<Version> {
+    let core = tag.strip_prefix('v').unwrap_or(tag);
+    if let Some(v) = parse_version(core) {
+        return v.is_prerelease().then_some(v);
+    }
+    match core.rsplit_once('-') {
+        Some((head, _hash)) => parse_version(head).and_then(|v| v.is_prerelease().then_some(v)),
+        None => None,
+    }
+}
+/// The tag of the newest beta from a GitHub `releases` array: the prerelease
+/// whose tag carries `-beta.`/`-rc.` with the greatest orderable version. Does
+/// not rely on API ordering; ignores stable releases and other prereleases.
 fn latest_beta_tag(releases: &Value) -> Option<String> {
-    releases.as_array().and_then(|arr| {
-        arr.iter().find_map(|r| {
-            let pre = r
-                .get("prerelease")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            let tag = r.get("tag_name").and_then(Value::as_str)?;
-            (pre && (tag.contains("-beta.") || tag.contains("-rc."))).then(|| tag.to_string())
-        })
-    })
+    let arr = releases.as_array()?;
+    let mut best: Option<(Version, String)> = None;
+    for r in arr {
+        if !r
+            .get("prerelease")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            continue;
+        }
+        let Some(tag) = r.get("tag_name").and_then(Value::as_str) else {
+            continue;
+        };
+        let Some(v) = tag_prerelease_version(tag) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(bv, _)| v > *bv) {
+            best = Some((v, tag.to_string()));
+        }
+    }
+    best.map(|(_, t)| t)
 }
 
 /// Where this update writes the engine: `--home`, else `INKA_RUNTIME_HOME`, else
@@ -204,6 +249,7 @@ pub(crate) fn cmd_update(args: &[String]) {
     let mut toolchain = ToolchainMode::Auto;
     let mut components = Components::default();
     let mut beta = false;
+    let mut stable = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -216,6 +262,7 @@ pub(crate) fn cmd_update(args: &[String]) {
             "--toolchain-only" => toolchain = ToolchainMode::Only,
             "--no-runtime" => components.runtime = false,
             "--beta" => beta = true,
+            "--stable" => stable = true,
             "-q" | "--quiet" | "-v" | "--verbose" => {
                 ui::apply_verbosity_flag(a);
             }
@@ -237,7 +284,24 @@ pub(crate) fn cmd_update(args: &[String]) {
         }
     }
 
-    let beta = beta || crate::env_is_beta();
+    let requested = match crate::channel::flag_request(beta, stable) {
+        Ok(r) => r,
+        Err(e) => fail(&e),
+    };
+    // A base override (`--from`/env) defers the channel to `versions.json`
+    // unless an explicit `--beta`/`--stable`/`INKA_CHANNEL` was given. Otherwise
+    // the toolchain channel is the default, so plain `inka update` on a beta
+    // toolchain does not downgrade to stable.
+    let env_base = env::var("INKA_RELEASE_BASE")
+        .ok()
+        .or_else(|| env::var("INKA_RT_SOURCE").ok())
+        .filter(|s| !s.is_empty());
+    let base_override = from.as_deref().is_some_and(|s| !s.is_empty()) || env_base.is_some();
+    let explicit = match requested {
+        Some(c) => Some(c),
+        None => crate::channel::env_channel().unwrap_or_else(|e| fail(&e)),
+    };
+    let beta = default_update_beta(explicit, base_override, crate::channel::toolchain_channel());
     let base = match resolve_base(from, beta) {
         Ok(b) => b,
         Err(e) => fail(&e),
@@ -270,14 +334,14 @@ pub(crate) fn cmd_update(args: &[String]) {
 /// Directory holding the running `inka` binary. Self-update only proceeds when a
 /// `VERSION` marker is present, so a dev build in `target/release` is never
 /// clobbered by a published toolchain.
-fn toolchain_dir() -> Option<PathBuf> {
+pub(crate) fn toolchain_dir() -> Option<PathBuf> {
     std::env::current_exe()
         .ok()?
         .parent()
         .map(Path::to_path_buf)
 }
 
-fn installed_toolchain_version(dir: &Path) -> String {
+pub(crate) fn installed_toolchain_version(dir: &Path) -> String {
     fs::read_to_string(dir.join("VERSION"))
         .map(|s| s.trim().to_string())
         .unwrap_or_default()
@@ -706,6 +770,30 @@ mod tests {
     use super::*;
 
     #[test]
+    fn update_default_follows_toolchain_without_downgrade() {
+        use crate::channel::Channel;
+        // A beta toolchain with no flag/base override stays on beta.
+        assert!(default_update_beta(None, false, Channel::Beta));
+        // A stable toolchain stays stable.
+        assert!(!default_update_beta(None, false, Channel::Stable));
+        // A dev build defaults to stable.
+        assert!(!default_update_beta(None, false, Channel::Dev));
+        // A base override defers to versions.json.channel (false here).
+        assert!(!default_update_beta(None, true, Channel::Beta));
+        // Explicit flags win over both.
+        assert!(default_update_beta(
+            Some(Channel::Beta),
+            true,
+            Channel::Stable
+        ));
+        assert!(!default_update_beta(
+            Some(Channel::Stable),
+            false,
+            Channel::Beta
+        ));
+    }
+
+    #[test]
     fn plan_installs_when_nothing_installed() {
         let a = plan_actions(None, Version::new(0, 266, 1));
         assert_eq!(a, Actions { runtime: true });
@@ -776,23 +864,53 @@ mod tests {
     }
 
     #[test]
-    fn latest_beta_tag_picks_newest_prerelease() {
+    fn latest_beta_tag_picks_max_by_version_not_api_order() {
+        // Deliberately out of order: the greatest `-beta.N` wins, not the first.
         let releases = serde_json::json!([
             {"tag_name": "v0.9.0", "prerelease": false},
             {"tag_name": "v0.8.1-beta.2-abc", "prerelease": true},
-            {"tag_name": "v0.8.1-beta.1-def", "prerelease": true},
+            {"tag_name": "v0.8.1-beta.10-def", "prerelease": true},
+            {"tag_name": "v0.8.1-beta.9-ghi", "prerelease": true},
             {"tag_name": "v0.8.0", "prerelease": false},
         ]);
         assert_eq!(
             latest_beta_tag(&releases).as_deref(),
-            Some("v0.8.1-beta.2-abc")
+            Some("v0.8.1-beta.10-def")
         );
+        // `rc` outranks `beta` of the same base.
+        let rc = serde_json::json!([
+            {"tag_name": "v0.8.1-beta.9-abc", "prerelease": true},
+            {"tag_name": "v0.8.1-rc.1-def", "prerelease": true},
+        ]);
+        assert_eq!(latest_beta_tag(&rc).as_deref(), Some("v0.8.1-rc.1-def"));
         // No prerelease -> None.
         let stable = serde_json::json!([{"tag_name": "v0.9.0", "prerelease": false}]);
         assert_eq!(latest_beta_tag(&stable), None);
         // A prerelease without a beta/rc suffix is ignored.
         let odd = serde_json::json!([{"tag_name": "v0.9.0-nightly", "prerelease": true}]);
         assert_eq!(latest_beta_tag(&odd), None);
+        // A tag without a hash suffix still parses.
+        let nohash = serde_json::json!([{"tag_name": "v0.8.1-beta.1", "prerelease": true}]);
+        assert_eq!(latest_beta_tag(&nohash).as_deref(), Some("v0.8.1-beta.1"));
+    }
+
+    #[test]
+    fn tag_prerelease_version_parses_release_tags() {
+        assert_eq!(
+            tag_prerelease_version("v0.8.1-beta.2-f97fa59"),
+            parse_version("0.8.1-beta.2")
+        );
+        assert_eq!(
+            tag_prerelease_version("v0.8.1-beta.2"),
+            parse_version("0.8.1-beta.2")
+        );
+        assert_eq!(
+            tag_prerelease_version("0.8.1-rc.3-abcdef0"),
+            parse_version("0.8.1-rc.3")
+        );
+        // Stable / non-prerelease tags carry no prerelease version.
+        assert_eq!(tag_prerelease_version("v0.9.0"), None);
+        assert_eq!(tag_prerelease_version("v0.9.0-nightly"), None);
     }
 
     #[test]

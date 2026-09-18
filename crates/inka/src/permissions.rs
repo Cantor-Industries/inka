@@ -32,9 +32,12 @@ pub(crate) struct Flags {
     /// `--fetch`: opt in to fetching remote (`jsr:`/`https:`) modules missing
     /// from the Deno cache (build/run). Not a permission.
     pub fetch: bool,
-    /// `--beta`: opt into the beta release channel (prerelease runtime tuples;
+    /// `--beta`: request the beta release channel (prerelease runtime tuples;
     /// `build` also records `channel=beta` in the manifest). Not a permission.
     pub beta: bool,
+    /// `--stable`: request the stable release channel, overriding a beta
+    /// toolchain default. Not a permission.
+    pub stable: bool,
 }
 
 impl Flags {

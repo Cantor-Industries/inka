@@ -159,7 +159,7 @@ pub(crate) fn title(name: &str) {
     println!(
         "{} {}",
         colors::bold(format!("inka {name}")),
-        colors::gray(env!("CARGO_PKG_VERSION")),
+        colors::gray(crate::channel::release_version()),
     );
 }
 

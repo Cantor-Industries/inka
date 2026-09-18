@@ -19,11 +19,12 @@ the `channel`/`base`/`tag` — cross-check these against the published assets.
 For a **beta** tag (`v<version>-beta.<n>-<short-hash>`) the GitHub Release must be
 marked *prerelease*, `versions.json.channel` must be `beta`, `release` must be the
 toolchain version (`0.8.1-beta.2`) and `tag` the exact tag. Verify it installs
-with `install.sh --beta` (newest beta) and with
-`install.sh --version v0.8.1-beta.2-<short-hash>` (this exact beta), and that a
-stable selection does **not** pick the prerelease runtime tuple
-(`inka doctor` shows it as `(beta)`; only `inka run --beta`/`channel=beta` use
-it).
+with `install.sh --beta` (newest beta; 0.8.1+ installer) and with
+`install.sh --version v0.8.1-beta.2-<short-hash>` (this exact beta, any
+installer), that `inka doctor` reports the toolchain release and `channel beta`,
+and that a stable selection does **not** pick the prerelease runtime tuple
+(`inka doctor` shows it as `(beta)`; the beta channel — toolchain default,
+`--beta`, or `channel=beta` on an artifact — is required).
 
 ## 2. The release download base
 

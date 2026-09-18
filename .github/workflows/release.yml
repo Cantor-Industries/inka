@@ -86,6 +86,10 @@ jobs:
       - name: Build toolchain
         run: |
           set -euo pipefail
+          # Bake the release identity into inka/inka-launcher so `--version` and
+          # channel defaults reflect the installed release, not the crate version.
+          export INKA_BUILD_VERSION="$REL"
+          export INKA_BUILD_COMMIT="${GITHUB_SHA:0:7}"
           cargo build --locked --release -p inka --features bundle
           cargo build --locked --release -p inka-launcher
 

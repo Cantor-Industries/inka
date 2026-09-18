@@ -1,12 +1,12 @@
 # CLI reference
 
 ```
-inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta]
-inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta] <file> [args...]
+inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta|--stable]
+inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta|--stable] <file> [args...]
 inka cache   <file>
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
-             [--no-toolchain|--toolchain-only] [--no-runtime] [--beta]
-inka doctor  [artifact] [--json] [--beta]
+             [--no-toolchain|--toolchain-only] [--no-runtime] [--beta|--stable]
+inka doctor  [artifact] [--json] [--beta|--stable]
 inka help    [command]
 inka --version, -V
 ```
@@ -18,8 +18,15 @@ self-contained module, then pack it onto the launcher with a manifest.
 Permissions bake from explicit build-intent sources — CLI flags (`-A`/`--allow-*`,
 `-P=<set>`, which override config), `deno.json` `compile.permissions`, or an
 `inka.permissions` marker in `deno.json`/`package.json`; otherwise the artifact
-is deny-by-default. `--beta` records `channel=beta` in the manifest, so the
-artifact may select a prerelease runtime tuple. See [Build](build.md).
+is deny-by-default.
+
+The **toolchain channel** decides the default: a stable release builds a stable
+artifact, a `-beta.N`/`-rc.N` release builds a beta one, and an unbaked dev build
+defaults to stable. `--beta`/`--stable` override it, and `INKA_CHANNEL` sits
+between the flag and the default. `--beta` is **refused on a stable release**
+(`run \`inka update --beta\`` to switch). A prerelease `--runtime`/
+`--tested-against` spec records `channel=beta` on its own, so the artifact may
+select a prerelease runtime tuple. See [Build](build.md).
 
 ## `run`
 
@@ -27,7 +34,10 @@ Execute a `.ts`/`.js` file through the installed runtime without building.
 Permissions are deny-by-default; `-A` allows all, `-P[=name]` applies a named
 config set, `--allow-<cat>[=list]` / `--deny-<cat>[=list]` are granular
 (`cat`: `read|write|net|env|run|sys|ffi|import`). `--runtime <ver>` picks a specific
-tuple; `--beta` uses a prerelease (beta) tuple; `--` ends options. See [Run](run.md).
+tuple; the toolchain channel selects the default tuple, with `--beta`/`--stable`
+overriding it. A prerelease tuple requires the beta channel: on a stable
+toolchain both `--beta` and a prerelease `--runtime` are refused. `--` ends
+options. See [Run](run.md).
 
 ## `cache`
 
@@ -51,25 +61,29 @@ Reconcile the toolchain and shared runtime with the release channel:
 `--no-toolchain`/`--toolchain-only` control the toolchain; `--no-runtime` skips
 the runtime.
 
-`--beta` installs the newest beta release (toolchain + runtime) instead of the
-stable channel; the beta base is resolved from the GitHub Releases API
-(`INKA_REPO`, default `Cantor-Industries/inka`). `--from`/`INKA_RELEASE_BASE`
-still override the channel. A beta install is replaced by the stable release
-when you run plain `inka update`.
+`--beta` installs the newest beta release (toolchain + runtime); `--stable`
+returns to the stable channel. `update` is the channel **switcher** and never
+refuses beta. With no flag, the channel follows the toolchain's own channel, so
+plain `inka update` on a beta toolchain stays on beta (no downgrade); an
+explicit `--from`/`INKA_RELEASE_BASE` instead defers to the staged
+`versions.json.channel` unless a flag/env channel was given. The beta base is
+resolved from the GitHub Releases API (`INKA_REPO`, default
+`Cantor-Industries/inka`).
 
 Base resolution: `--from` → `$INKA_RELEASE_BASE` → `$INKA_RT_SOURCE` → the
-built-in GitHub latest-release URL (or the newest beta with `--beta`).
-`--sha256` pins a checksum; `--insecure` skips verification; `--home <dir>` sets
-the runtime install dir. See [Install & upgrade](install-and-upgrade.md).
+built-in GitHub latest-release URL (or, for a beta toolchain / `--beta`, the
+newest beta). `--sha256` pins a checksum; `--insecure` skips verification;
+`--home <dir>` sets the runtime install dir. See
+[Install & upgrade](install-and-upgrade.md).
 
 ## `doctor`
 
-`doctor` with no argument prints a diagnostic report: installed runtimes plus
+`doctor` with no argument prints a diagnostic report: the toolchain
+(`release (short-hash)` when baked, plus its `channel`), installed runtimes plus
 project status (config files, `node_modules`, `DENO_DIR`, bundling capability,
 launcher). The report is grouped into sections with status glyphs (`✓` ok, `!`
-warning, `✗` problem), marks the newest runtime tuple as the one artifacts
-select, and prints a `hint:` for each problem. It is informational and always
-exits `0`.
+warning, `✗` problem), marks the tuple the effective channel would select, and
+prints a `hint:` for each problem. It is informational and always exits `0`.
 
 `doctor <artifact>` instead **inspects an inka executable**: its module, runtime
 floor and `tested-against` cap, `requires=`, `path-base`, baked permission
@@ -96,7 +110,7 @@ honor them.
 | `INKA_RUNTIME_HOME` | override the per-user runtime dir |
 | `DENO_DIR` | Deno cache read for `jsr:`/remote resolution (default `~/.cache/deno`); must be an absolute path — the cache is **trusted input** (cached remote/JS is loaded as code) |
 | `INKA_RELEASE_BASE` / `INKA_RT_SOURCE` | override the update channel base |
-| `INKA_CHANNEL` | `stable` (default) or `beta`; `beta` opts into prerelease runtime tuples |
+| `INKA_CHANNEL` | `stable` or `beta` (strict; an unknown value is a hard error). Sits between `--beta`/`--stable` and the toolchain default |
 | `INKA_REPO` | `owner/repo` for beta discovery (default `Cantor-Industries/inka`) |
 | `INKA_GITHUB_TOKEN` / `GITHUB_TOKEN` | token for the GitHub Releases API (raises the rate limit) |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |

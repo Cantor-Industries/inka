@@ -16,27 +16,36 @@
 ## Install this beta
 
 ```sh
-# newest beta (toolchain + runtime)
-curl --proto '=https' --tlsv1.2 -fsSL \
-  https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh | sh -s -- --beta
-
-# this exact beta, {{TAG}}
+# the exact tag (works with any installer, including the current stable one)
 curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/Cantor-Industries/inka/releases/latest/download/install.sh \
   | sh -s -- --version {{TAG}}
+
+# this release's own installer (0.8.1+; resolves the newest beta)
+curl --proto '=https' --tlsv1.2 -fsSL \
+  https://github.com/Cantor-Industries/inka/releases/download/{{TAG}}/install.sh \
+  | sh -s -- --beta
 ```
 
 Already installed? `inka update --beta` moves the toolchain and runtime to the
-newest beta; `inka update` returns to the stable channel.
+newest beta; `inka update --stable` (or re-running the stable `install.sh`)
+returns to the stable channel.
 
 ## How the beta channel works
 
 - Beta runtime tuples are named `<version>-beta.<n>` and the toolchain version
   is `{{REL}}`. The eventual stable release of the same base supersedes every
   beta, so graduation is automatic.
-- Prerelease runtime tuples are **excluded from normal selection**. Use
-  `inka build --beta` (records `channel=beta` in the artifact), `inka run
-  --beta`, or `INKA_CHANNEL=beta` to opt in.
+- **The installed toolchain's channel is the default.** A beta toolchain selects
+  prerelease runtime tuples for `run`/`build`/`doctor` and plain `inka update`
+  stays on beta (no downgrade). A stable toolchain never selects a beta runtime.
+- Override per invocation with `--beta`/`--stable` or `INKA_CHANNEL=beta`/
+  `stable` (an unknown `INKA_CHANNEL` value is a hard error). `--beta` and a
+  prerelease `--runtime` are **refused on a stable release**; `inka update
+  --beta` is the channel switcher.
+- `inka build` records `channel=beta` in the artifact when building for beta
+  (explicitly, via the toolchain channel, or via a prerelease runtime spec), so
+  the launcher may pick a prerelease tuple.
 - Beta assets carry `.sha256` sidecars and are checksum-verified on install.
 
 ## What's in this beta
@@ -48,7 +57,15 @@ newest beta; `inka update` returns to the stable channel.
   `deno_semver` (the same parser `inka build` uses) instead of failing with
   `invalid package name ''`.
 - **Beta release channel.** `inka update --beta` / `install.sh --beta` install
-  the newest beta; `inka` selects prerelease runtime tuples only when asked.
+  the newest beta. The installed toolchain's channel now drives defaults, so a
+  beta toolchain selects prerelease runtime tuples without extra flags.
+- **Accurate version output.** `inka --version`, every `ui::title`, and
+  `inka-launcher --version` now print the installed release (e.g.
+  `{{REL}}`), not the crate version; `inka doctor` shows
+  `toolchain {{REL}} (<short-hash>)` and the effective `channel`.
+- **Stable releases refuse `--beta`.** On a stable release, `--beta` (and
+  `INKA_CHANNEL=beta`) is a hard error with a hint to run `inka update --beta`.
+  Dev builds remain beta-capable with a stable default.
 
 ## Assets
 

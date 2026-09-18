@@ -189,18 +189,46 @@ fetch_url() {
     fi
 }
 
-# Resolve the download base of the newest beta release. GitHub returns releases
-# newest-first, so the first `-beta.N`/`-rc.N` tag is the latest beta. The tag
-# charset is validated before it is used in a URL.
+# Sortable key for a prerelease tag: `v0.8.1-beta.2-<hash>` -> a zero-padded
+# key where lexical order matches version order (`0.9.0` > `0.8.10`). Empty when
+# the tag is not a `beta.N`/`rc.N` prerelease. `rc` sorts after `beta`.
+beta_sort_key() {
+    printf '%s' "$1" \
+        | sed -E 's/^v?//; s/-[0-9A-Fa-f]{7,}$//' \
+        | awk -F'[-.]' '
+            NF >= 5 && ($4 == "beta" || $4 == "rc") && $1 ~ /^[0-9]+$/ \
+              && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ && $5 ~ /^[0-9]+$/ {
+                printf "%010d.%010d.%010d.%d.%010d", $1, $2, $3, ($4 == "rc"), $5
+            }'
+}
+
+# Resolve the download base of the newest beta release. Collects every
+# `-beta.N`/`-rc.N` tag, orders them by version (never trusting API order), and
+# returns the first candidate whose assets are actually present, falling back to
+# the next newest if a tag is missing its release. The tag charset is validated
+# before it is used in a URL.
 resolve_beta_base() {
-    _body="$(fetch_url "https://api.github.com/repos/$REPO/releases?per_page=30" 2>/dev/null)" || return 1
-    _tag="$(printf '%s\n' "$_body" \
-        | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9][^"]*-(beta|rc)\.[^"]*"' \
-        | sed -E 's/.*"([^"]*)"$/\1/' | head -1)"
-    case "$_tag" in
-        ""|*[!0-9A-Za-z.+~-]*) return 1 ;;
-    esac
-    printf '%s' "https://github.com/$REPO/releases/download/$_tag"
+    _body="$(fetch_url "https://api.github.com/repos/$REPO/releases?per_page=100" 2>/dev/null)" || return 1
+    _tags="$(printf '%s\n' "$_body" \
+        | grep -Eo '"tag_name"[[:space:]]*:[[:space:]]*"v[0-9][^"]*-(beta|rc)\.[0-9]+[^"]*"' \
+        | sed -E 's/.*"([^"]*)"$/\1/' | sort -u)"
+    [ -n "$_tags" ] || return 1
+    _candidates="$(for _t in $_tags; do
+            _key="$(beta_sort_key "$_t")"
+            [ -n "$_key" ] && printf '%s %s\n' "$_key" "$_t"
+        done | sort -r | awk '{print $2}')"
+    [ -n "$_candidates" ] || return 1
+    for _tag in $_candidates; do
+        case "$_tag" in
+            ""|*[!0-9A-Za-z.+~-]*) continue ;;
+        esac
+        _base="https://github.com/$REPO/releases/download/$_tag"
+        if fetch_text "$_base" versions.json >/dev/null 2>&1; then
+            printf '%s' "$_base"
+            return 0
+        fi
+    done
+    return 1
 }
 
 sha256_of() {

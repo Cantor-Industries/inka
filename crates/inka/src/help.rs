@@ -38,7 +38,7 @@ pub(crate) fn render(h: &Help, mode: Mode) -> String {
         out.push_str(&format!(
             "{} {}\n",
             colors::bold("inka"),
-            colors::gray(env!("CARGO_PKG_VERSION"))
+            colors::gray(crate::channel::release_version())
         ));
     } else {
         out.push_str(&format!("{}\n", colors::bold(format!("inka {}", h.name))));
@@ -158,7 +158,10 @@ pub(crate) fn top() -> &'static Help {
                 "override the per-user runtime directory",
             ),
             ("DENO_DIR", "Deno cache for jsr:/remote (must be absolute)"),
-            ("INKA_CHANNEL", "release channel: stable (default) or beta"),
+            (
+                "INKA_CHANNEL",
+                "release channel: stable|beta (unknown errors)",
+            ),
             ("INKA_LAUNCHER", "path to inka-launcher for `build`"),
             ("INK_LOG", "log level: error|warn|info|debug|trace"),
             ("INK_LOG_STYLE", "color: auto (default), always, never"),
@@ -224,7 +227,11 @@ pub(crate) fn build() -> &'static Help {
             ("--fetch", "fetch jsr:/remote deps into the Deno cache"),
             (
                 "--beta",
-                "build for the beta channel (channel=beta in the manifest)",
+                "build for the beta channel (refused on a stable release)",
+            ),
+            (
+                "--stable",
+                "force the stable channel (overrides a beta toolchain default)",
             ),
             ("-h, --help", "show this help"),
         ],
@@ -272,7 +279,14 @@ pub(crate) fn run() -> &'static Help {
                 "anchor relative read/write grants (default cwd)",
             ),
             ("--fetch", "fetch missing jsr:/remote deps before running"),
-            ("--beta", "use a prerelease (beta) runtime tuple"),
+            (
+                "--beta",
+                "use a prerelease (beta) runtime tuple (refused on stable)",
+            ),
+            (
+                "--stable",
+                "force the stable channel (overrides a beta toolchain default)",
+            ),
             ("--", "end of options (the file may start with '-')"),
             ("-h, --help", "show this help"),
         ],
@@ -335,6 +349,7 @@ pub(crate) fn update() -> &'static Help {
             ("--toolchain-only", "only update the toolchain"),
             ("--no-runtime", "skip the runtime"),
             ("--beta", "install the newest beta (toolchain + runtime)"),
+            ("--stable", "return to the stable channel"),
             ("-h, --help", "show this help"),
         ],
         permissions: &[],
@@ -359,7 +374,8 @@ pub(crate) fn doctor() -> &'static Help {
         )],
         options: &[
             ("--json", "machine-readable output (artifact mode)"),
-            ("--beta", "show/select the beta channel"),
+            ("--beta", "show/select the beta channel (refused on stable)"),
+            ("--stable", "show/select the stable channel"),
             ("-h, --help", "show this help"),
         ],
         permissions: &[],

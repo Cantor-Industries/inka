@@ -39,10 +39,13 @@ it's clean, you're ready.
 > tuple that satisfies each executable's manifest. Keep current with `inka
 > update` (toolchain + runtime).
 >
-> **Beta builds:** `inka update --beta` (or `install.sh --beta`) installs the
-> newest prerelease. Prerelease runtime tuples are only used by
-> `inka run --beta`, `inka build --beta`, or `INKA_CHANNEL=beta`; a stable
-> release supersedes every beta of the same version.
+> **Beta builds:** `inka update --beta` (or `install.sh --beta`; on an older
+> installer use `--version <tag>`) installs the newest prerelease. The
+> installed toolchain's channel is the default, so a beta toolchain uses
+> prerelease runtime tuples and stays on beta for `inka update`; `--beta`/
+> `--stable` or `INKA_CHANNEL` override it. `--beta` is refused on a stable
+> release — `inka update --beta` is the switcher. A stable release supersedes
+> every beta of the same version.
 
 ### Building from source (macOS and other platforms)
 

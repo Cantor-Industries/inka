@@ -10,6 +10,7 @@
 //   inka help [command]
 
 mod build;
+mod channel;
 mod config;
 mod embed;
 mod help;
@@ -100,14 +101,6 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
 /// Top-level commands, in help order and for suggestions.
 pub(crate) const COMMANDS: [&str; 6] = ["build", "run", "cache", "update", "doctor", "help"];
 
-/// True when `INKA_CHANNEL=beta` (case-insensitive) opts this invocation into
-/// prerelease runtime tuples. `--beta` is the per-command equivalent.
-pub(crate) fn env_is_beta() -> bool {
-    env::var("INKA_CHANNEL")
-        .map(|v| v.eq_ignore_ascii_case("beta"))
-        .unwrap_or(false)
-}
-
 fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
     // closes the pipe, and the default action (terminate quietly) is preferable to
@@ -124,7 +117,7 @@ fn main() {
     match first.as_str() {
         "-h" => help::print(help::top(), help::Mode::Short),
         "--help" => help::print(help::top(), help::Mode::Long),
-        "--version" | "-V" => println!("inka {}", env!("CARGO_PKG_VERSION")),
+        "--version" | "-V" => println!("inka {}", channel::release_version()),
         "help" => cmd_help(&args[1..]),
         "build" => build::cmd_build(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
@@ -618,6 +611,7 @@ fn cmd_doctor(args: &[String]) {
     let mut positional: Vec<&str> = Vec::new();
     let mut json = false;
     let mut beta = false;
+    let mut stable = false;
     for a in args {
         match a.as_str() {
             "-h" => {
@@ -630,6 +624,7 @@ fn cmd_doctor(args: &[String]) {
             }
             "--json" => json = true,
             "--beta" => beta = true,
+            "--stable" => stable = true,
             other if ui::apply_verbosity_flag(other) => {}
             other if other.starts_with('-') => {
                 ui::log_error(format!("unknown option '{other}'"));
@@ -639,10 +634,17 @@ fn cmd_doctor(args: &[String]) {
             other => positional.push(other),
         }
     }
-    let beta = beta || env_is_beta();
+    let requested = match channel::flag_request(beta, stable) {
+        Ok(r) => r,
+        Err(e) => {
+            ui::log_error(e);
+            std::process::exit(2);
+        }
+    };
+    let effective = channel::resolve_or_exit(requested);
     match positional.as_slice() {
-        [] => doctor_machine(beta),
-        [artifact] => doctor_artifact(Path::new(artifact), json),
+        [] => doctor_machine(effective),
+        [artifact] => doctor_artifact(Path::new(artifact), json, effective),
         _ => {
             ui::log_error("doctor takes at most one artifact path");
             ui::hint("run `inka doctor --help` for usage");
@@ -705,7 +707,7 @@ fn select_runtime(
 /// Inspect an inka executable: parse its trailer/manifest and report whether a
 /// compatible runtime is installed. A non-artifact is a hard error (exit 2); a
 /// malformed version constraint exits 3; no compatible runtime exits 3.
-fn doctor_artifact(path: &Path, json: bool) {
+fn doctor_artifact(path: &Path, json: bool, effective: channel::Channel) {
     let bytes = match fs::read(path) {
         Ok(b) => b,
         Err(e) => {
@@ -731,8 +733,17 @@ fn doctor_artifact(path: &Path, json: bool) {
 
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
-    let allow_prerelease = manifest.channel.as_deref() == Some("beta") || env_is_beta();
+    // Manifest-governed: the artifact opts into prereleases via `channel=beta`
+    // or a prerelease version slot; the effective toolchain channel is a
+    // superset.
+    let allow_prerelease = manifest.wants_prerelease() || effective == channel::Channel::Beta;
     let selected = select_runtime(&manifest, &runtimes, allow_prerelease);
+    // Would a beta tuple satisfy this artifact if it had opted in?
+    let beta_alternative = if allow_prerelease {
+        None
+    } else {
+        select_runtime(&manifest, &runtimes, true)
+    };
     let unpacked: usize = entries.iter().map(|(_, n)| *n).sum();
 
     if json {
@@ -837,6 +848,12 @@ fn doctor_artifact(path: &Path, json: bool) {
         );
     }
     if selected.is_none() {
+        if beta_alternative.is_some() {
+            ui::hint(
+                "a beta runtime satisfies this artifact; rebuild with `inka build --beta` \
+                 (or run with `inka run --beta`) to opt in",
+            );
+        }
         ui::hint("run `inka update` to install a compatible runtime");
         ui::status_bad("no compatible runtime");
         std::process::exit(3);
@@ -857,13 +874,43 @@ fn required_runtime(m: &inka_format::Manifest) -> String {
     }
 }
 
-fn doctor_machine(beta: bool) {
+/// The toolchain identity shown by `doctor`: `release (short-hash)` when the
+/// release pipeline baked a commit, else just the release (dev build).
+fn toolchain_label() -> String {
+    match channel::build_commit() {
+        Some(h) => format!("{} ({h})", channel::release_version()),
+        None => channel::release_version().to_string(),
+    }
+}
+
+fn doctor_machine(effective: channel::Channel) {
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
     let mut warnings: Vec<String> = Vec::new();
     let mut problems: Vec<(String, String)> = Vec::new();
 
     ui::title("doctor");
+    ui::section("Toolchain");
+    ui::row("toolchain", toolchain_label());
+    ui::row("channel", effective.as_str());
+    // Cross-check the installer-written VERSION marker when present.
+    if let Some(dir) = crate::update::toolchain_dir() {
+        let marker = crate::update::installed_toolchain_version(&dir);
+        if !marker.is_empty() && marker != channel::release_version() {
+            ui::warn_row(
+                "version",
+                format!(
+                    "marker {marker} does not match the binary {}",
+                    channel::release_version()
+                ),
+            );
+            warnings.push(format!(
+                "toolchain VERSION marker ({marker}) does not match the binary ({})",
+                channel::release_version()
+            ));
+        }
+    }
+
     ui::section("Runtimes");
     if runtimes.is_empty() {
         ui::bad_row("installed", "none");
@@ -872,9 +919,9 @@ fn doctor_machine(beta: bool) {
             "run `inka update`".to_string(),
         ));
     } else {
-        // Stable selection ignores prerelease tuples unless the beta channel is
-        // active, mirroring the launcher's artifact selection.
-        let selected = if beta {
+        // Stable selection ignores prerelease tuples unless the effective
+        // channel is beta, mirroring the launcher's artifact selection.
+        let selected = if effective == channel::Channel::Beta {
             runtimes.last().map(|(v, _)| *v)
         } else {
             runtimes
@@ -901,7 +948,6 @@ fn doctor_machine(beta: bool) {
                 pre
             );
         }
-        ui::row("channel", if beta { "beta" } else { "stable" });
     }
 
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));

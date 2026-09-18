@@ -335,6 +335,19 @@ enum Slot {
     Exact,
 }
 
+impl Manifest {
+    /// True when the artifact opts into prerelease runtime tuples: `channel=beta`
+    /// or any version constraint (`min`/`gt`/`exact`/`tested`) names a
+    /// prerelease. A stable artifact never does.
+    pub fn wants_prerelease(&self) -> bool {
+        self.channel.as_deref() == Some("beta")
+            || [self.min, self.gt, self.exact, self.tested]
+                .into_iter()
+                .flatten()
+                .any(|v| v.is_prerelease())
+    }
+}
+
 /// Does `v` satisfy every constraint in the manifest (floor, strict `>`, exact,
 /// and the `tested-against` cap)?
 pub fn constraint_allows(m: &Manifest, v: Version) -> bool {
@@ -623,6 +636,21 @@ mod tests {
             .malformed
             .is_some());
         assert!(parse_manifest(b"tested-against=nope\n").malformed.is_some());
+    }
+
+    #[test]
+    fn wants_prerelease_covers_channel_and_each_slot() {
+        // A plain/stable artifact never opts in.
+        assert!(!parse_manifest(b"module=main.js\n").wants_prerelease());
+        assert!(!parse_manifest(b"runtime=inka_runtime>=0.266.5\n").wants_prerelease());
+        assert!(!parse_manifest(b"channel=stable\n").wants_prerelease());
+        // `channel=beta` opts in.
+        assert!(parse_manifest(b"channel=beta\n").wants_prerelease());
+        // Each version slot opts in on its own.
+        assert!(parse_manifest(b"runtime=inka_runtime>=0.267.2-beta.1\n").wants_prerelease());
+        assert!(parse_manifest(b"runtime=inka_runtime>0.267.2-beta.1\n").wants_prerelease());
+        assert!(parse_manifest(b"runtime=inka_runtime==0.267.2-beta.1\n").wants_prerelease());
+        assert!(parse_manifest(b"tested-against=0.267.2-rc.1\n").wants_prerelease());
     }
 
     #[test]

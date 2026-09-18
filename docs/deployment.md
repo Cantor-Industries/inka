@@ -40,16 +40,18 @@ Each `v*` tag publishes:
 `versions.json` records the release, the toolchain block (version/target/archive/
 sha256), the runtime tuple and its base `deno_runtime`, the runtime `sha256`, and
 (from 0.8.x) the `channel` (`stable`/`beta`), `base` target, and `tag`.
-`inka doctor` prints the runtime dirs/versions and project status (it does not
-print a release identity); `inka doctor <artifact>` inspects a built executable
-instead.
+`inka doctor` prints the toolchain identity (`release (short-hash)` plus the
+effective `channel`), the runtime dirs/versions, and project status;
+`inka doctor <artifact>` inspects a built executable instead.
 
 **Beta releases** are published as GitHub prereleases with a tag
 `v<version>-beta.<n>-<short-hash>`; a beta that changes the engine publishes a
 prerelease runtime tuple (`<tuple>-beta.<n>`). The default channel
 (`releases/latest`) excludes prereleases, so betas are only picked up by
-`install.sh --beta` / `inka update --beta` (or an explicit `--version <tag>`).
-`inka update --beta` resolves the newest prerelease via the GitHub Releases API.
+`install.sh --beta` / `inka update --beta` (or an explicit `--version <tag>`);
+on a stable installer older than 0.8.1 use `--version <tag>`. `inka update
+--beta` resolves the newest prerelease via the GitHub Releases API, selecting
+the max-by-version tag rather than trusting API order.
 
 ## Release CI (tags → GitHub Release assets)
 

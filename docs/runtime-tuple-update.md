@@ -13,8 +13,8 @@ advance the revision; a Deno bump moves the base and restarts the revision.
 
 A **beta** engine build uses the same scheme with a prerelease suffix
 (`0.267.2-beta.1`, ordered below the final `0.267.2`). It is published only in a
-prerelease and installed only with `--beta`, and the launcher selects it only for
-artifacts/environments that opted into the beta channel. At stable release the
+prerelease; a beta toolchain (or `--beta`/`INKA_CHANNEL=beta`) installs and
+selects it, while a stable toolchain never does. At stable release the
 revision is published without the suffix (`0.267.2`), which supersedes every
 beta of that base.
 

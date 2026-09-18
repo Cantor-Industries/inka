@@ -93,6 +93,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
             "--beta" => {
                 f.beta = true;
             }
+            "--stable" => {
+                f.stable = true;
+            }
             "-q" | "--quiet" | "-v" | "--verbose" => {
                 ui::apply_verbosity_flag(a);
             }
@@ -128,8 +131,9 @@ fn parse_flags(args: &[String]) -> (Flags, PathBuf, Vec<String>) {
 
 /// Choose the runtime .so: newest installed, or an exact --runtime <ver>.
 /// Only option tokens before the file (or before `--`) are considered. A
-/// prerelease tuple is only eligible when `beta` (the beta channel) is set.
-fn choose_runtime(args: &[String], beta: bool) -> (PathBuf, Option<Version>) {
+/// prerelease tuple is only eligible when `allow_prerelease` (the effective beta
+/// channel) is set; a prerelease `--runtime` on a stable channel is refused.
+fn choose_runtime(args: &[String], allow_prerelease: bool) -> (PathBuf, Option<Version>) {
     let dirs = crate::runtime_search_dirs();
     let runtimes = crate::installed_parts_all(&dirs);
     let mut i = 0;
@@ -142,6 +146,12 @@ fn choose_runtime(args: &[String], beta: bool) -> (PathBuf, Option<Version>) {
             let ver = args.get(i + 1).map(String::as_str).unwrap_or("");
             match crate::parse_version(ver) {
                 Some(v) => {
+                    if v.is_prerelease() && !allow_prerelease {
+                        fail(&format!(
+                            "runtime {v} is a prerelease; {}",
+                            crate::channel::BETA_HINT
+                        ));
+                    }
                     for (rv, p) in &runtimes {
                         if *rv == v {
                             return (p.clone(), Some(v));
@@ -166,7 +176,7 @@ fn choose_runtime(args: &[String], beta: bool) -> (PathBuf, Option<Version>) {
     }
     let selected = runtimes
         .iter()
-        .filter(|(v, _)| !v.is_prerelease() || beta)
+        .filter(|(v, _)| !v.is_prerelease() || allow_prerelease)
         .max_by_key(|(v, _)| *v);
     match selected {
         Some((v, p)) => (p.clone(), Some(*v)),
@@ -176,7 +186,7 @@ fn choose_runtime(args: &[String], beta: bool) -> (PathBuf, Option<Version>) {
                 .map(|d| d.display().to_string())
                 .collect::<Vec<_>>()
                 .join(", ");
-            if beta {
+            if allow_prerelease {
                 fail(&format!(
                     "no runtime installed (searched: {searched}); run `inka update --beta` first"
                 ))
@@ -359,6 +369,12 @@ pub(crate) fn cmd_run(args: &[String]) {
     if let Err(e) = permissions::validate(&flags) {
         fail(&e);
     }
+    let requested = match crate::channel::flag_request(flags.beta, flags.stable) {
+        Ok(r) => r,
+        Err(e) => fail(&e),
+    };
+    let effective = crate::channel::resolve_or_exit(requested);
+    let allow_prerelease = effective == crate::channel::Channel::Beta;
     if !file.is_file() {
         fail(&format!("source file not found: {}", file.display()));
     }
@@ -432,7 +448,7 @@ pub(crate) fn cmd_run(args: &[String]) {
         }
     }
 
-    let (lib, chosen) = choose_runtime(args, flags.beta || crate::env_is_beta());
+    let (lib, chosen) = choose_runtime(args, allow_prerelease);
     ui::debug(format!(
         "running {} in {} with runtime {}",
         entry,
