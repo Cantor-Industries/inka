@@ -75,8 +75,13 @@ jobs:
           cargo clippy --locked -p inka --features bundle --all-targets -- -D warnings
           cargo clippy --locked -p inka-bundler --all-targets -- -D warnings
           cargo clippy --locked -p inka-runtime --all-targets -- -D warnings
+          # The desktop feature pulls in laufey (bindgen), which the release
+          # build already compiles, so libclang is present on the runner.
+          cargo clippy --locked -p inka-runtime --features desktop --all-targets -- -D warnings
+          cargo clippy --locked -p inka-desktop-shim --all-targets -- -D warnings
           cargo test --locked -p inka-bundler
           cargo test --locked -p inka --bin inka --features bundle
+          cargo test --locked -p inka-desktop-shim
 
       - name: Stage runtime for the matrix
         run: |

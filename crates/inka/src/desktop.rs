@@ -143,7 +143,8 @@ struct Args {
     entry: Option<PathBuf>,
     output: Option<PathBuf>,
     app_name: Option<String>,
-    backend: String,
+    identifier: Option<String>,
+    backend: Option<String>,
     icon: Option<PathBuf>,
     payload: Option<PathBuf>,
     no_bundle: bool,
@@ -160,7 +161,8 @@ fn parse_args(args: &[String]) -> Args {
         entry: None,
         output: None,
         app_name: None,
-        backend: "webview".to_string(),
+        identifier: None,
+        backend: None,
         icon: None,
         payload: None,
         no_bundle: false,
@@ -186,7 +188,8 @@ fn parse_args(args: &[String]) -> Args {
             }
             "-o" | "--output" => a.output = Some(PathBuf::from(next(&mut it, arg))),
             "--name" => a.app_name = Some(next(&mut it, arg)),
-            "--backend" => a.backend = next(&mut it, arg),
+            "--identifier" => a.identifier = Some(next(&mut it, arg)),
+            "--backend" => a.backend = Some(next(&mut it, arg)),
             "--icon" => a.icon = Some(PathBuf::from(next(&mut it, arg))),
             "--payload" => a.payload = Some(PathBuf::from(next(&mut it, arg))),
             "--external" => a.external.push(next(&mut it, arg)),
@@ -418,9 +421,68 @@ fn sanitize_name(name: &str) -> String {
     }
 }
 
+/// Fill unset CLI flags from the resolved `desktop` config (CLI always wins).
+/// `output`/`icon` paths are project-relative, so they are joined with `cwd`.
+fn apply_config_defaults(a: &mut Args, cwd: &Path, cfg: crate::config::DesktopConfig) {
+    if a.app_name.is_none() {
+        a.app_name = cfg.app_name;
+    }
+    if a.identifier.is_none() {
+        a.identifier = cfg.identifier;
+    }
+    if a.backend.is_none() {
+        a.backend = cfg.backend;
+    }
+    if a.output.is_none() {
+        a.output = cfg.output_linux.map(|o| cwd.join(o));
+    }
+    if a.icon.is_none() {
+        a.icon = cfg.icon_linux.map(|i| cwd.join(i));
+    }
+    if a.app_version.is_none() {
+        a.app_version = cfg.version;
+    }
+    if a.release_base.is_none() {
+        a.release_base = cfg.release_base;
+    }
+    if a.error_reporting.is_none() {
+        a.error_reporting = cfg.error_reporting;
+    }
+}
+
+/// The laufey backend kinds `inka desktop` knows how to fetch.
+fn known_backend(backend: &str) -> bool {
+    matches!(backend, "webview" | "cef" | "raw")
+}
+
+/// Validate a reverse-DNS bundle identifier (Linux `.desktop` filename and
+/// `StartupWMClass`). ASCII alphanumerics plus `.`, `-`, `_`; must be dotted.
+fn validate_identifier(id: &str) {
+    let valid_chars = id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    if id.is_empty()
+        || !id.contains('.')
+        || !valid_chars
+        || id.starts_with('.')
+        || id.ends_with('.')
+    {
+        fail(&format!(
+            "invalid identifier '{id}': expected reverse-DNS form like com.acme.app"
+        ));
+    }
+}
+
 pub fn cmd_desktop(args: &[String]) {
-    let a = parse_args(args);
+    let mut a = parse_args(args);
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    // `deno.json` `desktop` config fills in any flag left unset; CLI flags win.
+    let (cfg, warns) = crate::config::desktop_config(&cwd);
+    for w in &warns {
+        ui::warn(w);
+    }
+    apply_config_defaults(&mut a, &cwd, cfg);
 
     let entry = a.entry.clone().unwrap_or_else(|| {
         ui::log_error("no entry file given");
@@ -444,6 +506,20 @@ pub fn cmd_desktop(args: &[String]) {
     });
     let app_name = sanitize_name(&app_name);
     let out = a.output.clone().unwrap_or_else(|| PathBuf::from(&app_name));
+
+    let backend = a.backend.clone().unwrap_or_else(|| "webview".to_string());
+    if !known_backend(&backend) {
+        fail(&format!(
+            "unknown backend '{backend}' (expected webview, cef, or raw)"
+        ));
+    }
+    let id = match a.identifier.as_deref() {
+        Some(id) => {
+            validate_identifier(id);
+            id.to_string()
+        }
+        None => format!("com.inka.desktop.{}", app_name.to_lowercase()),
+    };
 
     ui::title("desktop");
 
@@ -492,7 +568,7 @@ pub fn cmd_desktop(args: &[String]) {
         manifest.push_str(&format!("error-reporting={v}\n"));
     }
 
-    let backend = resolve_backend(&a.backend);
+    let backend_path = resolve_backend(&backend);
     let shim = resolve_shim();
     let launcher = out.join(&app_name);
     let runtime_so = out.join(format!("{app_name}.so"));
@@ -502,7 +578,8 @@ pub fn cmd_desktop(args: &[String]) {
     if let Err(e) = pack_shim(&shim, &runtime_so, &files, &manifest) {
         fail(&e);
     }
-    fs::copy(&backend, &launcher).unwrap_or_else(|e| fail(&format!("cannot place backend: {e}")));
+    fs::copy(&backend_path, &launcher)
+        .unwrap_or_else(|e| fail(&format!("cannot place backend: {e}")));
     set_exec(&launcher);
     set_exec(&runtime_so);
 
@@ -526,7 +603,6 @@ pub fn cmd_desktop(args: &[String]) {
             ui::warn(format!("icon not found: {}", icon.display()));
         }
     }
-    let id = format!("com.inka.desktop.{}", app_name.to_lowercase());
     let _ = fs::write(
         out.join(format!("{id}.desktop")),
         desktop_entry(&app_name, &id),
@@ -560,7 +636,8 @@ pub fn cmd_desktop(args: &[String]) {
     ui::row("launcher", launcher.display());
     ui::row("runtime", runtime_so.display());
     ui::row("payload", format!("{} file(s) embedded", files.len()));
-    ui::row("backend", backend.display());
+    ui::row("backend", backend_path.display());
+    ui::row("id", &id);
     ui::status_ok(format!("packaged {}", out.display()));
 }
 

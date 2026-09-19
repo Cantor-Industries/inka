@@ -888,6 +888,22 @@ fn toolchain_label() -> String {
     }
 }
 
+/// Advertised capability names of an installed runtime (dlopen +
+/// `inka_runtime_features`). `None` when the library can't be loaded or the
+/// symbol is absent (an older runtime).
+fn runtime_features(path: &Path) -> Option<String> {
+    type FnFeatures = unsafe extern "C" fn() -> *const std::ffi::c_char;
+    let library = crate::run::load_runtime_library(path).ok()?;
+    unsafe {
+        let get_features = library.get::<FnFeatures>(b"inka_runtime_features").ok()?;
+        let ptr = get_features();
+        if ptr.is_null() {
+            return None;
+        }
+        Some(std::ffi::CStr::from_ptr(ptr).to_string_lossy().into_owned())
+    }
+}
+
 fn doctor_machine(effective: channel::Channel) {
     let dirs = runtime_search_dirs();
     let runtimes = installed_parts_all(&dirs);
@@ -926,17 +942,13 @@ fn doctor_machine(effective: channel::Channel) {
     } else {
         // Stable selection ignores prerelease tuples unless the effective
         // channel is beta, mirroring the launcher's artifact selection.
-        let selected = if effective == channel::Channel::Beta {
-            runtimes.last().map(|(v, _)| *v)
+        let selected_entry = if effective == channel::Channel::Beta {
+            runtimes.last()
         } else {
-            runtimes
-                .iter()
-                .rev()
-                .find(|(v, _)| !v.is_prerelease())
-                .map(|(v, _)| *v)
+            runtimes.iter().rev().find(|(v, _)| !v.is_prerelease())
         };
         for (v, p) in &runtimes {
-            let marker = if Some(*v) == selected {
+            let marker = if selected_entry.map(|(sv, _)| *sv) == Some(*v) {
                 colors::green("→").to_string()
             } else {
                 " ".to_string()
@@ -952,6 +964,17 @@ fn doctor_machine(effective: channel::Channel) {
                 colors::gray(p.display()),
                 pre
             );
+        }
+        // Advertised capabilities of the selected runtime (e.g. `desktop` on a
+        // laufey-enabled engine). Absent on runtimes predating the symbol.
+        if let Some((_, path)) = selected_entry {
+            match runtime_features(path) {
+                Some(features) => ui::ok("features", features),
+                None => ui::warn_row(
+                    "features",
+                    "unavailable (runtime predates inka_runtime_features)",
+                ),
+            }
         }
     }
 

@@ -342,14 +342,24 @@ pub(crate) fn desktop() -> &'static Help {
         options: &[
             (
                 "-o, --output <dir>",
-                "output app directory (default: the app name)",
+                "output app directory (default: deno.json desktop.output.linux, else the app name)",
             ),
-            ("--name <name>", "application name (default: entry stem)"),
+            (
+                "--name <name>",
+                "application name (default: deno.json desktop.app.name, else entry stem)",
+            ),
+            (
+                "--identifier <id>",
+                "reverse-DNS bundle id (default: deno.json desktop.app.identifier, else com.inka.desktop.<name>)",
+            ),
             (
                 "--backend <kind>",
-                "laufey backend: webview (default), cef, or raw",
+                "laufey backend: webview (default), cef, or raw (default: deno.json desktop.backend)",
             ),
-            ("--icon <png>", "application icon (Linux .png)"),
+            (
+                "--icon <png>",
+                "application icon (default: deno.json desktop.app.icons.linux)",
+            ),
             (
                 "--payload <dir>",
                 "use a prebuilt payload directory instead of bundling",
@@ -363,15 +373,15 @@ pub(crate) fn desktop() -> &'static Help {
             ("--sourcemap", "embed an inline source map"),
             (
                 "--app-version <ver>",
-                "app version for Deno.autoUpdate (default: unset)",
+                "app version for Deno.autoUpdate (default: deno.json version)",
             ),
             (
                 "--release-base <url>",
-                "base URL of the auto-update manifest host (latest.json + patches)",
+                "auto-update manifest host; latest.json + patches (default: deno.json desktop.release.baseUrl)",
             ),
             (
                 "--error-reporting <url>",
-                "POST uncaught errors to this endpoint",
+                "POST uncaught errors here (default: deno.json desktop.errorReporting.url)",
             ),
             ("-h, --help", "show this help"),
         ],

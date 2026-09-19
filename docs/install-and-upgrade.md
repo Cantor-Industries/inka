@@ -12,9 +12,9 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 The script:
 
-1. downloads the **toolchain** archive (CLI + launcher) for
-   `x86_64-unknown-linux-gnu`, verifies its `sha256`, and installs it under
-   `<prefix>/lib/inka` (default prefix `$HOME/.local`);
+1. downloads the **toolchain** archive (CLI + launcher + the per-app desktop
+   shim) for `x86_64-unknown-linux-gnu`, verifies its `sha256`, and installs it
+   under `<prefix>/lib/inka` (default prefix `$HOME/.local`);
 2. symlinks `<prefix>/bin/inka` and adds `<prefix>/bin` to your `PATH`
    (`--no-modify-path` to skip);
 3. runs `inka update` to provision the shared **runtime** under
@@ -132,6 +132,16 @@ inka build app.ts         # -> ./app  (manifest derived from config, deny-by-def
 ./app kook
 ```
 
+Desktop apps reuse the same runtime (the release engine is built with
+`--features desktop`) and the installed shim:
+
+```sh
+inka desktop main.ts --name MyApp   # -> MyApp/ + MyApp.tar.gz
+./MyApp/MyApp
+```
+
+See [Desktop apps](desktop.md).
+
 ## Upgrade
 
 ```sh
@@ -165,6 +175,8 @@ The base defaults to the GitHub latest-release URL and is overridable with
 | Toolchain shim | `<prefix>/bin/inka` | — |
 | Runtime | `~/.local/share/inka/runtime` | `INKA_RUNTIME_HOME` |
 | Deno cache (read for `jsr:`) | `~/.cache/deno` | `DENO_DIR` |
+| laufey backends (`inka desktop`) | `~/.cache/inka/laufey` | `INKA_LAUFEY_CACHE` |
+| Desktop payload extraction | `~/.cache/inka/desktop` | — |
 
 `~/.local/share` is `$XDG_DATA_HOME` when set.
 
@@ -183,16 +195,19 @@ cargo build --release -p inka-launcher
 ```
 
 The **runtime** (`crates/inka-runtime`) is the heavy part — a Deno/V8 build that
-takes ~10–15 minutes and wants a roomy disk:
+takes ~10–15 minutes and wants a roomy disk. Build it with the `desktop` feature
+so `inka desktop` apps can share it, and build the per-app shim alongside:
 
 ```sh
-CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
+CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime --features desktop
+cargo build --release -p inka-desktop-shim
 mkdir -p ~/.local/share/inka/runtime
 cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
 ```
 
-Keep `inka-launcher` next to the `inka` binary, or set `INKA_LAUNCHER`.
+Keep `inka-launcher` and `libinka_desktop_shim.so` next to the `inka` binary, or
+set `INKA_LAUNCHER`/`INKA_DESKTOP_SHIM`.
 
 ## Uninstall
 

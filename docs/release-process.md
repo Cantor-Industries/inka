@@ -10,6 +10,7 @@ and upgrade story see [Install & upgrade](install-and-upgrade.md).
 | Toolchain release | the `v*` tag; `crates/inka/Cargo.toml` `version` must equal its base |
 | Runtime tuple | `crates/inka-runtime/runtime-version` |
 | deno_runtime pin | `crates/inka-runtime/Cargo.toml` (`=X.Y.Z`) |
+| laufey pin | `crates/inka/src/desktop.rs` (`LAUFEY_VERSION`, `LAUFEY_SUMS`) and `laufey = "=X.Y.Z"` |
 | Baked identity | `INKA_BUILD_VERSION` / `INKA_BUILD_COMMIT` (release build only) |
 
 Two counters are **independent**: the toolchain release counter
@@ -42,6 +43,27 @@ with no engine change ships the existing runtime tuple.
    `INKA_BUILD_COMMIT=${GITHUB_SHA:0:7}` into `inka`/`inka-launcher`, so the
    shipped binary reports the exact release and defaults to the beta channel.
 
+## Desktop
+
+- The release workflow builds the shared runtime with `-p inka-runtime --features
+  desktop` and the per-app shim with `-p inka-desktop-shim`; both the runtime
+  `.so` and the shim (`libinka_desktop_shim.so`, staged into the toolchain
+  archive) are required for `inka desktop` to work.
+- `crates/inka-runtime/runtime-version` therefore tracks a **desktop-enabled**
+  tuple: bumping it (e.g. to force `inka update` to fetch an engine with the
+  laufey ABI) is the tool for changing the desktop engine without changing the
+  Deno base.
+- laufey is pinned at `0.7.0` (`LAUFEY_API_VERSION == 34`). The backend archives
+  are checksum-pinned in `LAUFEY_SUMS`. Bumping laufey means updating the
+  `LAUFEY_VERSION`/`LAUFEY_SUMS` constants, the `laufey = "=X.Y.Z"` pins, and the
+  API-version assert in the runtime when the ABI changes.
+- `crates/inka-runtime/src/desktop_js.rs` vendors Deno 2.9.7's desktop JS
+  (byte-for-byte except the `serde_json` path); re-sync it when `deno_runtime` or
+  laufey is bumped.
+- Attribution: laufey is MIT (Copyright (c) Divy Srivastava); the desktop JS and
+  `cli/rt_desktop` adaptation are MIT (Copyright (c) the Deno authors). Keep
+  these notices in the docs/READMEs.
+
 ## Behavior invariants
 
 - The installed toolchain's channel is the default for `run`/`build`/`doctor`/
@@ -71,9 +93,12 @@ with `--beta` ships, install betas with an exact tag
 cargo fmt --all -- --check
 cargo clippy --locked -p inka --bin inka -p inka-launcher -p inka-format -- -D warnings
 cargo clippy --locked -p inka --features bundle --all-targets -- -D warnings
+cargo clippy --locked -p inka-runtime --features desktop --all-targets -- -D warnings
+cargo clippy --locked -p inka-desktop-shim --all-targets -- -D warnings
 cargo test --locked -p inka --bin inka
 cargo test --locked -p inka --bin inka --features bundle
 cargo test --locked -p inka-launcher
+cargo test --locked -p inka-desktop-shim
 cargo test --locked -p inka-format
 scripts/ci/deno-pins.sh
 bash -n install.sh scripts/ci/*.sh scripts/spike.sh

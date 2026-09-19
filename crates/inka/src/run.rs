@@ -350,7 +350,7 @@ fn execution_root(cwd: &Path, file: &Path) -> Result<(PathBuf, String), String> 
 /// later by the runtime's `op_napi_open`; they resolve N-API/uv symbols from the
 /// global scope, which `RTLD_LOCAL` (the `Library::new` default) hides — the
 /// addon then aborts with `undefined symbol: napi_module_register`.
-fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
+pub(crate) fn load_runtime_library(path: &Path) -> Result<libloading::Library, libloading::Error> {
     #[cfg(unix)]
     {
         use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_LAZY};

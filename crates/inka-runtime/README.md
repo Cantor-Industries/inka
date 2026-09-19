@@ -37,6 +37,17 @@ confines.
 `DENO_DIR` is read for `jsr:` and other cached remote modules; it must be an
 absolute path, and the cache is **trusted input** (cached JS is loaded as code).
 
+## Desktop (`desktop` feature)
+
+Built with `--features desktop`, the same `.so` also exports the laufey runtime
+ABI (`laufey_runtime_init`/`start`/`shutdown`, `LAUFEY_API_VERSION == 34`) and
+boots a windowed app: it allocates a loopback port, runs the entry's declarative
+server (`export default { fetch }` or `Deno.serve`) on it, creates a laufey
+window, navigates it, and pumps the laufey event loop. The Deno desktop ops and
+JS surface are vendored/adapted from Deno's `cli/rt_desktop` (see
+[Desktop apps](../../docs/desktop.md)). A headless build advertises the same
+`inka_runtime_*` capabilities minus `desktop`.
+
 ## Resolution
 
 `resolver.rs` builds an offline `deno_graph::ModuleGraph` for the entry from
@@ -72,11 +83,14 @@ This pulls the full Deno/V8 tree and a one-time snapshot build; point cargo at a
 roomy disk:
 
 ```sh
-CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
+CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime --features desktop
 # install as a tuple (version comes from runtime-version):
 cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat runtime-version).so
 ```
+
+Building `--features desktop` additionally needs `libclang` (laufey uses
+bindgen); install `libclang-dev` and, if needed, set `LIBCLANG_PATH`.
 
 ## License
 
@@ -91,3 +105,10 @@ This crate embeds the Deno runtime: `deno_core`, `deno_runtime`, `deno_error`,
 work of the Deno authors,
 Copyright (c) the Deno authors, distributed under the MIT license (portions
 Apache-2.0); see <https://github.com/denoland/deno>.
+
+## Acknowledgments — laufey
+
+The `desktop` feature links [laufey](https://github.com/littledivy/laufey), the
+window/renderer SDK used by the prebuilt backend (MIT, Copyright (c) Divy
+Srivastava). The desktop ops, JS surface, and auto-update swap are adapted from
+Deno's `cli/rt_desktop` (MIT, Copyright (c) the Deno authors).

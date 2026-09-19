@@ -132,10 +132,12 @@ cargo build --release -p inka-launcher
 ```
 
 The **runtime** (`crates/inka-runtime`) is the heavy part — a Deno/V8 build that
-takes ~10–15 minutes and wants a roomy disk:
+takes ~10–15 minutes and wants a roomy disk. Build it with `--features desktop`
+so `inka desktop` apps can share it, and build the desktop shim alongside:
 
 ```sh
-CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime
+CARGO_HOME=… CARGO_TARGET_DIR=… cargo build --release -p inka-runtime --features desktop
+cargo build --release -p inka-desktop-shim
 mkdir -p ~/.local/share/inka/runtime
 cp $CARGO_TARGET_DIR/release/libinka_runtime.so \
    ~/.local/share/inka/runtime/libinka_runtime-$(cat crates/inka-runtime/runtime-version).so
@@ -149,6 +151,7 @@ individual crate READMEs under `crates/` for build/test commands.
 
 - [`inka build`](build.md) — manifests, permissions, TypeScript, multi-file apps
 - [`inka run`](run.md) — the dev runner and its permission flags
+- [Desktop apps](desktop.md) — `inka desktop`, the shared-runtime native shell
 - [Permissions](permissions.md) — why things are deny-by-default and how to grant
 - [Dependencies & resolution](packages.md) — bundling `npm:`/`jsr:` packages
 - [Troubleshooting](troubleshooting.md) — `doctor`, exit codes, common errors

@@ -4,6 +4,7 @@
 inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta|--stable]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta|--stable] <file> [args...]
 inka cache   <file>
+inka desktop [entry] [-o <dir>] [--name <name>] [--identifier <id>] [--backend <kind>] [--icon <png>] [--payload <dir>] [--external[=<pkg>]]... [--no-bundle] [--minify] [--sourcemap] [--app-version <ver>] [--release-base <url>] [--error-reporting <url>]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
              [--no-toolchain|--toolchain-only] [--no-runtime] [--beta|--stable]
 inka doctor  [artifact] [--json] [--beta|--stable]
@@ -48,6 +49,17 @@ import graph that are missing from the Deno cache (`$DENO_DIR`), so later
 Requires a build with bundling support. See
 [Dependencies & resolution](packages.md).
 
+## `desktop`
+
+Package a web app as a native desktop application that shares the machine's
+runtime. The entry must serve HTTP (`export default { fetch }` or
+`Deno.serve`); `inka desktop <entry>` bundles it, and `inka desktop .` detects
+and builds a Vite project. Defaults come from `deno.json`'s `desktop` block
+(`app.name`/`app.identifier`/`app.icons`/`backend`/`output`/`release.baseUrl`/
+`errorReporting.url`, plus top-level `version`); CLI flags override them. The
+output is an app directory, a `.desktop` entry, and a `.tar.gz`. Linux only
+today. See [Desktop apps](desktop.md).
+
 ## `update`
 
 Reconcile the toolchain and shared runtime with the release channel:
@@ -80,10 +92,12 @@ newest beta). `--sha256` pins a checksum; `--insecure` skips verification;
 
 `doctor` with no argument prints a diagnostic report: the toolchain
 (`release (short-hash)` when baked, plus its `channel`), installed runtimes plus
-project status (config files, `node_modules`, `DENO_DIR`, bundling capability,
-launcher). The report is grouped into sections with status glyphs (`✓` ok, `!`
-warning, `✗` problem), marks the tuple the effective channel would select, and
-prints a `hint:` for each problem. It is informational and always exits `0`.
+the selected tuple's advertised capabilities (e.g. `desktop` on a
+desktop-enabled engine), project status (config files, `node_modules`,
+`DENO_DIR`, bundling capability, launcher, desktop shim). The report is grouped
+into sections with status glyphs (`✓` ok, `!` warning, `✗` problem), marks the
+tuple the effective channel would select, and prints a `hint:` for each problem.
+It is informational and always exits `0`.
 
 `doctor <artifact>` instead **inspects an inka executable**: its module, runtime
 floor and `tested-against` cap, `requires=`, `path-base`, baked permission
@@ -114,6 +128,10 @@ honor them.
 | `INKA_REPO` | `owner/repo` for beta discovery (default `Cantor-Industries/inka`) |
 | `INKA_GITHUB_TOKEN` / `GITHUB_TOKEN` | token for the GitHub Releases API (raises the rate limit) |
 | `INKA_LAUNCHER` | path to `inka-launcher` for `build` |
+| `INKA_DESKTOP_RUNTIME` | shared desktop runtime path for packaged apps (`inka desktop`) |
+| `INKA_DESKTOP_SHIM` | per-app shim path for `inka desktop` (default: next to `inka`) |
+| `INKA_LAUFEY_BACKEND` / `LAUFEY_DEV_DIR` | laufey backend binary / source checkout for `inka desktop` |
+| `INKA_LAUFEY_CACHE` | laufey backend cache root (default `~/.cache/inka/laufey`) |
 | `INKA_DEBUG` | verbose runtime/resolution logging |
 | `INK_LOG` | log level: `error`\|`warn`\|`info`\|`debug`\|`trace` (default `info`) |
 | `INK_LOG_STYLE` | color: `auto` (default; TTY only), `always`, `never` |

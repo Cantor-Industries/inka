@@ -629,6 +629,145 @@ pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
     })
 }
 
+/// Resolved `desktop` block for `inka desktop`. Deno-parity fields are read
+/// from `deno.json`/`deno.jsonc` (top-level `desktop`); `package.json`'s
+/// `inka.desktop` is an inka-specific fallback. Deno config wins per-key.
+///
+/// Only the fields Linux packaging honors today are surfaced. Malformed fields
+/// produce a warning and are ignored rather than failing the build.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub(crate) struct DesktopConfig {
+    pub app_name: Option<String>,
+    pub identifier: Option<String>,
+    /// Linux icon path (relative to the project directory).
+    pub icon_linux: Option<String>,
+    pub backend: Option<String>,
+    pub output_linux: Option<String>,
+    pub release_base: Option<String>,
+    pub error_reporting: Option<String>,
+    /// Top-level `version`, used as the auto-update app version default.
+    pub version: Option<String>,
+}
+
+/// Read a non-empty string field, warning when it has the wrong shape.
+fn desktop_string(
+    obj: Option<&Value>,
+    key: &str,
+    label: &str,
+    warns: &mut Vec<String>,
+) -> Option<String> {
+    match obj.and_then(|o| o.get(key)) {
+        None => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(_) => {
+            warns.push(format!("{label} must be a non-empty string; ignoring it"));
+            None
+        }
+    }
+}
+
+/// Resolve a platform icon value: a single path string, or Deno's list of
+/// `{ path, size }` entries (the largest size wins, since inka ships one PNG).
+fn desktop_icon(value: Option<&Value>, label: &str, warns: &mut Vec<String>) -> Option<String> {
+    match value {
+        None => None,
+        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::Array(entries)) => {
+            let mut best: Option<(u64, String)> = None;
+            for entry in entries {
+                let path = entry.get("path").and_then(Value::as_str);
+                let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
+                if let Some(path) = path.filter(|p| !p.is_empty()) {
+                    if best.as_ref().is_none_or(|(s, _)| size > *s) {
+                        best = Some((size, path.to_string()));
+                    }
+                }
+            }
+            if best.is_none() {
+                warns.push(format!(
+                    "{label} entries need a non-empty `path`; ignoring them"
+                ));
+            }
+            best.map(|(_, path)| path)
+        }
+        Some(_) => {
+            warns.push(format!(
+                "{label} must be a path string or a [{{ path, size }}] array; ignoring it"
+            ));
+            None
+        }
+    }
+}
+
+/// The `desktop` config object: `deno.json`'s top-level `desktop` when present,
+/// else `package.json`'s `inka.desktop`.
+fn desktop_block(cfg: &ConfigFiles) -> Option<&Value> {
+    cfg.deno
+        .as_ref()
+        .and_then(|d| d.get("desktop"))
+        .or_else(|| {
+            cfg.pkg
+                .as_ref()
+                .and_then(|p| p.get("inka"))
+                .and_then(|i| i.get("desktop"))
+        })
+}
+
+/// Resolve the `desktop` config plus non-fatal warnings. `version` comes from
+/// the top-level `version` and seeds `--app-version`.
+pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
+    let (cfg, mut warns) = load(cwd);
+    let mut out = DesktopConfig {
+        version: cfg
+            .deno
+            .as_ref()
+            .and_then(|d| d.get("version"))
+            .and_then(Value::as_str)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string),
+        ..Default::default()
+    };
+
+    let Some(block) = desktop_block(&cfg) else {
+        return (out, warns);
+    };
+    if !block.is_object() {
+        warns.push("`desktop` must be an object; ignoring it".to_string());
+        return (out, warns);
+    }
+
+    let app = block.get("app");
+    out.app_name = desktop_string(app, "name", "desktop.app.name", &mut warns);
+    out.identifier = desktop_string(app, "identifier", "desktop.app.identifier", &mut warns);
+    out.icon_linux = desktop_icon(
+        app.and_then(|a| a.get("icons"))
+            .and_then(|i| i.get("linux")),
+        "desktop.app.icons.linux",
+        &mut warns,
+    );
+    out.backend = desktop_string(Some(block), "backend", "desktop.backend", &mut warns);
+    out.output_linux = desktop_string(
+        block.get("output"),
+        "linux",
+        "desktop.output.linux",
+        &mut warns,
+    );
+    out.release_base = desktop_string(
+        block.get("release"),
+        "baseUrl",
+        "desktop.release.baseUrl",
+        &mut warns,
+    );
+    out.error_reporting = desktop_string(
+        block.get("errorReporting"),
+        "url",
+        "desktop.errorReporting.url",
+        &mut warns,
+    );
+
+    (out, warns)
+}
+
 /// A build-intent permission source that `inka build` bakes automatically but
 /// `inka run` does not apply (a documented asymmetry: run is deny-by-default
 /// unless flags or `-P` are given).
@@ -1576,6 +1715,109 @@ mod tests {
         let (s, _) = read_synth(&cwd, None);
         assert!(s.contains("allow-net=*"), "{s}");
         assert!(!s.contains("allow-env"), "deno.json should win: {s}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_reads_deno_json_block() {
+        let cwd = scratch_dir("desktop-config");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{
+  "version": "1.2.3",
+  "desktop": {
+    "app": {
+      "name": "Acme Mail",
+      "identifier": "com.acme.mail",
+      "icons": { "linux": "assets/icon.png" }
+    },
+    "backend": "cef",
+    "output": { "linux": "dist/mail" },
+    "release": { "baseUrl": "https://dl.acme.test/mail" },
+    "errorReporting": { "url": "https://err.acme.test" }
+  }
+}"#,
+        );
+        let (cfg, warns) = desktop_config(&cwd);
+        assert!(warns.is_empty(), "{warns:?}");
+        assert_eq!(cfg.app_name.as_deref(), Some("Acme Mail"));
+        assert_eq!(cfg.identifier.as_deref(), Some("com.acme.mail"));
+        assert_eq!(cfg.icon_linux.as_deref(), Some("assets/icon.png"));
+        assert_eq!(cfg.backend.as_deref(), Some("cef"));
+        assert_eq!(cfg.output_linux.as_deref(), Some("dist/mail"));
+        assert_eq!(
+            cfg.release_base.as_deref(),
+            Some("https://dl.acme.test/mail")
+        );
+        assert_eq!(
+            cfg.error_reporting.as_deref(),
+            Some("https://err.acme.test")
+        );
+        assert_eq!(cfg.version.as_deref(), Some("1.2.3"));
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_icon_array_picks_largest() {
+        let cwd = scratch_dir("desktop-icon-array");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "desktop": { "app": { "icons": { "linux": [
+              { "path": "icon-32.png", "size": 32 },
+              { "path": "icon-256.png", "size": 256 }
+            ] } } } }"#,
+        );
+        let (cfg, warns) = desktop_config(&cwd);
+        assert_eq!(cfg.icon_linux.as_deref(), Some("icon-256.png"));
+        assert!(warns.is_empty(), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_falls_back_to_package_json() {
+        let cwd = scratch_dir("desktop-pkg-fallback");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "package.json",
+            r#"{ "name": "t", "inka": { "desktop": { "app": { "name": "PkgApp" }, "backend": "raw" } } }"#,
+        );
+        let (cfg, warns) = desktop_config(&cwd);
+        assert_eq!(cfg.app_name.as_deref(), Some("PkgApp"));
+        assert_eq!(cfg.backend.as_deref(), Some("raw"));
+        assert!(warns.is_empty(), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_warns_on_malformed_fields() {
+        let cwd = scratch_dir("desktop-malformed");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "desktop": { "app": { "name": 7 }, "backend": [] } }"#,
+        );
+        let (cfg, warns) = desktop_config(&cwd);
+        assert_eq!(cfg.app_name, None);
+        assert_eq!(cfg.backend, None);
+        assert!(has_note(&warns, "desktop.app.name"), "{warns:?}");
+        assert!(has_note(&warns, "desktop.backend"), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_absent_is_empty() {
+        let cwd = scratch_dir("desktop-absent");
+        let _ = std::fs::remove_dir_all(&cwd);
+        std::fs::create_dir_all(&cwd).unwrap();
+        let (cfg, warns) = desktop_config(&cwd);
+        assert_eq!(cfg, DesktopConfig::default());
+        assert!(warns.is_empty(), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

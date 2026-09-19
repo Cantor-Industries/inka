@@ -50,6 +50,14 @@ returns to the stable channel.
 
 ## What's in this beta
 
+- **`inka desktop` — native desktop apps on the shared runtime.** Package a web
+  app (`export default { fetch }` / `Deno.serve`, or a Vite project) into a
+  native window backed by the prebuilt laufey webview backend. The app loads the
+  same shared, desktop-enabled runtime every other inka executable uses, so it
+  stays small instead of embedding a per-app engine. Configure it from
+  `deno.json`'s `desktop` block (`app.name`/`identifier`/`icons`, `backend`,
+  `output`, `release.baseUrl`, `errorReporting.url`) with CLI overrides. Linux
+  (`webview`) today. The desktop-enabled engine is runtime tuple `{{RUNTIME}}`.
 - **Fixed: import-map npm/jsr subpath resolution.** `inka run` now resolves a
   subpath import such as `import x from "@scope/pkg/sub"` when `@scope/pkg` is
   mapped to `npm:`/`jsr:` in `deno.json`. Deno's import map expands that entry
@@ -69,8 +77,9 @@ returns to the stable channel.
 
 ## Assets
 
-- `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher
-- `libinka_runtime-{{RUNTIME}}.so` — shared runtime tuple
+- `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
+  desktop shim (`libinka_desktop_shim.so`)
+- `libinka_runtime-{{RUNTIME}}.so` — shared runtime tuple (desktop-enabled)
 - `install.sh` + `versions.json` — bootstrap installer + version record
 
 `.sha256` sidecars are published for the toolchain and runtime.

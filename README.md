@@ -5,6 +5,7 @@
 - **Tiny artifacts** — a bundled module + a ~380 KB launcher, not a ~100 MB engine in every binary.
 - **Shared runtime** — the engine is installed once per user; inka executables load it at run time.
 - **Offline builds** — `inka build` resolves and bundles imports (import maps, `npm:`, `jsr:`, `node_modules`) into one self-contained module.
+- **Desktop apps** — `inka desktop` packages a web app that reuses the same shared runtime, so it stays small instead of embedding a per-app engine (Linux/webview today).
 
 The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment](#acknowledgments--deno).
 
@@ -149,6 +150,7 @@ inka build --allow-env app.ts      # bake a single grant (least privilege)
 inka build -P=server app.ts        # bake the `server` permission set from your config
 inka build --external sharp app.ts # keep `sharp` unbundled but embed it from node_modules
 inka build --minify app.ts         # minify the bundle
+inka desktop main.ts --name MyApp  # package a native desktop app (shared runtime)
 ```
 
 Permissions for an artifact come from explicit build-intent sources: the CLI
@@ -177,6 +179,7 @@ inka doctor               # machine + project state
 
 - [Getting started](docs/getting-started.md)
 - [`inka build`](docs/build.md)
+- [Desktop apps](docs/desktop.md)
 - [`inka run`](docs/run.md)
 - [Permissions](docs/permissions.md)
 - [Dependencies & resolution](docs/packages.md)
