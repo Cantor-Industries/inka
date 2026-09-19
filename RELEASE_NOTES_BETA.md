@@ -50,27 +50,59 @@ returns to the stable channel.
 
 ## What's in this beta
 
-- **`inka desktop` — native desktop apps on the shared runtime.** Package a web
-  app (`export default { fetch }` / `Deno.serve`, or a Vite project) into a
-  native window backed by the prebuilt laufey webview backend. The app loads the
-  same shared, desktop-enabled runtime every other inka executable uses, so it
-  stays small instead of embedding a per-app engine. Configure it from
-  `deno.json`'s `desktop` block (`app.name`/`identifier`/`icons`, `backend`,
-  `output`, `release.baseUrl`, `errorReporting.url`) with CLI overrides. Linux
-  (`webview`) today. The desktop-enabled engine is runtime tuple `{{RUNTIME}}`.
-- **Fixed: import-map npm/jsr subpath resolution.** `inka run` now resolves a
+### `inka desktop` — native desktop apps on the shared runtime
+
+Build a native desktop app that reuses the machine's one inka engine instead of
+embedding a ~150 MB copy per app. A prebuilt laufey window (system
+WebKitGTK on Linux) loads a small per-app shim, which unpacks your bundled app
+and loads the shared, desktop-enabled runtime. Linux/webview today.
+
+- **Package an app** (`inka desktop <entry>`) whose entry serves HTTP
+  (`export default { fetch }` or `Deno.serve`); the shell runs it on a loopback
+  port and navigates exactly one window to it. Bundling matches `inka build`
+  (import maps, `npm:`/`jsr:`, `node_modules`), and `--payload <dir>` packs an
+  already-built directory.
+- **Framework projects** (`inka desktop .`): detection vendored from Deno —
+  **Vite, Astro, Fresh, Remix, React Router, SvelteKit, Nuxt, SolidStart,
+  TanStack Start**. The project's build task runs, the framework entrypoint is
+  generated and bundled, and its output is shipped. Next.js is detected only to
+  give an actionable error (its server can't be bundled into a single-file
+  payload).
+- **`deno.json` `desktop` config** with CLI overrides: `app.name`,
+  `app.identifier` (reverse-DNS `.desktop` id), `app.icons.linux`, `backend`,
+  `output.linux`, `release.baseUrl`, `errorReporting.url`, and top-level
+  `version`. Config is discovered by walking up from the current directory;
+  malformed fields warn, and an invalid identifier/backend is a hard error.
+- **Dev workflow** (runs the source tree directly, no packaging):
+  - `--hmr` watches and hot-replaces changed modules via the inspector,
+    reloading the window when a change can't be applied in place.
+  - `--inspect[=host:port]` / `--inspect-brk` / `--inspect-wait` start a CDP
+    multiplexer for the runtime isolate (attach with `chrome://inspect`; use the
+    `/deno` target on the webview backend).
+- **Auto-update & error reporting**: `Deno.autoUpdate` with a signed
+  `latest.json` (SHA-256-verified patches, optional ed25519 signature) and a
+  staged `.update`/`.backup`/`.update-ok` swap; uncaught JS errors **and Rust
+  panics** POST to `errorReporting.url` over the runtime's own HTTP client.
+- **Packaging output**: an app directory (`<App>`, `<App>.so`, `runtime-version`,
+  `<id>.desktop`, optional `AppIcon.png`) plus a `<App>.tar.gz`.
+
+The desktop-enabled engine is runtime tuple `{{RUNTIME}}`; the release runtime
+is built with `--features desktop`, and `inka doctor` now reports the selected
+tuple's advertised capabilities (including `desktop`) and the shim.
+
+### Also in the 0.8.1 beta line
+
+- **Fixed: import-map npm/jsr subpath resolution.** `inka run` resolves a
   subpath import such as `import x from "@scope/pkg/sub"` when `@scope/pkg` is
-  mapped to `npm:`/`jsr:` in `deno.json`. Deno's import map expands that entry
-  to the URL form `npm:/@scope/pkg@ver/sub`; the runtime now parses it with
-  `deno_semver` (the same parser `inka build` uses) instead of failing with
+  mapped to `npm:`/`jsr:` in `deno.json`, instead of failing with
   `invalid package name ''`.
 - **Beta release channel.** `inka update --beta` / `install.sh --beta` install
-  the newest beta. The installed toolchain's channel now drives defaults, so a
-  beta toolchain selects prerelease runtime tuples without extra flags.
+  the newest beta; the installed toolchain's channel drives defaults, so a beta
+  toolchain selects prerelease runtime tuples without extra flags.
 - **Accurate version output.** `inka --version`, every `ui::title`, and
-  `inka-launcher --version` now print the installed release (e.g.
-  `{{REL}}`), not the crate version; `inka doctor` shows
-  `toolchain {{REL}} (<short-hash>)` and the effective `channel`.
+  `inka-launcher --version` print the installed release (e.g. `{{REL}}`);
+  `inka doctor` shows `toolchain {{REL}} (<short-hash>)` and the effective
+  `channel`.
 - **Stable releases refuse `--beta`.** On a stable release, `--beta` (and
   `INKA_CHANNEL=beta`) is a hard error with a hint to run `inka update --beta`.
   Dev builds remain beta-capable with a stable default.
