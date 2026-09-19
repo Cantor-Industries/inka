@@ -457,11 +457,21 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
     // Stage every binary first: if one is missing or unwritable, nothing is
     // replaced yet and the previous toolchain stays usable.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
-    for f in ["inka", "inka-launcher"] {
+    // `inka`/`inka-launcher` are required; the desktop shim is optional so an
+    // older archive (pre-desktop) still updates cleanly.
+    let targets: [(&str, bool); 3] = [
+        ("inka", true),
+        ("inka-launcher", true),
+        ("libinka_desktop_shim.so", false),
+    ];
+    for (f, required) in targets {
         let src = staging.join(f);
         if !src.is_file() {
-            cleanup_staged(&staged);
-            return Err(format!("toolchain archive is missing '{f}'"));
+            if required {
+                cleanup_staged(&staged);
+                return Err(format!("toolchain archive is missing '{f}'"));
+            }
+            continue;
         }
         let new = dir.join(format!(".{f}.new{nonce}"));
         if let Err(e) = fs::copy(&src, &new)

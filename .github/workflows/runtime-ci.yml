@@ -61,7 +61,8 @@ jobs:
           : "${CARGO_TARGET_DIR:?the runner must provide CARGO_TARGET_DIR}"
           cargo build --locked --release -p inka --features bundle
           cargo build --locked --release -p inka-launcher
-          cargo build --locked --release -p inka-runtime
+          cargo build --locked --release -p inka-desktop-shim
+          cargo build --locked --release -p inka-runtime --features desktop
 
       - name: Runtime ABI symbols
         run: scripts/ci/abi-symbols.sh "$CARGO_TARGET_DIR/release/libinka_runtime.so"

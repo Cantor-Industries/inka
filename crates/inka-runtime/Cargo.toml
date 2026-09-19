@@ -9,6 +9,11 @@ publish = false
 name = "inka_runtime"
 crate-type = ["cdylib"]
 
+[features]
+# Desktop (laufey backend) support: exports the laufey runtime ABI and boots a
+# window + the app's serve. The heavy engine is shared across desktop apps.
+desktop = ["dep:laufey", "dep:raw-window-handle"]
+
 [dependencies]
 async-trait = "=0.1.73"
 deno_ast = { version = "=0.53.3", features = ["cjs"] }
@@ -23,6 +28,8 @@ deno_semver = "=0.10.1"
 deno_terminal = { version = "=0.2.3", features = ["colors"] }
 import_map = "=0.25.0"
 inka-format = { path = "../inka-format" }
+laufey = { version = "=0.7.0", optional = true }
+raw-window-handle = { version = "=0.6.2", optional = true }
 node_resolver = "=0.97.0"
 oxc_resolver = "=11.24.3"
 sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }

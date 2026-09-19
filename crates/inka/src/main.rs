@@ -12,6 +12,7 @@
 mod build;
 mod channel;
 mod config;
+mod desktop;
 mod embed;
 mod help;
 mod permissions;
@@ -99,7 +100,9 @@ pub(crate) fn runtime_search_dirs() -> Vec<PathBuf> {
 }
 
 /// Top-level commands, in help order and for suggestions.
-pub(crate) const COMMANDS: [&str; 6] = ["build", "run", "cache", "update", "doctor", "help"];
+pub(crate) const COMMANDS: [&str; 7] = [
+    "build", "run", "cache", "desktop", "update", "doctor", "help",
+];
 
 fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
@@ -122,6 +125,7 @@ fn main() {
         "build" => build::cmd_build(&args[1..]),
         "run" => run::cmd_run(&args[1..]),
         "cache" => cmd_cache(&args[1..]),
+        "desktop" => desktop::cmd_desktop(&args[1..]),
         "update" => update::cmd_update(&args[1..]),
         "doctor" => cmd_doctor(&args[1..]),
         other if other.starts_with('-') => {
@@ -151,6 +155,7 @@ fn cmd_help(args: &[String]) {
         Some("build") => help::print(help::build(), help::Mode::Long),
         Some("run") => help::print(help::run(), help::Mode::Long),
         Some("cache") => help::print(help::cache(), help::Mode::Long),
+        Some("desktop") => help::print(help::desktop(), help::Mode::Long),
         Some("update") => help::print(help::update(), help::Mode::Long),
         Some("doctor") => help::print(help::doctor(), help::Mode::Long),
         Some("help") => help::print(help::help(), help::Mode::Long),
@@ -1007,6 +1012,23 @@ fn doctor_machine(effective: channel::Channel) {
                 "reinstall the toolchain, or set INKA_LAUNCHER".to_string(),
             ));
         }
+    }
+
+    // Desktop shim: the per-app loader for `inka desktop`.
+    let shim = env::var("INKA_DESKTOP_SHIM")
+        .ok()
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| {
+            env::current_exe().ok().and_then(|e| {
+                e.parent()
+                    .map(|d| d.join("libinka_desktop_shim.so"))
+                    .filter(|p| p.is_file())
+            })
+        });
+    match shim {
+        Some(p) => ui::ok("desktop", p.display().to_string()),
+        None => ui::warn_row("desktop", "shim not found; `inka desktop` unavailable"),
     }
 
     if problems.is_empty() && warnings.is_empty() {

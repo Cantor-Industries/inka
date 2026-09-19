@@ -92,11 +92,16 @@ jobs:
           export INKA_BUILD_COMMIT="${GITHUB_SHA:0:7}"
           cargo build --locked --release -p inka --features bundle
           cargo build --locked --release -p inka-launcher
+          # Per-app desktop shim (cdylib); the laufey backends load it and it
+          # forwards to the shared desktop-enabled runtime.
+          cargo build --locked --release -p inka-desktop-shim
 
       - name: Build runtime (always; tuple = runtime-version)
         run: |
           set -euo pipefail
-          cargo build --locked --release -p inka-runtime
+          # Desktop support is compiled into the shared runtime so every
+          # desktop app reuses one engine; box needs libclang (bindgen).
+          cargo build --locked --release -p inka-runtime --features desktop
           test -f "$CARGO_TARGET_DIR/release/libinka_runtime.so"
 
       - name: Stage release assets
@@ -108,8 +113,9 @@ jobs:
           # Toolchain binaries, packaged as one archive.
           cp "$BIN/inka" "$STAGE/inka"
           cp "$BIN/inka-launcher" "$STAGE/inka-launcher"
-          chmod +x "$STAGE/inka" "$STAGE/inka-launcher"
-          tar -czf "$STAGE/$TC" -C "$STAGE" inka inka-launcher
+          cp "$BIN/libinka_desktop_shim.so" "$STAGE/libinka_desktop_shim.so"
+          chmod +x "$STAGE/inka" "$STAGE/inka-launcher" "$STAGE/libinka_desktop_shim.so"
+          tar -czf "$STAGE/$TC" -C "$STAGE" inka inka-launcher libinka_desktop_shim.so
 
           # Engine asset (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$RUNTIME.so"

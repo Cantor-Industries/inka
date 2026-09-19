@@ -1,0 +1,15 @@
+[package]
+name = "inka-desktop-shim"
+license = "MIT"
+version = "0.8.1"
+edition = "2021"
+publish = false
+
+[lib]
+name = "inka_desktop_shim"
+crate-type = ["cdylib"]
+
+[dependencies]
+inka-format = { path = "../inka-format" }
+sha2 = "0.10"
+libc = "0.2"

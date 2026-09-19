@@ -135,6 +135,10 @@ pub(crate) fn top() -> &'static Help {
                 "execute a .ts/.js file through the installed runtime",
             ),
             ("cache", "fetch remote modules into the Deno cache"),
+            (
+                "desktop",
+                "package a web app as a shared-runtime desktop application",
+            ),
             ("update", "update the toolchain and shared runtime"),
             ("doctor", "diagnose the machine, or inspect an executable"),
             ("help", "show help for a command"),
@@ -321,6 +325,74 @@ pub(crate) fn cache() -> &'static Help {
             "inka cache -h",
         ],
         env: &[],
+    }
+}
+
+/// Package a web app as a desktop application (laufey backend + shared runtime).
+pub(crate) fn desktop() -> &'static Help {
+    &Help {
+        name: "desktop",
+        about: "package a web app as a desktop application sharing the inka runtime",
+        usage: &["desktop [entry] [options]"],
+        commands: &[],
+        arguments: &[(
+            "entry",
+            "the app's server entry (uses `Deno.serve` / `export default { fetch }`)",
+        )],
+        options: &[
+            (
+                "-o, --output <dir>",
+                "output app directory (default: the app name)",
+            ),
+            ("--name <name>", "application name (default: entry stem)"),
+            (
+                "--backend <kind>",
+                "laufey backend: webview (default), cef, or raw",
+            ),
+            ("--icon <png>", "application icon (Linux .png)"),
+            (
+                "--payload <dir>",
+                "use a prebuilt payload directory instead of bundling",
+            ),
+            (
+                "--external <pkg>",
+                "leave a package unbundled and embed it from node_modules",
+            ),
+            ("--no-bundle", "copy the entry verbatim as main.js"),
+            ("--minify", "minify the bundle"),
+            ("--sourcemap", "embed an inline source map"),
+            (
+                "--app-version <ver>",
+                "app version for Deno.autoUpdate (default: unset)",
+            ),
+            (
+                "--release-base <url>",
+                "base URL of the auto-update manifest host (latest.json + patches)",
+            ),
+            (
+                "--error-reporting <url>",
+                "POST uncaught errors to this endpoint",
+            ),
+            ("-h, --help", "show this help"),
+        ],
+        permissions: &[],
+        examples: &[
+            "inka desktop main.ts",
+            "inka desktop . -o dist/MyApp",
+            "inka desktop main.ts --payload ./dist",
+        ],
+        env: &[
+            ("INKA_LAUFEY_BACKEND", "path to a laufey backend binary"),
+            ("LAUFEY_DEV_DIR", "a laufey source checkout"),
+            (
+                "INKA_DESKTOP_SHIM",
+                "path to the per-app shim cdylib (default: next to inka)",
+            ),
+            (
+                "INKA_DESKTOP_RUNTIME",
+                "path to the shared libinka_runtime (runtime override)",
+            ),
+        ],
     }
 }
 

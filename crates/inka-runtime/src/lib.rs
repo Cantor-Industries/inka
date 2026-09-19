@@ -48,6 +48,13 @@ mod node_services;
 mod resolver;
 mod tsconfig;
 
+#[cfg(feature = "desktop")]
+mod desktop;
+#[cfg(feature = "desktop")]
+mod desktop_api;
+#[cfg(feature = "desktop")]
+mod desktop_js;
+
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
 // resource when node services are enabled. We always run with node_services
@@ -590,10 +597,22 @@ async fn run_module_async(
     permissions: PermissionsContainer,
     loader: Rc<dyn ModuleLoader>,
     node_services: node_services::InkaNodeServices,
+    serve: Option<(u16, String)>,
 ) -> Result<i32, String> {
     let services = build_services(permissions, loader, node_services);
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
+    let desktop = serve.is_some();
+    // Desktop mode: run the app's declarative server (`export default { fetch }`)
+    // on a loopback port the laufey backend navigates its window to.
+    if let Some((port, host)) = serve {
+        options.bootstrap.auto_serve = true;
+        options.bootstrap.serve_port = Some(port);
+        options.bootstrap.serve_host = Some(host);
+        // The bootstrap only installs the `export default { fetch }` server
+        // handler in run/serve mode.
+        options.bootstrap.mode = deno_runtime::WorkerExecutionMode::Run;
+    }
     // inka is bring-your-own-`node_modules` (BYONM): npm packages resolve from
     // the execution tree's `node_modules`, never Deno's global npm cache. This
     // flag drives `usesLocalNodeModulesDir` in deno_node's `require()`
@@ -610,8 +629,60 @@ async fn run_module_async(
     options.residual_lazy_js_sources = runtime_snapshot::RESIDUAL_LAZY_JS;
     options.residual_lazy_esm_sources = runtime_snapshot::RESIDUAL_LAZY_ESM;
     options.extensions = vec![inka_rt_state::init()];
+    #[cfg(feature = "desktop")]
+    if desktop {
+        // The `deno_desktop` ops are already in the V8 snapshot; only the
+        // laufey-backed state and the JS surface are added here.
+        options
+            .extensions
+            .push(crate::desktop::inka_desktop_state::init());
+    }
+    #[cfg(not(feature = "desktop"))]
+    let _ = desktop;
 
     let mut worker = MainWorker::bootstrap_from_options(main_module, services, options);
+
+    // Desktop: install the `Deno.BrowserWindow`/`Deno.desktop` JS surface (and
+    // auto-update/error-reporting) after the runtime bootstrap but before the
+    // app module runs, so the ops and internals are already present.
+    #[cfg(feature = "desktop")]
+    if desktop {
+        if let Err(e) = worker.execute_script(
+            "ext:inka_desktop.js",
+            crate::desktop_js::DESKTOP_JS.to_string().into(),
+        ) {
+            return Err(format!("desktop JS init failed: {e}"));
+        }
+        if let Err(e) = worker.execute_script(
+            "ext:inka_desktop_fix.js",
+            crate::desktop::DESKTOP_PROTO_FIX_JS.to_string().into(),
+        ) {
+            return Err(format!("desktop JS proto fix failed: {e}"));
+        }
+        // Auto-update + error-reporting surfaces (version/urls from the app
+        // manifest via the shim's environment).
+        let app_version = std::env::var("INKA_DESKTOP_APP_VERSION").ok();
+        let release_base = std::env::var("INKA_DESKTOP_RELEASE_BASE").ok();
+        let rolled_back = std::env::var("INKA_DESKTOP_ROLLED_BACK")
+            .map(|v| v == "1")
+            .unwrap_or(false);
+        let auto_js = crate::desktop_js::desktop_auto_update_js(
+            app_version.as_deref(),
+            rolled_back,
+            release_base.as_deref(),
+        );
+        if let Err(e) = worker.execute_script("ext:inka_auto_update.js", auto_js.into()) {
+            return Err(format!("desktop auto-update JS init failed: {e}"));
+        }
+        let error_url = std::env::var("INKA_DESKTOP_ERROR_REPORTING").ok();
+        let err_js = crate::desktop_js::desktop_error_reporting_js(
+            error_url.as_deref(),
+            app_version.as_deref(),
+        );
+        if let Err(e) = worker.execute_script("ext:inka_error_report.js", err_js.into()) {
+            return Err(format!("desktop error-report JS init failed: {e}"));
+        }
+    }
 
     if let Err(e) = worker.execute_main_module(main_module).await {
         return Err(format!("{e}"));
@@ -657,11 +728,13 @@ fn init_terminal() {
 }
 
 /// Runs an entry module from a tree (`dir`/`entry`) through the `PkgLoader`.
+/// `serve` puts the worker into deno-serve mode on `(port, host)`.
 fn run_tree(
     dir: &str,
     entry: &str,
     args: &[String],
     perm_dsl: Option<&str>,
+    serve: Option<(u16, String)>,
 ) -> Result<i32, String> {
     init_terminal();
     let root = PathBuf::from(dir);
@@ -735,7 +808,7 @@ fn run_tree(
             workspace: Rc::new(workspace),
             tsconfig: tsconfig::Resolver::new(root.clone()),
         });
-        run_module_async(&url, args, permissions, loader, ext_services).await
+        run_module_async(&url, args, permissions, loader, ext_services, serve).await
     })
 }
 
@@ -747,7 +820,7 @@ fn run_dir_inner(
     args: &[String],
     perm_dsl: Option<&str>,
 ) -> Result<i32, String> {
-    run_tree(dir, entry, args, perm_dsl)
+    run_tree(dir, entry, args, perm_dsl, None)
 }
 
 // ---- version ---------------------------------------------------------------

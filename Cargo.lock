@@ -4627,6 +4627,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inka-desktop-shim"
+version = "0.8.1"
+dependencies = [
+ "inka-format",
+ "libc",
+ "sha2",
+]
+
+[[package]]
 name = "inka-format"
 version = "0.8.1"
 
@@ -4655,8 +4664,10 @@ dependencies = [
  "deno_terminal",
  "import_map",
  "inka-format",
+ "laufey",
  "node_resolver",
  "oxc_resolver",
+ "raw-window-handle",
  "sys_traits",
  "tokio",
  "url",
@@ -4929,6 +4940,16 @@ checksum = "07293a4e297ac234359b510362495713f75ea345d5307140414f20c69ffeb087"
 dependencies = [
  "bitflags",
  "libc",
+]
+
+[[package]]
+name = "laufey"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a2a04490eb866f17dcbbb44c8277b45964eeb0f68bb17c444e69c2feff0db94"
+dependencies = [
+ "bindgen 0.72.1",
+ "tokio",
 ]
 
 [[package]]

@@ -419,6 +419,9 @@ else
     tar -xzf "$TMP/$TC_ARCHIVE" --no-same-owner --no-same-permissions \
         -C "$PREFIX/lib/inka"
     chmod 0755 "$PREFIX/lib/inka/inka" "$PREFIX/lib/inka/inka-launcher"
+    if [ -f "$PREFIX/lib/inka/libinka_desktop_shim.so" ]; then
+        chmod 0755 "$PREFIX/lib/inka/libinka_desktop_shim.so"
+    fi
     printf '%s\n' "$TC_VER" > "$PREFIX/lib/inka/VERSION"
 fi
 

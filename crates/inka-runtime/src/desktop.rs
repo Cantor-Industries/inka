@@ -1,0 +1,302 @@
+// Desktop runtime support for the shared `libinka_runtime` cdylib.
+//
+// The laufey backend loads `libinka_runtime-<tuple>.so` (via the per-app shim)
+// and calls `laufey_runtime_init/start/shutdown`. `start` runs `run_desktop`
+// below, which:
+//   1. resolves the app payload (a directory of bundled files) from
+//      `INKA_DESKTOP_PAYLOAD`,
+//   2. allocates a loopback port and runs the app's declarative server there
+//      (`export default { fetch }`) via deno_runtime's auto-serve,
+//   3. creates a laufey window and navigates it to that server once it is up,
+//   4. pumps laufey's JS-call event loop until the app quits.
+//
+// The heavy Deno/V8 engine lives in this shared library, so every desktop app
+// on the machine reuses it instead of embedding its own copy.
+
+use std::path::Path;
+use std::time::Duration;
+
+/// The entry module inside the payload directory.
+const DEFAULT_ENTRY: &str = "main.js";
+const DEFAULT_TITLE: &str = "inka app";
+const WINDOW_WIDTH: i32 = 1024;
+const WINDOW_HEIGHT: i32 = 720;
+/// How long to wait for the app's server to accept connections before giving
+/// up and showing the window anyway.
+const SERVE_WAIT: Duration = Duration::from_secs(30);
+/// Fixed interval between connection attempts.
+const SERVE_POLL: Duration = Duration::from_millis(200);
+/// Reveal the window even if the page never finishes loading (matches the
+/// laufey/deno desktop behavior of not leaving the user with an invisible app).
+const REVEAL_FALLBACK: Duration = Duration::from_secs(10);
+
+fn allocate_port(host: &str) -> std::io::Result<u16> {
+    let listener = std::net::TcpListener::bind((host, 0))?;
+    let port = listener.local_addr()?.port();
+    drop(listener);
+    Ok(port)
+}
+
+/// Poll until the app's loopback server accepts a connection.
+async fn wait_for_server(host: &str, port: u16) -> bool {
+    let deadline = tokio::time::Instant::now() + SERVE_WAIT;
+    loop {
+        if std::net::TcpStream::connect((host, port)).is_ok() {
+            return true;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(SERVE_POLL).await;
+    }
+}
+
+/// Apply a staged `.update` next to the loaded app dylib before the app boots,
+/// and roll back a previous update that never reached its `.update-ok`
+/// sentinel. This mirrors Deno's `cli/rt_desktop` auto-update swap; the file it
+/// patches is the per-app `<App>.so` (from `INKA_DESKTOP_APP_DYLIB`), never the
+/// shared runtime.
+#[cfg(unix)]
+fn apply_pending_update(dylib_path: &Path) -> bool {
+    let ext = dylib_path
+        .extension()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let update_path = dylib_path.with_extension(format!("{ext}.update"));
+    let backup_path = dylib_path.with_extension(format!("{ext}.backup"));
+    let sentinel_path = dylib_path.with_extension(format!("{ext}.update-ok"));
+
+    if update_path.exists() {
+        // New update pending: back up the live dylib without unlinking it, so a
+        // failed swap leaves a working file, then move the update in.
+        let _ = std::fs::remove_file(&sentinel_path);
+        let _ = std::fs::remove_file(&backup_path);
+        let backup_ok = std::fs::hard_link(dylib_path, &backup_path).is_ok()
+            || std::fs::copy(dylib_path, &backup_path).is_ok();
+        if !backup_ok {
+            eprintln!("[inka-desktop] could not stage an update backup");
+            return false;
+        }
+        if std::fs::rename(&update_path, dylib_path).is_err() {
+            let tmp = dylib_path.with_extension(format!("{ext}.update.tmp"));
+            let copy_ok = std::fs::copy(&update_path, &tmp).is_ok()
+                && std::fs::rename(&tmp, dylib_path).is_ok();
+            if copy_ok {
+                let _ = std::fs::remove_file(&update_path);
+            } else {
+                let _ = std::fs::remove_file(&tmp);
+                let _ = std::fs::remove_file(&backup_path);
+                eprintln!("[inka-desktop] failed to apply the staged update; retrying next launch");
+            }
+        }
+        return false;
+    }
+
+    if backup_path.exists() && !sentinel_path.exists() {
+        eprintln!("[inka-desktop] last update failed to start; rolling back");
+        let _ = std::fs::rename(&backup_path, dylib_path);
+        return true;
+    }
+    if backup_path.exists() && sentinel_path.exists() {
+        let _ = std::fs::remove_file(&backup_path);
+        let _ = std::fs::remove_file(&sentinel_path);
+    }
+    false
+}
+
+#[cfg(not(unix))]
+fn apply_pending_update(_dylib_path: &Path) -> bool {
+    false
+}
+
+/// Entry point run by `laufey_runtime_start`.
+fn run_desktop() {
+    // Apply/roll back any staged per-app update before anything else runs.
+    let rolled_back = std::env::var("INKA_DESKTOP_APP_DYLIB")
+        .ok()
+        .filter(|p| !p.is_empty())
+        .map(|p| apply_pending_update(Path::new(&p)))
+        .unwrap_or(false);
+    if rolled_back {
+        unsafe {
+            std::env::set_var("INKA_DESKTOP_ROLLED_BACK", "1");
+        }
+    }
+
+    // Error-reporting endpoint/version for the runtime's error handlers.
+    if let Ok(url) = std::env::var("INKA_DESKTOP_ERROR_REPORTING") {
+        if !url.trim().is_empty() {
+            deno_runtime::ops::desktop::set_error_report_config(
+                url,
+                std::env::var("INKA_DESKTOP_APP_VERSION").ok(),
+            );
+        }
+    }
+
+    let payload = std::env::var("INKA_DESKTOP_PAYLOAD").unwrap_or_else(|_| ".".to_string());
+    let entry = std::env::var("INKA_DESKTOP_ENTRY").unwrap_or_else(|_| DEFAULT_ENTRY.to_string());
+    let title =
+        std::env::var("INKA_DESKTOP_APP_NAME").unwrap_or_else(|_| DEFAULT_TITLE.to_string());
+    let host = "127.0.0.1".to_string();
+
+    let port = match allocate_port(&host) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[inka-desktop] failed to allocate a serve port: {e}");
+            laufey::quit();
+            return;
+        }
+    };
+    let url = format!("http://{host}:{port}/");
+    eprintln!("[inka-desktop] payload={payload} entry={entry} url={url}");
+
+    // Publish the address so `Deno.serve()` without an explicit port binds to
+    // the same loopback endpoint the window is navigated to. Set before any
+    // thread the runtime spawns (setenv is not thread-safe afterwards).
+    unsafe {
+        std::env::set_var("DENO_SERVE_ADDRESS", format!("tcp:{host}:{port}"));
+    }
+
+    // Permissions come from the build manifest when provided; otherwise grant
+    // the loopback address the shell serves on and read access to the app's own
+    // payload (a generated static server needs it).
+    let perms = std::env::var("INKA_DESKTOP_PERMS")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| format!("allow-net={host}\nallow-read={payload}"));
+
+    // Visible window; reveal on first load (with a fallback).
+    let window = laufey::Window::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+    window.set_title(&title);
+    let window_id = window.id();
+    let window = window.on_page_load(move |ev| {
+        eprintln!("[inka-desktop] page loaded window={}", ev.window_id);
+        laufey::Window::from_id(ev.window_id).show();
+    });
+    let _ = window;
+
+    // Run the app's Deno server on its own thread; when it exits, quit.
+    let worker_payload = payload.clone();
+    let worker_entry = entry.clone();
+    let worker_host = host.clone();
+    let worker_perms = perms.clone();
+    std::thread::Builder::new()
+        .name("inka-desktop-module".to_string())
+        .spawn(move || {
+            match super::run_tree(
+                &worker_payload,
+                &worker_entry,
+                &[],
+                Some(&worker_perms),
+                Some((port, worker_host)),
+            ) {
+                Ok(code) => eprintln!("[inka-desktop] app exited with {code}"),
+                Err(e) => eprintln!("[inka-desktop] app error: {e}"),
+            }
+            laufey::quit();
+        })
+        .expect("spawn desktop module thread");
+
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("[inka-desktop] failed to build tokio runtime: {e}");
+            laufey::quit();
+            return;
+        }
+    };
+
+    rt.block_on(async {
+        // Reveal the window even if the page never loads.
+        tokio::spawn(async move {
+            tokio::time::sleep(REVEAL_FALLBACK).await;
+            laufey::Window::from_id(window_id).show();
+        });
+        if wait_for_server(&host, port).await {
+            laufey::Window::from_id(window_id).navigate(&url);
+        } else {
+            eprintln!("[inka-desktop] app server did not come up; showing an empty window");
+            laufey::Window::from_id(window_id).show();
+        }
+        laufey::run().await;
+        eprintln!("[inka-desktop] event loop ended");
+    });
+}
+
+laufey::main!(run_desktop);
+
+/// Post-`DESKTOP_JS` fixup. The cppgc object templates capture their prototype
+/// before the vendored script runs, so its `Object.setPrototypeOf(proto,
+/// EventTarget.prototype)` never reaches instances. Patch the real prototype
+/// on first construction so `addEventListener`/`dispatchEvent` exist.
+pub(crate) const DESKTOP_PROTO_FIX_JS: &str = r#"
+(() => {
+  const ET = globalThis.EventTarget;
+  if (typeof ET !== "function") return;
+  const fix = (inst) => {
+    try {
+      const proto = Object.getPrototypeOf(inst);
+      if (proto && Object.getPrototypeOf(proto) !== ET.prototype) {
+        Object.setPrototypeOf(proto, ET.prototype);
+      }
+    } catch (_) {}
+    return inst;
+  };
+  const wrap = (obj, name) => {
+    const Orig = obj && obj[name];
+    if (typeof Orig !== "function") return;
+    const P = new Proxy(Orig, {
+      construct(target, args, newTarget) {
+        return fix(Reflect.construct(target, args, newTarget));
+      },
+    });
+    try {
+      Object.defineProperty(obj, name, {
+        value: P, writable: true, enumerable: false, configurable: true,
+      });
+    } catch (_) {}
+  };
+  wrap(globalThis.Deno, "BrowserWindow");
+  wrap(globalThis.Deno, "Tray");
+  wrap(globalThis, "Notification");
+  if (globalThis.Deno && globalThis.Deno.dock) fix(globalThis.Deno.dock);
+})();
+"#;
+
+// OpState populated for desktop mode: the laufey-backed `DesktopApi`, the
+// shared event channel, and the app-name / initial-window slots the desktop
+// ops read. Registered via `WorkerOptions.extensions`.
+deno_core::extension!(
+    inka_desktop_state,
+    state = |state: &mut deno_core::OpState| {
+        use deno_runtime::ops::desktop::create_desktop_event_channel;
+        use deno_runtime::ops::desktop::DesktopApi;
+        use deno_runtime::ops::desktop::DesktopAppName;
+        use deno_runtime::ops::desktop::InitialWindowId;
+        let (tx, rx) = create_desktop_event_channel();
+        let api = crate::desktop_api::WefDesktopApi::new(tx.0.clone());
+        let app_name =
+            std::env::var("INKA_DESKTOP_APP_NAME").unwrap_or_else(|_| DEFAULT_TITLE.to_string());
+        state.put(DesktopAppName(app_name));
+        state.put(InitialWindowId(std::sync::Mutex::new(None)));
+        state.put(std::sync::Arc::new(api) as std::sync::Arc<dyn DesktopApi>);
+        state.put(rx);
+        // Auto-update state: the per-app `.so` the ops patch, its version, and
+        // whether we rolled back from a failed update on this launch.
+        if let Ok(dylib) = std::env::var("INKA_DESKTOP_APP_DYLIB") {
+            if !dylib.is_empty() {
+                state.put(deno_runtime::ops::desktop::AutoUpdateState {
+                    dylib_path: std::path::PathBuf::from(dylib),
+                    app_version: std::env::var("INKA_DESKTOP_APP_VERSION").ok(),
+                    rolled_back: std::env::var("INKA_DESKTOP_ROLLED_BACK")
+                        .map(|v| v == "1")
+                        .unwrap_or(false),
+                });
+            }
+        }
+    }
+);
