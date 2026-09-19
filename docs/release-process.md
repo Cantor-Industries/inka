@@ -101,5 +101,6 @@ cargo test --locked -p inka-launcher
 cargo test --locked -p inka-desktop-shim
 cargo test --locked -p inka-format
 scripts/ci/deno-pins.sh
+scripts/ci/desktop-js-pins.sh
 bash -n install.sh scripts/ci/*.sh scripts/spike.sh
 ```

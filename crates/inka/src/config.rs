@@ -637,9 +637,13 @@ pub(crate) fn config_has_default_grants(cwd: &Path) -> bool {
 /// produce a warning and are ignored rather than failing the build.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub(crate) struct DesktopConfig {
+    /// Directory the config was discovered in. Relative `output`/`icon` paths
+    /// resolve against this, not the process CWD (matching how Deno treats
+    /// config-relative paths).
+    pub base_dir: std::path::PathBuf,
     pub app_name: Option<String>,
     pub identifier: Option<String>,
-    /// Linux icon path (relative to the project directory).
+    /// Linux icon path (relative to `base_dir`).
     pub icon_linux: Option<String>,
     pub backend: Option<String>,
     pub output_linux: Option<String>,
@@ -647,6 +651,25 @@ pub(crate) struct DesktopConfig {
     pub error_reporting: Option<String>,
     /// Top-level `version`, used as the auto-update app version default.
     pub version: Option<String>,
+}
+
+/// Walk up from `start` to the nearest directory containing a project config
+/// (`deno.json`/`deno.jsonc`/`package.json`). Returns `start` when none is
+/// found. `inka desktop` is config-discovering (like `deno desktop`); other
+/// commands stay CWD-scoped.
+pub(crate) fn discover_config_dir(start: &Path) -> std::path::PathBuf {
+    let mut dir = start;
+    loop {
+        for name in ["deno.json", "deno.jsonc", "package.json"] {
+            if dir.join(name).is_file() {
+                return dir.to_path_buf();
+            }
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return start.to_path_buf(),
+        }
+    }
 }
 
 /// Read a non-empty string field, warning when it has the wrong shape.
@@ -714,10 +737,14 @@ fn desktop_block(cfg: &ConfigFiles) -> Option<&Value> {
 }
 
 /// Resolve the `desktop` config plus non-fatal warnings. `version` comes from
-/// the top-level `version` and seeds `--app-version`.
+/// the top-level `version` and seeds `--app-version`. The config is discovered
+/// by walking up from `cwd` (like `deno desktop`), so running from a subdir
+/// still finds the project's `deno.json`.
 pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
-    let (cfg, mut warns) = load(cwd);
+    let base = discover_config_dir(cwd);
+    let (cfg, mut warns) = load(&base);
     let mut out = DesktopConfig {
+        base_dir: base,
         version: cfg
             .deno
             .as_ref()
@@ -739,19 +766,15 @@ pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
     let app = block.get("app");
     out.app_name = desktop_string(app, "name", "desktop.app.name", &mut warns);
     out.identifier = desktop_string(app, "identifier", "desktop.app.identifier", &mut warns);
+    let icons = app.and_then(|a| a.get("icons"));
     out.icon_linux = desktop_icon(
-        app.and_then(|a| a.get("icons"))
-            .and_then(|i| i.get("linux")),
+        icons.and_then(|i| i.get("linux")),
         "desktop.app.icons.linux",
         &mut warns,
     );
     out.backend = desktop_string(Some(block), "backend", "desktop.backend", &mut warns);
-    out.output_linux = desktop_string(
-        block.get("output"),
-        "linux",
-        "desktop.output.linux",
-        &mut warns,
-    );
+    let output = block.get("output");
+    out.output_linux = desktop_string(output, "linux", "desktop.output.linux", &mut warns);
     out.release_base = desktop_string(
         block.get("release"),
         "baseUrl",
@@ -764,6 +787,29 @@ pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
         "desktop.errorReporting.url",
         &mut warns,
     );
+
+    // mac/win fields are parsed for Deno parity but unused: only Linux
+    // packaging is implemented. Point that out rather than silently ignoring.
+    if out.output_linux.is_none()
+        && (output.and_then(|o| o.get("macos")).is_some()
+            || output.and_then(|o| o.get("windows")).is_some())
+    {
+        warns.push(
+            "desktop.output.macos/windows are ignored (only Linux is implemented); \
+             set desktop.output.linux"
+                .to_string(),
+        );
+    }
+    if out.icon_linux.is_none()
+        && (icons.and_then(|i| i.get("macos")).is_some()
+            || icons.and_then(|i| i.get("windows")).is_some())
+    {
+        warns.push(
+            "desktop.app.icons.macos/windows are ignored (only Linux is implemented); \
+             set desktop.app.icons.linux"
+                .to_string(),
+        );
+    }
 
     (out, warns)
 }
@@ -1816,8 +1862,52 @@ mod tests {
         let _ = std::fs::remove_dir_all(&cwd);
         std::fs::create_dir_all(&cwd).unwrap();
         let (cfg, warns) = desktop_config(&cwd);
-        assert_eq!(cfg, DesktopConfig::default());
+        assert_eq!(
+            cfg,
+            DesktopConfig {
+                base_dir: cwd.clone(),
+                ..Default::default()
+            }
+        );
         assert!(warns.is_empty(), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn desktop_config_discovers_parent_project() {
+        let root = scratch_dir("desktop-discover");
+        let _ = std::fs::remove_dir_all(&root);
+        write(
+            &root,
+            "deno.json",
+            r#"{ "desktop": { "app": { "name": "ParentApp" } } }"#,
+        );
+        let sub = root.join("src/nested");
+        std::fs::create_dir_all(&sub).unwrap();
+        let (cfg, warns) = desktop_config(&sub);
+        assert_eq!(cfg.app_name.as_deref(), Some("ParentApp"));
+        assert_eq!(cfg.base_dir, root);
+        assert!(warns.is_empty(), "{warns:?}");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn desktop_config_warns_on_platform_only_fields() {
+        let cwd = scratch_dir("desktop-platform-only");
+        let _ = std::fs::remove_dir_all(&cwd);
+        write(
+            &cwd,
+            "deno.json",
+            r#"{ "desktop": {
+              "output": { "macos": "dist/App.app" },
+              "app": { "icons": { "windows": "icon.ico" } }
+            } }"#,
+        );
+        let (cfg, warns) = desktop_config(&cwd);
+        assert_eq!(cfg.output_linux, None);
+        assert_eq!(cfg.icon_linux, None);
+        assert!(has_note(&warns, "desktop.output.macos"), "{warns:?}");
+        assert!(has_note(&warns, "desktop.app.icons.macos"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }

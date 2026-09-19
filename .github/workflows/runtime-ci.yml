@@ -55,6 +55,9 @@ jobs:
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
 
+      - name: Desktop JS vendor drift
+        run: scripts/ci/desktop-js-pins.sh
+
       - name: Build fast crates + runtime (release)
         run: |
           set -euo pipefail

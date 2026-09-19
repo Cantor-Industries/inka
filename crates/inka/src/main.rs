@@ -891,7 +891,7 @@ fn toolchain_label() -> String {
 /// Advertised capability names of an installed runtime (dlopen +
 /// `inka_runtime_features`). `None` when the library can't be loaded or the
 /// symbol is absent (an older runtime).
-fn runtime_features(path: &Path) -> Option<String> {
+pub(crate) fn runtime_features(path: &Path) -> Option<String> {
     type FnFeatures = unsafe extern "C" fn() -> *const std::ffi::c_char;
     let library = crate::run::load_runtime_library(path).ok()?;
     unsafe {

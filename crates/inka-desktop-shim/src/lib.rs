@@ -91,6 +91,85 @@ fn cache_root() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/inka/desktop"))
 }
 
+/// How many extracted payloads to keep cached (newest by mtime). Beyond this,
+/// unlocked entries are pruned on launch so the cache can't grow unbounded.
+const CACHE_KEEP: usize = 4;
+
+/// Try a non-blocking `flock` on `file`. Returns true on success.
+#[cfg(unix)]
+fn flock_nb(file: &std::fs::File, exclusive: bool) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let op = if exclusive {
+        libc::LOCK_EX
+    } else {
+        libc::LOCK_SH
+    } | libc::LOCK_NB;
+    unsafe { libc::flock(file.as_raw_fd(), op) == 0 }
+}
+
+#[cfg(not(unix))]
+fn flock_nb(_file: &std::fs::File, _exclusive: bool) -> bool {
+    false
+}
+
+/// Hold a shared lock on a payload directory for the life of the process, so a
+/// concurrent launch's prune leaves an in-use payload alone.
+fn lock_payload(dir: &Path) {
+    if let Ok(file) = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(dir.join(".lock"))
+    {
+        if flock_nb(&file, false) {
+            std::mem::forget(file);
+        }
+    }
+}
+
+/// Bound the payload cache: remove interrupted-extraction staging dirs and the
+/// oldest unlocked extracted payloads beyond [`CACHE_KEEP`]. The currently
+/// active payload is always skipped.
+fn prune_cache(root: &Path, current: &Path) {
+    let Ok(read) = std::fs::read_dir(root) else {
+        return;
+    };
+    let mut extracted: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    for ent in read.flatten() {
+        let path = ent.path();
+        if !path.is_dir() || path == current {
+            continue;
+        }
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name.contains(".tmp") {
+            let _ = std::fs::remove_dir_all(&path);
+            continue;
+        }
+        let mtime = ent
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        extracted.push((mtime, path));
+    }
+    // Newest first; drop the tail beyond the keep count when unlocked.
+    extracted.sort_by_key(|a| std::cmp::Reverse(a.0));
+    for (_, path) in extracted.into_iter().skip(CACHE_KEEP) {
+        let removable = match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path.join(".lock"))
+        {
+            Ok(file) => flock_nb(&file, true), // lock drops on scope end
+            Err(_) => true,                    // no lock file => not in use
+        };
+        if removable {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
 /// Newest `libinka_runtime-*.so` in `dir`, or an exact tuple when given.
 fn newest_runtime_in(dir: &Path, want: Option<&str>) -> Option<PathBuf> {
     if let Some(v) = want {
@@ -168,10 +247,11 @@ fn resolve_payload(self_path: &Path) -> Result<PathBuf, String> {
         .map(|b| format!("{b:02x}"))
         .collect();
 
-    let root = cache_root()
-        .ok_or_else(|| "cannot determine a cache dir".to_string())?
-        .join(key);
+    let cache = cache_root().ok_or_else(|| "cannot determine a cache dir".to_string())?;
+    let root = cache.join(key);
     if root.join(".ok").is_file() {
+        lock_payload(&root);
+        prune_cache(&cache, &root);
         return Ok(root);
     }
     let staging = root.with_extension(format!("tmp{}", std::process::id()));
@@ -190,6 +270,8 @@ fn resolve_payload(self_path: &Path) -> Result<PathBuf, String> {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::rename(&staging, &root)
         .map_err(|e| format!("cannot activate payload {}: {e}", root.display()))?;
+    lock_payload(&root);
+    prune_cache(&cache, &root);
     Ok(root)
 }
 
@@ -381,5 +463,60 @@ mod tests {
         std::fs::write(&fake, b"not an archive").unwrap();
         assert_eq!(resolve_payload(&fake).unwrap(), dir.join("app"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prune_removes_stale_tmp_and_oldest_unlocked() {
+        let root = std::env::temp_dir().join(format!("inka-shim-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        let current = root.join("current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(current.join(".ok"), b"ok").unwrap();
+        std::fs::create_dir_all(root.join("abc.tmp999")).unwrap();
+
+        let base = std::time::SystemTime::now() - std::time::Duration::from_secs(10_000);
+        let mut dirs = Vec::new();
+        for i in 0..6u64 {
+            let d = root.join(format!("payload{i}"));
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join(".ok"), b"ok").unwrap();
+            std::fs::File::open(&d)
+                .unwrap()
+                .set_modified(base + std::time::Duration::from_secs(i))
+                .unwrap();
+            dirs.push(d);
+        }
+        // Lock the oldest payload; it must survive the prune.
+        let locked = std::fs::OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(dirs[0].join(".lock"))
+            .unwrap();
+        assert!(flock_nb(&locked, true));
+
+        prune_cache(&root, &current);
+
+        assert!(
+            !root.join("abc.tmp999").exists(),
+            "stale staging dir pruned"
+        );
+        assert!(current.exists(), "current skipped");
+        assert!(dirs[0].exists(), "locked payload kept");
+        let remaining = (0..6)
+            .filter(|i| root.join(format!("payload{i}")).exists())
+            .count();
+        assert!(
+            remaining >= CACHE_KEEP,
+            "must keep at least CACHE_KEEP payloads, kept {remaining}"
+        );
+        assert!(
+            remaining < 6,
+            "prune should remove something, kept {remaining}"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

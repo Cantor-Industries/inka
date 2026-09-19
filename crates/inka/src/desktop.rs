@@ -389,7 +389,9 @@ fn resolve_shim() -> PathBuf {
 }
 
 /// The runtime tuple a packaged app should load: `INKA_DESKTOP_RUNTIME_TUPLE`
-/// when set, else the newest installed runtime.
+/// when set, else the newest installed runtime that advertises the `desktop`
+/// capability. A headless dev build of the same tuple is skipped so packaging
+/// doesn't pin an engine that can't host the app.
 fn installed_runtime_tuple() -> Option<String> {
     if let Ok(t) = env::var("INKA_DESKTOP_RUNTIME_TUPLE") {
         let t = t.trim();
@@ -397,9 +399,27 @@ fn installed_runtime_tuple() -> Option<String> {
             return Some(t.to_string());
         }
     }
-    crate::installed_parts_all(&crate::runtime_search_dirs())
-        .last()
-        .map(|(v, _)| v.to_string())
+    let runtimes = crate::installed_parts_all(&crate::runtime_search_dirs());
+    let mut newest: Option<String> = None;
+    for (v, path) in runtimes.iter().rev() {
+        if newest.is_none() {
+            newest = Some(v.to_string());
+        }
+        let desktop_ok = crate::runtime_features(path)
+            .map(|f| f.split(',').any(|x| x.trim() == "desktop"))
+            .unwrap_or(false);
+        if desktop_ok {
+            return Some(v.to_string());
+        }
+    }
+    if let Some(v) = newest {
+        ui::warn(format!(
+            "newest installed runtime {v} is not desktop-enabled; run `inka update` \
+             (or set INKA_DESKTOP_RUNTIME at launch)"
+        ));
+        return Some(v);
+    }
+    None
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -422,8 +442,10 @@ fn sanitize_name(name: &str) -> String {
 }
 
 /// Fill unset CLI flags from the resolved `desktop` config (CLI always wins).
-/// `output`/`icon` paths are project-relative, so they are joined with `cwd`.
-fn apply_config_defaults(a: &mut Args, cwd: &Path, cfg: crate::config::DesktopConfig) {
+/// `output`/`icon` paths are config-relative (the discovered project dir), so
+/// they are joined with `cfg.base_dir`.
+fn apply_config_defaults(a: &mut Args, cfg: crate::config::DesktopConfig) {
+    let base = cfg.base_dir;
     if a.app_name.is_none() {
         a.app_name = cfg.app_name;
     }
@@ -434,10 +456,10 @@ fn apply_config_defaults(a: &mut Args, cwd: &Path, cfg: crate::config::DesktopCo
         a.backend = cfg.backend;
     }
     if a.output.is_none() {
-        a.output = cfg.output_linux.map(|o| cwd.join(o));
+        a.output = cfg.output_linux.map(|o| base.join(o));
     }
     if a.icon.is_none() {
-        a.icon = cfg.icon_linux.map(|i| cwd.join(i));
+        a.icon = cfg.icon_linux.map(|i| base.join(i));
     }
     if a.app_version.is_none() {
         a.app_version = cfg.version;
@@ -482,7 +504,7 @@ pub fn cmd_desktop(args: &[String]) {
     for w in &warns {
         ui::warn(w);
     }
-    apply_config_defaults(&mut a, &cwd, cfg);
+    apply_config_defaults(&mut a, cfg);
 
     let entry = a.entry.clone().unwrap_or_else(|| {
         ui::log_error("no entry file given");
