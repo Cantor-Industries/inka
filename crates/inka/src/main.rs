@@ -15,6 +15,7 @@ mod config;
 mod desktop;
 mod desktop_devtools;
 mod embed;
+mod framework;
 mod help;
 mod permissions;
 mod run;
