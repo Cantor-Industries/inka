@@ -150,6 +150,7 @@ struct Args {
     no_bundle: bool,
     minify: bool,
     sourcemap: bool,
+    hmr: bool,
     external: Vec<String>,
     app_version: Option<String>,
     release_base: Option<String>,
@@ -168,6 +169,7 @@ fn parse_args(args: &[String]) -> Args {
         no_bundle: false,
         minify: false,
         sourcemap: false,
+        hmr: false,
         external: Vec::new(),
         app_version: None,
         release_base: None,
@@ -196,6 +198,7 @@ fn parse_args(args: &[String]) -> Args {
             "--no-bundle" => a.no_bundle = true,
             "--minify" => a.minify = true,
             "--sourcemap" => a.sourcemap = true,
+            "--hmr" => a.hmr = true,
             "--app-version" => a.app_version = Some(next(&mut it, arg)),
             "--release-base" => a.release_base = Some(next(&mut it, arg)),
             "--error-reporting" => a.error_reporting = Some(next(&mut it, arg)),
@@ -495,12 +498,78 @@ fn validate_identifier(id: &str) {
     }
 }
 
+/// The shared runtime to run a dev (`--hmr`) app with: `$INKA_DESKTOP_RUNTIME`,
+/// else the newest installed runtime that advertises the `desktop` capability.
+fn resolve_desktop_runtime() -> PathBuf {
+    if let Ok(p) = env::var("INKA_DESKTOP_RUNTIME") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return p;
+        }
+    }
+    let runtimes = crate::installed_parts_all(&crate::runtime_search_dirs());
+    for (_, path) in runtimes.iter().rev() {
+        let desktop_ok = crate::runtime_features(path)
+            .map(|f| f.split(',').any(|x| x.trim() == "desktop"))
+            .unwrap_or(false);
+        if desktop_ok {
+            return path.clone();
+        }
+    }
+    fail("no desktop-enabled runtime installed; run `inka update` or set INKA_DESKTOP_RUNTIME");
+}
+
+/// `inka desktop --hmr`: run `entry` (a source tree) through the shared desktop
+/// runtime and the laufey backend, watching `base` for changes. Never returns.
+fn run_hmr_dev(entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
+    if entry.is_dir() {
+        fail(
+            "--hmr runs an entry file today; framework dev-server HMR is not wired yet \
+             (pass an entry, e.g. `inka desktop --hmr main.ts`)",
+        );
+    }
+    let entry_abs = entry
+        .canonicalize()
+        .unwrap_or_else(|e| fail(&format!("cannot resolve {}: {e}", entry.display())));
+    let base_abs = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    let entry_rel = entry_abs
+        .strip_prefix(&base_abs)
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            fail(&format!(
+                "entry {} is outside the project dir {}",
+                entry_abs.display(),
+                base_abs.display()
+            ))
+        });
+    let runtime = resolve_desktop_runtime();
+
+    ui::title("desktop --hmr");
+    ui::row("entry", &entry_rel);
+    ui::row("watch", base_abs.display());
+    ui::row("runtime", runtime.display());
+    ui::row("backend", backend.display());
+
+    let status = Command::new(backend)
+        .env("LAUFEY_RUNTIME_PATH", &runtime)
+        .env("INKA_DESKTOP_PAYLOAD", &base_abs)
+        .env("INKA_DESKTOP_ENTRY", &entry_rel)
+        .env("INKA_DESKTOP_APP_NAME", app_name)
+        .env("INKA_DESKTOP_HMR_DIR", &base_abs)
+        .status();
+    match status {
+        Ok(s) => std::process::exit(s.code().unwrap_or(1)),
+        Err(e) => fail(&format!("could not launch the laufey backend: {e}")),
+    }
+}
+
 pub fn cmd_desktop(args: &[String]) {
     let mut a = parse_args(args);
     let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
     // `deno.json` `desktop` config fills in any flag left unset; CLI flags win.
     let (cfg, warns) = crate::config::desktop_config(&cwd);
+    let cfg_base = cfg.base_dir.clone();
     for w in &warns {
         ui::warn(w);
     }
@@ -542,6 +611,13 @@ pub fn cmd_desktop(args: &[String]) {
         }
         None => format!("com.inka.desktop.{}", app_name.to_lowercase()),
     };
+
+    // Dev-run HMR: run the source tree directly through the shared runtime and
+    // the laufey backend (no packaging). `--hmr` is a development mode only.
+    if a.hmr {
+        let backend_path = resolve_backend(&backend);
+        run_hmr_dev(&entry, &app_name, &cfg_base, &backend_path);
+    }
 
     ui::title("desktop");
 

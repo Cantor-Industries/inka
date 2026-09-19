@@ -37,6 +37,13 @@ const REVEAL_FALLBACK: Duration = Duration::from_secs(10);
 /// instead of the shell's window plus its own.
 static INITIAL_WINDOW: OnceLock<u32> = OnceLock::new();
 
+/// Shared set of displayed window ids, placed in OpState so the HMR runner can
+/// refresh every window after a reload (the `DesktopApi` trait doesn't expose
+/// it).
+pub(crate) struct DesktopOpenWindows(
+    pub(crate) std::sync::Arc<std::sync::Mutex<std::collections::HashSet<u32>>>,
+);
+
 fn allocate_port(host: &str) -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
     let port = listener.local_addr()?.port();
@@ -180,6 +187,16 @@ fn run_desktop() {
     // The bootstrap window is created inside the module thread by
     // `inka_desktop_state` (see `INITIAL_WINDOW`), so the shell only has to
     // navigate it once the server is up.
+    // Dev-run HMR: `inka desktop --hmr` sets this to the source tree, which the
+    // module thread both watches and executes from (the payload *is* the tree).
+    let hmr = std::env::var("INKA_DESKTOP_HMR_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .map(|dir| super::HmrOptions {
+            watch_dir: std::path::PathBuf::from(dir),
+            vfs_root: std::path::PathBuf::new(),
+            reload_url: Some(url.clone()),
+        });
     let worker_payload = payload.clone();
     let worker_entry = entry.clone();
     let worker_host = host.clone();
@@ -193,6 +210,7 @@ fn run_desktop() {
                 &[],
                 Some(&worker_perms),
                 Some((port, worker_host)),
+                hmr,
             ) {
                 Ok(code) => eprintln!("[inka-desktop] app exited with {code}"),
                 Err(e) => eprintln!("[inka-desktop] app error: {e}"),
@@ -334,8 +352,11 @@ deno_core::extension!(
             id
         });
         state.put(InitialWindowId(std::sync::Mutex::new(Some(initial_id))));
+        let open_windows = api.open_windows.clone();
         state.put(std::sync::Arc::new(api) as std::sync::Arc<dyn DesktopApi>);
         state.put(rx);
+        state.put(tx);
+        state.put(DesktopOpenWindows(open_windows));
         // Auto-update state: the per-app `.so` the ops patch, its version, and
         // whether we rolled back from a failed update on this launch.
         if let Ok(dylib) = std::env::var("INKA_DESKTOP_APP_DYLIB") {

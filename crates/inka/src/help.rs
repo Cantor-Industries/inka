@@ -372,6 +372,10 @@ pub(crate) fn desktop() -> &'static Help {
             ("--minify", "minify the bundle"),
             ("--sourcemap", "embed an inline source map"),
             (
+                "--hmr",
+                "dev-run the entry with hot module replacement (no packaging)",
+            ),
+            (
                 "--app-version <ver>",
                 "app version for Deno.autoUpdate (default: deno.json version)",
             ),

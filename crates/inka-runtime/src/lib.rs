@@ -54,6 +54,21 @@ mod desktop;
 mod desktop_api;
 #[cfg(feature = "desktop")]
 mod desktop_js;
+#[cfg(feature = "desktop")]
+mod hmr;
+
+/// Desktop HMR configuration (dev-run only). Always declared so the shared
+/// `run_module_async` signature is feature-independent; only desktop mode
+/// consumes it.
+#[allow(dead_code)]
+pub(crate) struct HmrOptions {
+    /// Directory on disk to watch for source changes.
+    pub(crate) watch_dir: std::path::PathBuf,
+    /// Root under which V8 registered the running scripts (the payload root).
+    pub(crate) vfs_root: std::path::PathBuf,
+    /// Re-navigate open windows to this URL after a reload.
+    pub(crate) reload_url: Option<String>,
+}
 
 // deno_node registers ops that borrow `RealSys` from the isolate's op state
 // (e.g. ops/process.rs, ops/require.rs), but deno_runtime only inserts that
@@ -598,6 +613,7 @@ async fn run_module_async(
     loader: Rc<dyn ModuleLoader>,
     node_services: node_services::InkaNodeServices,
     serve: Option<(u16, String)>,
+    hmr: Option<HmrOptions>,
 ) -> Result<i32, String> {
     let services = build_services(permissions, loader, node_services);
     let mut options = WorkerOptions::default();
@@ -638,7 +654,15 @@ async fn run_module_async(
             .push(crate::desktop::inka_desktop_state::init());
     }
     #[cfg(not(feature = "desktop"))]
-    let _ = desktop;
+    let _ = (desktop, &hmr);
+
+    // Desktop HMR drives `Debugger.setScriptSource`, which V8 gates behind the
+    // inspector live-edit flag (off by default in this engine build). Set it
+    // before the isolate is created.
+    #[cfg(feature = "desktop")]
+    if hmr.is_some() {
+        deno_core::v8::V8::set_flags_from_string("--inspector-live-edit");
+    }
 
     let mut worker = MainWorker::bootstrap_from_options(main_module, services, options);
 
@@ -684,6 +708,38 @@ async fn run_module_async(
         }
     }
 
+    // Desktop HMR (dev-run): create the watcher/inspector and run one event
+    // loop tick *before* the app module loads, so the inspector processes
+    // Debugger/Runtime enable and records `scriptParsed` for the app's modules.
+    #[cfg(feature = "desktop")]
+    let mut hmr_runner = if desktop {
+        match hmr {
+            Some(opts) => {
+                match crate::hmr::setup_desktop_hmr(
+                    &mut worker,
+                    opts.watch_dir,
+                    opts.vfs_root,
+                    opts.reload_url,
+                ) {
+                    Ok(runner) => Some(runner),
+                    Err(e) => {
+                        eprintln!("{}: HMR setup failed: {e}", colors::yellow_bold("warning"));
+                        None
+                    }
+                }
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    #[cfg(feature = "desktop")]
+    if hmr_runner.is_some() {
+        if let Err(e) = worker.run_event_loop(false).await {
+            return Err(format!("{e}"));
+        }
+    }
+
     if let Err(e) = worker.execute_main_module(main_module).await {
         return Err(format!("{e}"));
     }
@@ -699,37 +755,83 @@ async fn run_module_async(
         if let Err(e) = worker.dispatch_load_event() {
             eprintln!("{}: load event: {e}", colors::yellow_bold("warning"));
         }
-        let exit_code = loop {
-            if let Err(e) = worker.run_event_loop(false).await {
-                return Err(format!("{e}"));
-            }
-            // The laufey backend asks us to stop once its last window closes.
-            if crate::desktop::should_shutdown() {
-                break worker.exit_code();
-            }
-            let web_continue = match worker.dispatch_beforeunload_event() {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!(
-                        "{}: beforeunload event: {e}",
-                        colors::yellow_bold("warning")
-                    );
-                    false
+        let exit_code = if let Some(runner) = hmr_runner.as_mut() {
+            loop {
+                tokio::select! {
+                    hmr_result = runner.run() => {
+                        if let Err(e) = hmr_result {
+                            eprintln!("{}: HMR error: {e}", colors::yellow_bold("warning"));
+                        }
+                    }
+                    event_loop_result = worker.run_event_loop(false) => {
+                        if let Err(e) = event_loop_result {
+                            return Err(format!("{e}"));
+                        }
+                        // The laufey backend asks us to stop once its last
+                        // window closes.
+                        if crate::desktop::should_shutdown() {
+                            break worker.exit_code();
+                        }
+                        let web_continue = match worker.dispatch_beforeunload_event() {
+                            Ok(v) => v,
+                            Err(e) => {
+                                eprintln!(
+                                    "{}: beforeunload event: {e}",
+                                    colors::yellow_bold("warning")
+                                );
+                                false
+                            }
+                        };
+                        if !web_continue {
+                            let node_continue = match worker.dispatch_process_beforeexit_event() {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    eprintln!(
+                                        "{}: process.beforeExit event: {e}",
+                                        colors::yellow_bold("warning")
+                                    );
+                                    false
+                                }
+                            };
+                            if !node_continue {
+                                break worker.exit_code();
+                            }
+                        }
+                    }
                 }
-            };
-            if !web_continue {
-                let node_continue = match worker.dispatch_process_beforeexit_event() {
+            }
+        } else {
+            loop {
+                if let Err(e) = worker.run_event_loop(false).await {
+                    return Err(format!("{e}"));
+                }
+                if crate::desktop::should_shutdown() {
+                    break worker.exit_code();
+                }
+                let web_continue = match worker.dispatch_beforeunload_event() {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!(
-                            "{}: process.beforeExit event: {e}",
+                            "{}: beforeunload event: {e}",
                             colors::yellow_bold("warning")
                         );
                         false
                     }
                 };
-                if !node_continue {
-                    break worker.exit_code();
+                if !web_continue {
+                    let node_continue = match worker.dispatch_process_beforeexit_event() {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!(
+                                "{}: process.beforeExit event: {e}",
+                                colors::yellow_bold("warning")
+                            );
+                            false
+                        }
+                    };
+                    if !node_continue {
+                        break worker.exit_code();
+                    }
                 }
             }
         };
@@ -779,13 +881,16 @@ fn init_terminal() {
 }
 
 /// Runs an entry module from a tree (`dir`/`entry`) through the `PkgLoader`.
-/// `serve` puts the worker into deno-serve mode on `(port, host)`.
+/// `serve` puts the worker into deno-serve mode on `(port, host)`. `hmr` enables
+/// desktop hot module replacement (the tree is both the watch dir and the V8
+/// script root).
 fn run_tree(
     dir: &str,
     entry: &str,
     args: &[String],
     perm_dsl: Option<&str>,
     serve: Option<(u16, String)>,
+    mut hmr: Option<HmrOptions>,
 ) -> Result<i32, String> {
     init_terminal();
     let root = PathBuf::from(dir);
@@ -799,6 +904,13 @@ fn run_tree(
     // to this real path (symlinks inside the tree must not escape it).
     let root = std::fs::canonicalize(&root)
         .map_err(|e| format!("cannot resolve execution tree {}: {e}", root.display()))?;
+    // The V8 script root is this canonicalized tree; canonicalize the watch
+    // dir too so `strip_prefix` maps changed paths to script URLs.
+    if let Some(opts) = hmr.as_mut() {
+        opts.watch_dir =
+            std::fs::canonicalize(&opts.watch_dir).unwrap_or_else(|_| opts.watch_dir.clone());
+        opts.vfs_root = root.clone();
+    }
     let file = root.join(entry);
     if !file.is_file() {
         return Err(format!("entry module not found in artifact tree: {entry}"));
@@ -859,7 +971,7 @@ fn run_tree(
             workspace: Rc::new(workspace),
             tsconfig: tsconfig::Resolver::new(root.clone()),
         });
-        run_module_async(&url, args, permissions, loader, ext_services, serve).await
+        run_module_async(&url, args, permissions, loader, ext_services, serve, hmr).await
     })
 }
 
@@ -871,7 +983,7 @@ fn run_dir_inner(
     args: &[String],
     perm_dsl: Option<&str>,
 ) -> Result<i32, String> {
-    run_tree(dir, entry, args, perm_dsl, None)
+    run_tree(dir, entry, args, perm_dsl, None, None)
 }
 
 // ---- version ---------------------------------------------------------------
