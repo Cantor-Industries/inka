@@ -202,7 +202,6 @@ impl WefDesktopApi {
     /// verbatim. Deferring the reveal to load-finished means the window's first
     /// visible frame already has content. See
     /// https://github.com/denoland/deno/issues/35530.
-    #[allow(dead_code)] // kept for the initial-window flow (parity follow-up)
     pub(crate) fn create_initial_window(&self, width: i32, height: i32) -> u32 {
         let window = laufey::Window::new_with_options(
             width,

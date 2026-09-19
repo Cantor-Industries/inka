@@ -687,6 +687,57 @@ async fn run_module_async(
     if let Err(e) = worker.execute_main_module(main_module).await {
         return Err(format!("{e}"));
     }
+
+    // Desktop: mirror Deno's `run_event_loop_to_completion` (cli/lib/worker.rs).
+    // The load event is dispatched right after evaluation, then the event loop
+    // is driven until the app is done. Teardown only runs once `beforeunload`
+    // and `process.beforeExit` both decline to continue; the previous
+    // single-pass version tore the runtime down unconditionally, which cut a
+    // declarative `export default { fetch }` server short.
+    #[cfg(feature = "desktop")]
+    if desktop {
+        if let Err(e) = worker.dispatch_load_event() {
+            eprintln!("{}: load event: {e}", colors::yellow_bold("warning"));
+        }
+        let exit_code = loop {
+            if let Err(e) = worker.run_event_loop(false).await {
+                return Err(format!("{e}"));
+            }
+            // The laufey backend asks us to stop once its last window closes.
+            if crate::desktop::should_shutdown() {
+                break worker.exit_code();
+            }
+            let web_continue = match worker.dispatch_beforeunload_event() {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!(
+                        "{}: beforeunload event: {e}",
+                        colors::yellow_bold("warning")
+                    );
+                    false
+                }
+            };
+            if !web_continue {
+                let node_continue = match worker.dispatch_process_beforeexit_event() {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!(
+                            "{}: process.beforeExit event: {e}",
+                            colors::yellow_bold("warning")
+                        );
+                        false
+                    }
+                };
+                if !node_continue {
+                    break worker.exit_code();
+                }
+            }
+        };
+        let _ = worker.dispatch_unload_event();
+        let _ = worker.dispatch_process_exit_event();
+        return Ok(exit_code);
+    }
+
     if let Err(e) = worker.run_event_loop(false).await {
         return Err(format!("{e}"));
     }
@@ -840,10 +891,16 @@ pub extern "C" fn inka_runtime_version() -> *const c_char {
 // ---- capabilities ----------------------------------------------------------
 
 /// Capability names this runtime supports. The requireable names come from
-/// `inka-format` (single source shared with `build`/the launcher); `free-string`
-/// is a runtime-only capability (the optional `inka_runtime_free_string`).
+/// `inka-format` (single source shared with `build`/the launcher); `desktop`
+/// and `free-string` are runtime-only capabilities. `desktop` is advertised
+/// only by a runtime built with the laufey backend ABI (`--features desktop`),
+/// so `inka doctor` can report whether the installed engine can host desktop
+/// apps. It is deliberately not in `known_features()`: desktop apps load the
+/// runtime through the shim, not the launcher's `requires=` selection.
 fn runtime_features_string() -> String {
     let mut names = inka_format::known_features();
+    #[cfg(feature = "desktop")]
+    names.push("desktop");
     names.push("free-string");
     names.join(",")
 }
@@ -1090,5 +1147,10 @@ mod tests {
             );
         }
         assert!(advertised.split(',').any(|x| x == "free-string"));
+        // `desktop` is advertised iff this build enabled the laufey backend.
+        assert_eq!(
+            advertised.split(',').any(|x| x == "desktop"),
+            cfg!(feature = "desktop"),
+        );
     }
 }

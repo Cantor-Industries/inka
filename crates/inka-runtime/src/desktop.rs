@@ -14,6 +14,7 @@
 // on the machine reuses it instead of embedding its own copy.
 
 use std::path::Path;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 /// The entry module inside the payload directory.
@@ -26,9 +27,15 @@ const WINDOW_HEIGHT: i32 = 720;
 const SERVE_WAIT: Duration = Duration::from_secs(30);
 /// Fixed interval between connection attempts.
 const SERVE_POLL: Duration = Duration::from_millis(200);
-/// Reveal the window even if the page never finishes loading (matches the
-/// laufey/deno desktop behavior of not leaving the user with an invisible app).
+/// Reveal the bootstrap window even if its page never finishes loading
+/// (matches the laufey/deno desktop behavior of not leaving the user with an
+/// invisible app).
 const REVEAL_FALLBACK: Duration = Duration::from_secs(10);
+/// The bootstrap window allocated by `inka_desktop_state` before the app
+/// module runs. The shell navigates this same window to the loopback URL after
+/// the app's server is listening, so a programmatic app gets exactly one window
+/// instead of the shell's window plus its own.
+static INITIAL_WINDOW: OnceLock<u32> = OnceLock::new();
 
 fn allocate_port(host: &str) -> std::io::Result<u16> {
     let listener = std::net::TcpListener::bind((host, 0))?;
@@ -43,6 +50,11 @@ async fn wait_for_server(host: &str, port: u16) -> bool {
     loop {
         if std::net::TcpStream::connect((host, port)).is_ok() {
             return true;
+        }
+        // The app may have quit before ever serving (a plain script, or a
+        // startup failure); stop waiting so the shell can exit promptly.
+        if should_shutdown() {
+            return false;
         }
         if tokio::time::Instant::now() >= deadline {
             return false;
@@ -136,8 +148,6 @@ fn run_desktop() {
 
     let payload = std::env::var("INKA_DESKTOP_PAYLOAD").unwrap_or_else(|_| ".".to_string());
     let entry = std::env::var("INKA_DESKTOP_ENTRY").unwrap_or_else(|_| DEFAULT_ENTRY.to_string());
-    let title =
-        std::env::var("INKA_DESKTOP_APP_NAME").unwrap_or_else(|_| DEFAULT_TITLE.to_string());
     let host = "127.0.0.1".to_string();
 
     let port = match allocate_port(&host) {
@@ -166,17 +176,10 @@ fn run_desktop() {
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| format!("allow-net={host}\nallow-read={payload}"));
 
-    // Visible window; reveal on first load (with a fallback).
-    let window = laufey::Window::new(WINDOW_WIDTH, WINDOW_HEIGHT);
-    window.set_title(&title);
-    let window_id = window.id();
-    let window = window.on_page_load(move |ev| {
-        eprintln!("[inka-desktop] page loaded window={}", ev.window_id);
-        laufey::Window::from_id(ev.window_id).show();
-    });
-    let _ = window;
-
     // Run the app's Deno server on its own thread; when it exits, quit.
+    // The bootstrap window is created inside the module thread by
+    // `inka_desktop_state` (see `INITIAL_WINDOW`), so the shell only has to
+    // navigate it once the server is up.
     let worker_payload = payload.clone();
     let worker_entry = entry.clone();
     let worker_host = host.clone();
@@ -211,16 +214,46 @@ fn run_desktop() {
     };
 
     rt.block_on(async {
-        // Reveal the window even if the page never loads.
-        tokio::spawn(async move {
-            tokio::time::sleep(REVEAL_FALLBACK).await;
-            laufey::Window::from_id(window_id).show();
-        });
-        if wait_for_server(&host, port).await {
-            laufey::Window::from_id(window_id).navigate(&url);
-        } else {
-            eprintln!("[inka-desktop] app server did not come up; showing an empty window");
-            laufey::Window::from_id(window_id).show();
+        // Wait for the app's server *first*. The bootstrap window is created on
+        // the module thread during worker bootstrap, which strictly precedes the
+        // app module starting its server; reading `INITIAL_WINDOW` before this
+        // point races the module thread and can spuriously fall back to a
+        // second window. On Linux the backend only quits once every window is
+        // destroyed, so a stray hidden window keeps the process alive after the
+        // visible one is closed.
+        let server_up = wait_for_server(&host, port).await;
+        let window_id = INITIAL_WINDOW.get().copied();
+
+        if !should_shutdown() {
+            match window_id {
+                Some(id) => {
+                    // Reveal the hidden bootstrap window even if its page never
+                    // finishes loading (`create_initial_window` normally shows
+                    // it on first page load).
+                    tokio::spawn(async move {
+                        tokio::time::sleep(REVEAL_FALLBACK).await;
+                        laufey::Window::from_id(id).show();
+                    });
+                    if server_up {
+                        laufey::Window::from_id(id).navigate(&url);
+                    } else {
+                        eprintln!(
+                            "[inka-desktop] app server did not come up; showing an empty window"
+                        );
+                        laufey::Window::from_id(id).show();
+                    }
+                }
+                None => {
+                    // The module thread never reached worker bootstrap. Open a
+                    // visible fallback so the user still sees a window.
+                    eprintln!("[inka-desktop] no bootstrap window; opening a fallback window");
+                    let window = laufey::Window::new(WINDOW_WIDTH, WINDOW_HEIGHT);
+                    window.show();
+                    if server_up {
+                        window.navigate(&url);
+                    }
+                }
+            }
         }
         laufey::run().await;
         eprintln!("[inka-desktop] event loop ended");
@@ -228,6 +261,13 @@ fn run_desktop() {
 }
 
 laufey::main!(run_desktop);
+
+/// Whether the laufey backend has asked the runtime to stop (last window
+/// closed or the shell requested quit). The desktop event loop polls this so
+/// it can tear down cleanly even if the app still has pending work.
+pub(crate) fn should_shutdown() -> bool {
+    laufey::should_shutdown()
+}
 
 /// Post-`DESKTOP_JS` fixup. The cppgc object templates capture their prototype
 /// before the vendored script runs, so its `Object.setPrototypeOf(proto,
@@ -281,8 +321,19 @@ deno_core::extension!(
         let api = crate::desktop_api::WefDesktopApi::new(tx.0.clone());
         let app_name =
             std::env::var("INKA_DESKTOP_APP_NAME").unwrap_or_else(|_| DEFAULT_TITLE.to_string());
-        state.put(DesktopAppName(app_name));
-        state.put(InitialWindowId(std::sync::Mutex::new(None)));
+        state.put(DesktopAppName(app_name.clone()));
+        // Allocate the bootstrap window here, before the app module runs, so
+        // `Deno.BrowserWindow` sees an existing window id and the shell can
+        // navigate the *same* window instead of opening a second one. Created
+        // hidden; `create_initial_window` reveals it on first page load.
+        // `get_or_init` keeps the allocation single even if the state extension
+        // is initialized more than once.
+        let initial_id = *INITIAL_WINDOW.get_or_init(|| {
+            let id = api.create_initial_window(WINDOW_WIDTH, WINDOW_HEIGHT);
+            api.set_title(id, &app_name);
+            id
+        });
+        state.put(InitialWindowId(std::sync::Mutex::new(Some(initial_id))));
         state.put(std::sync::Arc::new(api) as std::sync::Arc<dyn DesktopApi>);
         state.put(rx);
         // Auto-update state: the per-app `.so` the ops patch, its version, and
