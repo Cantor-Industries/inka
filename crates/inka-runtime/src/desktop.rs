@@ -153,6 +153,32 @@ fn run_desktop() {
         }
     }
 
+    // Desktop dev inspector: the CLI (`inka desktop --inspect*`) binds the
+    // user-visible port and runs the CDP mux; here we just listen on the
+    // internal port it allocated. Creating the global inspector server before
+    // the worker boots makes the worker register with it automatically.
+    if let Ok(addr) = std::env::var("INKA_DESKTOP_INSPECT_INTERNAL_PORT") {
+        match addr.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                let published = deno_runtime::deno_inspector_server::InspectPublishUid {
+                    console: false,
+                    http: true,
+                };
+                match deno_runtime::deno_inspector_server::create_inspector_server(
+                    addr,
+                    "inka-desktop",
+                    published,
+                ) {
+                    Ok(_) => eprintln!("[inka-desktop] inspector server bound on {addr}"),
+                    Err(e) => eprintln!("[inka-desktop] inspector server failed: {e}"),
+                }
+            }
+            Err(e) => {
+                eprintln!("[inka-desktop] invalid INKA_DESKTOP_INSPECT_INTERNAL_PORT: {e}")
+            }
+        }
+    }
+
     let payload = std::env::var("INKA_DESKTOP_PAYLOAD").unwrap_or_else(|_| ".".to_string());
     let entry = std::env::var("INKA_DESKTOP_ENTRY").unwrap_or_else(|_| DEFAULT_ENTRY.to_string());
     let host = "127.0.0.1".to_string();

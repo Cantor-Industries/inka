@@ -376,6 +376,12 @@ pub(crate) fn desktop() -> &'static Help {
                 "dev-run the entry with hot module replacement (no packaging)",
             ),
             (
+                "--inspect[=host:port]",
+                "dev-run with a CDP mux for the runtime inspector (default 127.0.0.1:9229)",
+            ),
+            ("--inspect-brk[=host:port]", "like --inspect, but pause on the first statement"),
+            ("--inspect-wait[=host:port]", "like --inspect, but wait for a client to attach"),
+            (
                 "--app-version <ver>",
                 "app version for Deno.autoUpdate (default: deno.json version)",
             ),

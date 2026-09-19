@@ -13,6 +13,7 @@ mod build;
 mod channel;
 mod config;
 mod desktop;
+mod desktop_devtools;
 mod embed;
 mod help;
 mod permissions;

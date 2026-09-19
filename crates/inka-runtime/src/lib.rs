@@ -619,6 +619,15 @@ async fn run_module_async(
     let mut options = WorkerOptions::default();
     options.bootstrap.args = args.to_vec();
     let desktop = serve.is_some();
+    // Desktop dev (`--inspect-brk`/`--inspect-wait`): pause the isolate until a
+    // DevTools client attaches. The inspector server itself is created by the
+    // shell before the worker boots.
+    #[cfg(feature = "desktop")]
+    if desktop {
+        options.should_break_on_first_statement = std::env::var("INKA_DESKTOP_INSPECT_BRK").is_ok();
+        options.should_wait_for_inspector_session =
+            std::env::var("INKA_DESKTOP_INSPECT_WAIT").is_ok();
+    }
     // Desktop mode: run the app's declarative server (`export default { fetch }`)
     // on a loopback port the laufey backend navigates its window to.
     if let Some((port, host)) = serve {

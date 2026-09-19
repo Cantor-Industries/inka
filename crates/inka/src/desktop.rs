@@ -151,6 +151,9 @@ struct Args {
     minify: bool,
     sourcemap: bool,
     hmr: bool,
+    inspect: Option<Option<String>>,
+    inspect_brk: Option<Option<String>>,
+    inspect_wait: Option<Option<String>>,
     external: Vec<String>,
     app_version: Option<String>,
     release_base: Option<String>,
@@ -170,6 +173,9 @@ fn parse_args(args: &[String]) -> Args {
         minify: false,
         sourcemap: false,
         hmr: false,
+        inspect: None,
+        inspect_brk: None,
+        inspect_wait: None,
         external: Vec::new(),
         app_version: None,
         release_base: None,
@@ -199,6 +205,18 @@ fn parse_args(args: &[String]) -> Args {
             "--minify" => a.minify = true,
             "--sourcemap" => a.sourcemap = true,
             "--hmr" => a.hmr = true,
+            "--inspect" => a.inspect = Some(None),
+            "--inspect-brk" => a.inspect_brk = Some(None),
+            "--inspect-wait" => a.inspect_wait = Some(None),
+            other if other.starts_with("--inspect=") => {
+                a.inspect = Some(Some(other["--inspect=".len()..].to_string()));
+            }
+            other if other.starts_with("--inspect-brk=") => {
+                a.inspect_brk = Some(Some(other["--inspect-brk=".len()..].to_string()));
+            }
+            other if other.starts_with("--inspect-wait=") => {
+                a.inspect_wait = Some(Some(other["--inspect-wait=".len()..].to_string()));
+            }
             "--app-version" => a.app_version = Some(next(&mut it, arg)),
             "--release-base" => a.release_base = Some(next(&mut it, arg)),
             "--error-reporting" => a.error_reporting = Some(next(&mut it, arg)),
@@ -519,12 +537,24 @@ fn resolve_desktop_runtime() -> PathBuf {
     fail("no desktop-enabled runtime installed; run `inka update` or set INKA_DESKTOP_RUNTIME");
 }
 
-/// `inka desktop --hmr`: run `entry` (a source tree) through the shared desktop
-/// runtime and the laufey backend, watching `base` for changes. Never returns.
-fn run_hmr_dev(entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
+/// Parse an `--inspect` address (`host:port` or bare `port`), defaulting to the
+/// Node-style `127.0.0.1:9229`.
+fn parse_inspect_addr(value: Option<&str>) -> String {
+    match value.map(str::trim).filter(|v| !v.is_empty()) {
+        None => "127.0.0.1:9229".to_string(),
+        Some(v) if v.chars().all(|c| c.is_ascii_digit()) => format!("127.0.0.1:{v}"),
+        Some(v) => v.to_string(),
+    }
+}
+
+/// `inka desktop --hmr` / `--inspect*`: run `entry` (a source tree) through the
+/// shared desktop runtime and the laufey backend, without packaging. Optionally
+/// watches `base` for HMR and/or fronts the runtime inspector with the CDP
+/// mux. Never returns.
+fn run_desktop_dev(a: &Args, entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
     if entry.is_dir() {
         fail(
-            "--hmr runs an entry file today; framework dev-server HMR is not wired yet \
+            "dev mode runs an entry file today; framework dev-server HMR is not wired yet \
              (pass an entry, e.g. `inka desktop --hmr main.ts`)",
         );
     }
@@ -544,19 +574,74 @@ fn run_hmr_dev(entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
         });
     let runtime = resolve_desktop_runtime();
 
-    ui::title("desktop --hmr");
+    ui::title("desktop dev");
     ui::row("entry", &entry_rel);
-    ui::row("watch", base_abs.display());
+    if a.hmr {
+        ui::row("watch", base_abs.display());
+    }
     ui::row("runtime", runtime.display());
     ui::row("backend", backend.display());
 
-    let status = Command::new(backend)
-        .env("LAUFEY_RUNTIME_PATH", &runtime)
+    let mut cmd = Command::new(backend);
+    cmd.env("LAUFEY_RUNTIME_PATH", &runtime)
         .env("INKA_DESKTOP_PAYLOAD", &base_abs)
         .env("INKA_DESKTOP_ENTRY", &entry_rel)
-        .env("INKA_DESKTOP_APP_NAME", app_name)
-        .env("INKA_DESKTOP_HMR_DIR", &base_abs)
-        .status();
+        .env("INKA_DESKTOP_APP_NAME", app_name);
+    if a.hmr {
+        cmd.env("INKA_DESKTOP_HMR_DIR", &base_abs);
+    }
+
+    // Keep the tokio runtime and mux handle alive for the child's lifetime.
+    let mut _mux: Option<(tokio::runtime::Runtime, crate::desktop_devtools::MuxHandle)> = None;
+    let user_inspect = a
+        .inspect
+        .as_ref()
+        .or(a.inspect_brk.as_ref())
+        .or(a.inspect_wait.as_ref());
+    if let Some(user_addr) = user_inspect {
+        let listen: std::net::SocketAddr = parse_inspect_addr(user_addr.as_deref())
+            .parse()
+            .unwrap_or_else(|e| fail(&format!("invalid --inspect address: {e}")));
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap_or_else(|e| fail(&format!("cannot start the DevTools mux runtime: {e}")));
+        let deno_port = crate::desktop_devtools::allocate_random_port()
+            .unwrap_or_else(|e| fail(&format!("cannot allocate an inspector port: {e}")));
+        // No CEF renderer on webview: point the (unused) CEF leg at a dead
+        // port so the mux's CEF endpoints fail cleanly rather than hang.
+        let cef_port = crate::desktop_devtools::allocate_random_port()
+            .unwrap_or_else(|e| fail(&format!("cannot allocate a renderer port: {e}")));
+        let handle = rt
+            .block_on(crate::desktop_devtools::spawn_mux(
+                crate::desktop_devtools::MuxConfig {
+                    listen,
+                    deno_internal: ([127, 0, 0, 1], deno_port).into(),
+                    cef_internal: ([127, 0, 0, 1], cef_port).into(),
+                    inspect_brk: a.inspect_brk.is_some(),
+                    wait_for_debugger: a.inspect_brk.is_some() || a.inspect_wait.is_some(),
+                },
+            ))
+            .unwrap_or_else(|e| fail(&format!("cannot start the DevTools mux: {e}")));
+        let mux = handle.listen.to_string();
+        ui::info(format!(
+            "DevTools mux on ws://{mux}  (open chrome://inspect; use /deno for the runtime isolate)"
+        ));
+        cmd.env("INKA_DESKTOP_MUX_WS", &mux).env(
+            "INKA_DESKTOP_INSPECT_INTERNAL_PORT",
+            format!("127.0.0.1:{deno_port}"),
+        );
+        if a.inspect_brk.is_some() {
+            cmd.env("INKA_DESKTOP_INSPECT_BRK", "1");
+        }
+        if a.inspect_wait.is_some() {
+            cmd.env("INKA_DESKTOP_INSPECT_WAIT", "1");
+        }
+        _mux = Some((rt, handle));
+    }
+
+    let status = cmd.status();
+    drop(_mux);
     match status {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
         Err(e) => fail(&format!("could not launch the laufey backend: {e}")),
@@ -612,11 +697,13 @@ pub fn cmd_desktop(args: &[String]) {
         None => format!("com.inka.desktop.{}", app_name.to_lowercase()),
     };
 
-    // Dev-run HMR: run the source tree directly through the shared runtime and
-    // the laufey backend (no packaging). `--hmr` is a development mode only.
-    if a.hmr {
+    // Dev mode (`--hmr`/`--inspect*`): run the source tree directly through the
+    // shared runtime and the laufey backend (no packaging).
+    let inspect_requested =
+        a.inspect.is_some() || a.inspect_brk.is_some() || a.inspect_wait.is_some();
+    if a.hmr || inspect_requested {
         let backend_path = resolve_backend(&backend);
-        run_hmr_dev(&entry, &app_name, &cfg_base, &backend_path);
+        run_desktop_dev(&a, &entry, &app_name, &cfg_base, &backend_path);
     }
 
     ui::title("desktop");
