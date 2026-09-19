@@ -129,6 +129,41 @@ fn apply_pending_update(_dylib_path: &Path) -> bool {
     false
 }
 
+/// Install a panic hook that reports Rust panics to the configured
+/// `errorReporting.url` (JS errors go through the injected error-reporting JS).
+/// Ported from Deno's `cli/rt_desktop`. Best-effort: the original hook still
+/// runs, so normal panic output is preserved.
+fn install_panic_hook() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+    ONCE.call_once(|| {
+        let orig = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            if let Some((url, app_version)) = deno_runtime::ops::desktop::error_report_config() {
+                let message = info
+                    .payload()
+                    .downcast_ref::<&str>()
+                    .map(|s| (*s).to_string())
+                    .or_else(|| info.payload().downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "inka runtime panicked".to_string());
+                let location = info
+                    .location()
+                    .map(|l| format!("at {}:{}:{}", l.file(), l.line(), l.column()));
+                let body = deno_core::serde_json::json!({
+                    "version": 1,
+                    "message": message,
+                    "stack": location,
+                    "appVersion": app_version,
+                    "platform": std::env::consts::OS,
+                    "arch": std::env::consts::ARCH,
+                });
+                deno_runtime::ops::desktop::send_error_report(url, &body.to_string());
+            }
+            orig(info);
+        }));
+    });
+}
+
 /// Entry point run by `laufey_runtime_start`.
 fn run_desktop() {
     // Apply/roll back any staged per-app update before anything else runs.
@@ -150,6 +185,7 @@ fn run_desktop() {
                 url,
                 std::env::var("INKA_DESKTOP_APP_VERSION").ok(),
             );
+            install_panic_hook();
         }
     }
 

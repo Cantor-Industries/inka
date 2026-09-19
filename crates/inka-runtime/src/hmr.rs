@@ -621,3 +621,23 @@ pub fn setup_desktop_hmr(
     );
     Ok(runner)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn transpiles_typescript_for_hmr() {
+        let url = Url::parse("file:///app/mod.ts").unwrap();
+        let out = transpile_for_hmr(&url, "export const n: number = 1;\n".to_string()).unwrap();
+        assert!(!out.contains(": number"), "{out}");
+        assert!(out.contains("export const n"), "{out}");
+    }
+
+    #[test]
+    fn leaves_javascript_untouched() {
+        let url = Url::parse("file:///app/mod.js").unwrap();
+        let src = "export const n = 1;\n".to_string();
+        assert_eq!(transpile_for_hmr(&url, src.clone()).unwrap(), src);
+    }
+}

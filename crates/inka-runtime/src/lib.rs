@@ -715,6 +715,18 @@ async fn run_module_async(
         if let Err(e) = worker.execute_script("ext:inka_error_report.js", err_js.into()) {
             return Err(format!("desktop error-report JS init failed: {e}"));
         }
+        // Give the panic-hook path the OpState HTTP client, so a Rust panic is
+        // reported over the same TLS/permission configuration as JS errors.
+        {
+            let op_state = worker.js_runtime.op_state();
+            let client = {
+                let mut state = op_state.borrow_mut();
+                deno_runtime::deno_fetch::get_or_create_client_from_state(&mut state)
+            };
+            if let Ok(client) = client {
+                deno_runtime::ops::desktop::set_error_report_client(client);
+            }
+        }
     }
 
     // Desktop HMR (dev-run): create the watcher/inspector and run one event

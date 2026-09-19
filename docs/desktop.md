@@ -142,17 +142,41 @@ manifest: add a `perms=` line to the appended manifest, or set
 ## Auto-update
 
 Point `desktop.release.baseUrl` (or `--release-base`) at a host serving a
-`latest.json` and patches. The runtime provides `Deno.autoUpdate`; on launch the
+`latest.json` and patches, and set `version` / `--app-version`. On launch the
 shell applies a staged `<App>.so.update` next to the shim, rolling back to
-`.backup` if the new build never reaches its `.update-ok` sentinel. `version` /
-`--app-version` is reported alongside update metadata and error reports.
+`.backup` if the new build never reaches its `.update-ok` sentinel. The runtime
+provides `Deno.autoUpdate(url, opts)`.
+
+### `latest.json` schema
+
+```jsonc
+{
+  "version": "1.5.0",
+  "patches": {
+    // keyed by the *currently installed* version
+    "1.4.0": { "name": "app-1.4.0-to-1.5.0.bsdiff", "sha256": "<64 hex>" }
+  },
+  // Optional, when a `publicKey` is passed to Deno.autoUpdate:
+  // `signature` is an ed25519 signature over the UTF-8 bytes of `signed`.
+  "signature": "<base64>",
+  "signed": "{\"version\":\"1.5.0\",\"patches\":{\"1.4.0\":{\"name\":\"app-1.4.0-to-1.5.0.bsdiff\",\"sha256\":\"...\"}}}"
+}
+```
+
+- Every patch entry **must** carry `sha256`; the runtime verifies the downloaded
+  patch against it (and rejects a mismatch) before applying it.
+- With `publicKey`, `signed` must be the canonical manifest as a **string** and
+  `signature` the ed25519 signature over its bytes; only the parsed `signed`
+  payload is trusted. `Deno.autoUpdate` refuses non-`https` URLs and
+  `redirect: "error"`.
 
 ## Error reporting
 
 `desktop.errorReporting.url` (or `--error-reporting`) makes the runtime POST
-uncaught errors and panics as JSON (`message`, `stack`, `appVersion`,
-`platform`, `arch`). The destination is fixed by the operator at build time and
-cannot be retargeted from app code.
+uncaught JS errors **and Rust panics** as JSON (`message`, `stack`,
+`appVersion`, `platform`, `arch`). The destination is fixed by the operator at
+build time and cannot be retargeted from app code. Only `https://` (or a local
+`file://` path) is accepted; plain `http://` is rejected.
 
 ## Environment
 

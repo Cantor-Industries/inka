@@ -1400,6 +1400,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn split_host_port_handles_ipv4_and_ipv6() {
+        assert_eq!(
+            split_host_port("127.0.0.1:9229"),
+            Some(("127.0.0.1".to_string(), Some(9229)))
+        );
+        assert_eq!(
+            split_host_port("localhost"),
+            Some(("localhost".to_string(), None))
+        );
+        assert_eq!(
+            split_host_port("[::1]:9333"),
+            Some(("::1".to_string(), Some(9333)))
+        );
+        assert_eq!(split_host_port("host:notaport"), None);
+    }
+
     fn test_config() -> MuxConfig {
         MuxConfig {
             listen: "127.0.0.1:9229".parse().unwrap(),
