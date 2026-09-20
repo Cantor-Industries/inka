@@ -10,6 +10,7 @@
 //   inka help [command]
 
 mod build;
+mod cef;
 mod channel;
 mod config;
 mod desktop;
@@ -1054,6 +1055,18 @@ fn doctor_machine(effective: channel::Channel) {
     match shim {
         Some(p) => ui::ok("desktop", p.display().to_string()),
         None => ui::warn_row("desktop", "shim not found; `inka desktop` unavailable"),
+    }
+
+    // Shared CEF runtime: installed lazily by `inka desktop --backend cef` and
+    // symlinked into each CEF app.
+    let cef_dir = cef::shared_cef_dir();
+    if cef_dir.join("libcef.so").is_file() {
+        ui::ok("shared cef", cef_dir.display().to_string());
+    } else {
+        ui::row(
+            "shared cef",
+            format!("{} (not installed)", cef_dir.display()),
+        );
     }
 
     if problems.is_empty() && warnings.is_empty() {

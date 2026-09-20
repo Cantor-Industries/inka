@@ -23,9 +23,12 @@ use crate::help::{self, Mode};
 use crate::ui;
 
 /// laufey backend release inka is pinned to (matches `laufey = 0.7.0`).
-const LAUFEY_VERSION: &str = "0.7.0";
+pub(crate) const LAUFEY_VERSION: &str = "0.7.0";
 /// Linux target triple for laufey backend assets.
-const LAUFEY_TARGET: &str = "x86_64-unknown-linux-gnu";
+pub(crate) const LAUFEY_TARGET: &str = "x86_64-unknown-linux-gnu";
+/// Marker written at the root of an app dir we generated, so a later package
+/// build may safely clear it (and nothing else).
+const APP_DIR_MARKER: &str = ".inka-desktop-app";
 
 /// Pinned SHA-256 digests for laufey backend archives (trust anchor). Kept in
 /// sync with `denoland/deno`'s `cli/laufey_sums.lock` for the pinned release, so
@@ -768,13 +771,33 @@ pub fn cmd_desktop(args: &[String]) {
     let launcher = out.join(&app_name);
     let runtime_so = out.join(format!("{app_name}.so"));
 
-    fs::create_dir_all(&out)
-        .unwrap_or_else(|e| fail(&format!("cannot create {}: {e}", out.display())));
+    // Clear a previous build (only one we generated), then stage the backend.
+    // A CEF backend ships a whole directory (libcef.so + resources) whose files
+    // must sit next to the launcher: laufey's RPATH is `.:$ORIGIN`.
+    if let Err(e) = reserve_app_dir(&out) {
+        fail(&e);
+    }
+    let _ = fs::write(out.join(APP_DIR_MARKER), b"");
+    let (staged_backend, cef_bundled) = match stage_backend(&backend_path, &out) {
+        Ok(v) => v,
+        Err(e) => fail(&e),
+    };
+    if let Err(e) = check_target_collisions(&launcher, &runtime_so, &staged_backend) {
+        fail(&e);
+    }
+
     if let Err(e) = pack_shim(&shim, &runtime_so, &files, &manifest) {
         fail(&e);
     }
-    fs::copy(&backend_path, &launcher)
-        .unwrap_or_else(|e| fail(&format!("cannot place backend: {e}")));
+    if launcher != staged_backend {
+        // Rename the backend to the app name so laufey auto-loads `<App>.so`.
+        fs::rename(&staged_backend, &launcher).unwrap_or_else(|e| {
+            fail(&format!(
+                "cannot rename backend to {}: {e}",
+                launcher.display()
+            ))
+        });
+    }
     set_exec(&launcher);
     set_exec(&runtime_so);
 
@@ -832,6 +855,9 @@ pub fn cmd_desktop(args: &[String]) {
     ui::row("runtime", runtime_so.display());
     ui::row("payload", format!("{} file(s) embedded", files.len()));
     ui::row("backend", backend_path.display());
+    if cef_bundled {
+        ui::row("runtime files", "laufey + shared CEF (symlinked)");
+    }
     ui::row("id", &id);
     ui::status_ok(format!("packaged {}", out.display()));
 }
@@ -1015,4 +1041,286 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Stage the laufey backend into the app dir and return `(staged path, is_cef)`.
+///
+/// A CEF backend directory carries `libcef.so` plus Chromium resources
+/// (`*.pak`, `icudtl.dat`, `locales/`, …) that CEF resolves next to the
+/// launcher; laufey's RPATH is `.:$ORIGIN`, so they must be reachable from the
+/// app dir. Those files are shared per machine (see `crate::cef`) and symlinked
+/// in; if sharing is unavailable, fall back to a self-contained copy. Other
+/// backends link system libraries and ship only the binary — copy just that, so
+/// a dev override (`INKA_LAUFEY_BACKEND`/`LAUFEY_DEV_DIR`) never drags in a
+/// whole `target/release`.
+fn stage_backend(backend_path: &Path, out: &Path) -> Result<(PathBuf, bool), String> {
+    stage_backend_in(backend_path, out, None)
+}
+
+/// `stage_backend` with an explicit shared CEF dir (used by tests); `None`
+/// resolves the per-machine `INKA_CEF_HOME`/XDG location.
+fn stage_backend_in(
+    backend_path: &Path,
+    out: &Path,
+    shared_override: Option<&Path>,
+) -> Result<(PathBuf, bool), String> {
+    fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    let dir = backend_path.parent().ok_or_else(|| {
+        format!(
+            "backend has no parent directory: {}",
+            backend_path.display()
+        )
+    })?;
+    let exe_name = backend_path
+        .file_name()
+        .ok_or_else(|| format!("backend has no file name: {}", backend_path.display()))?
+        .to_os_string();
+    let dest = out.join(&exe_name);
+    let cef = dir.join("libcef.so").is_file();
+    if !cef {
+        fs::copy(backend_path, &dest)
+            .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
+        return Ok((dest, false));
+    }
+
+    // Prefer the shared runtime: symlink it in so each app is a few MB.
+    let shared = match shared_override {
+        Some(s) => crate::cef::ensure_shared_cef_at(dir, backend_path, s).map(|()| s.to_path_buf()),
+        None => crate::cef::ensure_shared_cef(dir, backend_path),
+    };
+    let linked = shared.and_then(|shared| {
+        crate::cef::link_into_app(&shared, out)?;
+        fs::copy(backend_path, &dest)
+            .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
+        Ok(shared)
+    });
+    match linked {
+        Ok(_) => Ok((dest, true)),
+        Err(e) => {
+            ui::warn(format!(
+                "could not use the shared CEF runtime ({e}); copying it into the app"
+            ));
+            // Discard any partial links and ship a self-contained copy.
+            let _ = fs::remove_dir_all(out);
+            fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+            let _ = fs::write(out.join(APP_DIR_MARKER), b"");
+            fs::copy(backend_path, &dest)
+                .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
+            crate::cef::copy_dir_all(dir, out)?;
+            // Drop our download marker and laufey's self-extracting runtime
+            // cache if they tagged along from the backend cache dir.
+            let _ = fs::remove_file(out.join(".downloaded"));
+            if let Some(stem) = Path::new(&exe_name).file_stem() {
+                let stem = stem.to_string_lossy();
+                let _ = fs::remove_dir_all(out.join(format!(".{stem}")));
+                let _ = fs::remove_file(out.join(format!(".{stem}.cache")));
+            }
+            Ok((dest, true))
+        }
+    }
+}
+
+/// Prepare `out` for a fresh package. A directory we generated (it carries
+/// `APP_DIR_MARKER`) or an empty one is cleared; anything else is treated as
+/// user data and refused rather than silently deleted.
+fn reserve_app_dir(out: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(out) {
+        Err(_) => {}
+        Ok(md) if md.is_dir() => {
+            // `runtime-version` lets a package built before the marker existed
+            // be replaced in place instead of being mistaken for user data.
+            let is_ours =
+                out.join(APP_DIR_MARKER).exists() || out.join("runtime-version").is_file();
+            let is_empty = fs::read_dir(out)
+                .map(|mut e| e.next().is_none())
+                .unwrap_or(false);
+            if !is_ours && !is_empty {
+                return Err(format!(
+                    "refusing to overwrite {}: it was not created by `inka desktop`; \
+                     pass -o/--output to choose a different directory",
+                    out.display()
+                ));
+            }
+            fs::remove_dir_all(out).map_err(|e| format!("cannot clear {}: {e}", out.display()))?;
+        }
+        Ok(_) => {
+            return Err(format!(
+                "refusing to overwrite {}: a file with that name exists; pass -o/--output",
+                out.display()
+            ))
+        }
+    }
+    fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))
+}
+
+/// Refuse app-derived paths that would clobber a staged backend file. The app
+/// dir starts as a copy of the backend dir, and `fs::copy`/`fs::rename` replace
+/// silently, so an app named e.g. `libcef` would overwrite `libcef.so`.
+fn check_target_collisions(
+    launcher: &Path,
+    runtime_so: &Path,
+    staged_backend: &Path,
+) -> Result<(), String> {
+    if runtime_so.exists() {
+        return Err(format!(
+            "app would overwrite a backend file at {}; pass --name/-o to rename the app",
+            runtime_so.display()
+        ));
+    }
+    // The staged backend is what we rename *into* the launcher, so it colliding
+    // with itself is the normal case, not a clash.
+    if launcher != staged_backend && launcher.exists() {
+        return Err(format!(
+            "app would overwrite a backend file at {}; pass --name/-o to rename the app",
+            launcher.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    static N: AtomicU32 = AtomicU32::new(0);
+
+    /// A fresh, empty scratch directory under the temp dir.
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!(
+            "inka-desktop-{tag}-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stage_backend_shares_cef_runtime_and_keeps_launcher_real() {
+        let base = scratch("stage-cef");
+        let backend_dir = base.join("cef");
+        let shared = base.join("shared/cef");
+        let out = base.join("app");
+        fs::create_dir_all(backend_dir.join("locales")).unwrap();
+        fs::write(backend_dir.join("laufey"), b"exe").unwrap();
+        fs::write(backend_dir.join("libcef.so"), b"cef").unwrap();
+        fs::write(backend_dir.join("chrome-sandbox"), b"sandbox").unwrap();
+        fs::write(backend_dir.join("locales/en-US.pak"), b"pak").unwrap();
+        fs::write(backend_dir.join(".downloaded"), b"v\n").unwrap();
+
+        let (staged, cef) =
+            stage_backend_in(&backend_dir.join("laufey"), &out, Some(&shared)).unwrap();
+
+        assert!(cef, "a libcef.so sibling marks the CEF backend");
+        assert_eq!(staged, out.join("laufey"));
+        // The launcher stays a real per-app file (laufey derives `<exe>.so`).
+        assert!(!fs::symlink_metadata(out.join("laufey"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // The runtime is shared once and symlinked into the app.
+        assert!(shared.join("libcef.so").is_file());
+        assert!(fs::symlink_metadata(out.join("libcef.so"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read_link(out.join("libcef.so")).unwrap(),
+            shared.join("libcef.so")
+        );
+        assert!(out.join("locales/en-US.pak").is_file());
+        assert!(!out.join(".downloaded").exists(), "download marker dropped");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn stage_backend_without_cef_copies_only_the_binary() {
+        let base = scratch("stage-webview");
+        let backend_dir = base.join("webview");
+        let out = base.join("app");
+        fs::create_dir_all(&backend_dir).unwrap();
+        fs::write(backend_dir.join("laufey_webview"), b"exe").unwrap();
+        fs::write(backend_dir.join("extra.txt"), b"extra").unwrap();
+
+        let (staged, cef) = stage_backend(&backend_dir.join("laufey_webview"), &out).unwrap();
+
+        assert!(!cef);
+        assert_eq!(staged, out.join("laufey_webview"));
+        assert!(out.join("laufey_webview").is_file());
+        assert!(
+            !out.join("extra.txt").exists(),
+            "non-CEF backends copy the binary only"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn reserve_app_dir_clears_ours_and_empty_but_refuses_user_data() {
+        let base = scratch("reserve");
+
+        let fresh = base.join("fresh");
+        reserve_app_dir(&fresh).unwrap();
+        assert!(fresh.is_dir(), "missing dir must be created");
+
+        let empty = base.join("empty");
+        fs::create_dir_all(&empty).unwrap();
+        reserve_app_dir(&empty).unwrap();
+        assert!(empty.is_dir());
+
+        let ours = base.join("ours");
+        fs::create_dir_all(&ours).unwrap();
+        fs::write(ours.join(APP_DIR_MARKER), b"").unwrap();
+        fs::write(ours.join("stale"), b"x").unwrap();
+        reserve_app_dir(&ours).unwrap();
+        assert!(!ours.join("stale").exists(), "marker dir must be cleared");
+
+        let user = base.join("user");
+        fs::create_dir_all(&user).unwrap();
+        fs::write(user.join("important"), b"keep").unwrap();
+        assert!(reserve_app_dir(&user).is_err());
+        assert!(user.join("important").is_file(), "user data preserved");
+
+        let file = base.join("afile");
+        fs::write(&file, b"x").unwrap();
+        assert!(reserve_app_dir(&file).is_err());
+
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn check_target_collisions_rejects_clobbering_backend_files() {
+        let base = scratch("collide");
+        let out = base.join("app");
+        fs::create_dir_all(&out).unwrap();
+        let libcef = out.join("libcef.so");
+        fs::write(&libcef, b"cef").unwrap();
+
+        // Runtime `.so` landing on the backend library.
+        assert!(
+            check_target_collisions(&out.join("libcef"), &libcef, &libcef).is_err(),
+            "app named libcef must be refused"
+        );
+
+        // Launcher landing on another backend file.
+        fs::write(out.join("laufey"), b"exe").unwrap();
+        assert!(
+            check_target_collisions(&out.join("laufey"), &out.join("app.so"), &libcef).is_err()
+        );
+
+        // Normal names are fine, and renaming the backend onto itself is fine.
+        assert!(
+            check_target_collisions(&out.join("myapp"), &out.join("myapp.so"), &libcef).is_ok()
+        );
+        assert!(check_target_collisions(
+            &out.join("laufey"),
+            &out.join("myapp.so"),
+            &out.join("laufey")
+        )
+        .is_ok());
+
+        let _ = fs::remove_dir_all(&base);
+    }
 }
