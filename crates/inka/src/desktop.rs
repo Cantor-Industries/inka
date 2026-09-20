@@ -34,7 +34,7 @@ const APP_DIR_MARKER: &str = ".inka-desktop-app";
 /// sync with `denoland/deno`'s `cli/laufey_sums.lock` for the pinned release, so
 /// a download is verified against a value checked into this repo rather than
 /// the release's own (unsigned) `SHA256SUMS`.
-const LAUFEY_SUMS: &[(&str, &str)] = &[
+pub(crate) const LAUFEY_SUMS: &[(&str, &str)] = &[
     (
         "laufey-cef-aarch64-apple-darwin.tar.gz",
         "edc9d8d68016417f726f0a7268240c015017439036e05cf16c464856cd423f47",
@@ -105,7 +105,7 @@ const LAUFEY_SUMS: &[(&str, &str)] = &[
     ),
 ];
 
-fn laufey_archive_name(backend: &str) -> String {
+pub(crate) fn laufey_archive_name(backend: &str) -> String {
     let archive_backend = if backend == "raw" { "winit" } else { backend };
     let ext = if LAUFEY_TARGET.contains("windows") {
         "zip"
@@ -161,6 +161,8 @@ struct Args {
     app_version: Option<String>,
     release_base: Option<String>,
     error_reporting: Option<String>,
+    installer: bool,
+    engine_base: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -183,6 +185,8 @@ fn parse_args(args: &[String]) -> Args {
         app_version: None,
         release_base: None,
         error_reporting: None,
+        installer: false,
+        engine_base: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -223,6 +227,8 @@ fn parse_args(args: &[String]) -> Args {
             "--app-version" => a.app_version = Some(next(&mut it, arg)),
             "--release-base" => a.release_base = Some(next(&mut it, arg)),
             "--error-reporting" => a.error_reporting = Some(next(&mut it, arg)),
+            "--installer" => a.installer = true,
+            "--engine-base" => a.engine_base = Some(next(&mut it, arg)),
             other if other.starts_with("--external=") => {
                 a.external.push(other["--external=".len()..].to_string());
             }
@@ -805,7 +811,8 @@ pub fn cmd_desktop(args: &[String]) {
     // inka data dir. Explicit env wins; otherwise use the newest installed
     // runtime (the release runtime is desktop-enabled). Without either, the app
     // needs `$INKA_DESKTOP_RUNTIME` at launch.
-    match installed_runtime_tuple() {
+    let runtime_tuple = installed_runtime_tuple();
+    match &runtime_tuple {
         Some(tuple) => {
             let _ = fs::write(out.join("runtime-version"), format!("{tuple}\n"));
         }
@@ -826,28 +833,53 @@ pub fn cmd_desktop(args: &[String]) {
         desktop_entry(&app_name, &id),
     );
 
-    // ---- tarball ----
-    let tarball = out.with_extension("tar.gz");
-    let parent = match out.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
+    // ---- artifacts ----
+    let installer_outputs = if a.installer {
+        let runtime = match runtime_tuple.as_deref() {
+            Some(t) => t,
+            None => fail(
+                "cannot build an installer without the required runtime tuple; \
+                 run `inka update` or set INKA_DESKTOP_RUNTIME_TUPLE",
+            ),
+        };
+        let spec = crate::installer::Spec {
+            app_name: &app_name,
+            app_id: &id,
+            backend: &backend,
+            runtime,
+            app_version: a.app_version.as_deref(),
+            app_base: a.release_base.as_deref(),
+            engine_base: a.engine_base.as_deref(),
+        };
+        match crate::installer::build(&out, &spec) {
+            Ok(o) => Some(o),
+            Err(e) => fail(&e),
+        }
+    } else {
+        // Runnable app directory, tarred as-is (CEF via symlinks).
+        let tarball = out.with_extension("tar.gz");
+        let parent = match out.parent() {
+            Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        let dir_name = out
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let status = Command::new("tar")
+            .arg("-czf")
+            .arg(&tarball)
+            .arg("-C")
+            .arg(&parent)
+            .arg(&dir_name)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => ui::warn(format!("tar exited with {s}; app dir is still usable")),
+            Err(e) => ui::warn(format!("could not run tar: {e}")),
+        }
+        None
     };
-    let dir_name = out
-        .file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let status = Command::new("tar")
-        .arg("-czf")
-        .arg(&tarball)
-        .arg("-C")
-        .arg(&parent)
-        .arg(&dir_name)
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => ui::warn(format!("tar exited with {s}; app dir is still usable")),
-        Err(e) => ui::warn(format!("could not run tar: {e}")),
-    }
 
     ui::section("App");
     ui::row("name", &app_name);
@@ -859,6 +891,11 @@ pub fn cmd_desktop(args: &[String]) {
         ui::row("runtime files", "laufey + shared CEF (symlinked)");
     }
     ui::row("id", &id);
+    if let Some(o) = &installer_outputs {
+        ui::row("installer", o.script.display());
+        ui::row("tarball", o.tarball.display());
+        ui::row("sha256", o.sha256.display());
+    }
     ui::status_ok(format!("packaged {}", out.display()));
 }
 

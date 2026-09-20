@@ -4,7 +4,7 @@
 inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta|--stable]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta|--stable] <file> [args...]
 inka cache   <file>
-inka desktop [entry] [-o <dir>] [--name <name>] [--identifier <id>] [--backend <kind>] [--icon <png>] [--payload <dir>] [--external[=<pkg>]]... [--no-bundle] [--minify] [--sourcemap] [--hmr] [--inspect[=host:port]|--inspect-brk|--inspect-wait] [--app-version <ver>] [--release-base <url>] [--error-reporting <url>]
+inka desktop [entry] [-o <dir>] [--name <name>] [--identifier <id>] [--backend <kind>] [--icon <png>] [--payload <dir>] [--external[=<pkg>]]... [--no-bundle] [--minify] [--sourcemap] [--hmr] [--inspect[=host:port]|--inspect-brk|--inspect-wait] [--app-version <ver>] [--release-base <url>] [--error-reporting <url>] [--installer] [--engine-base <url>]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
              [--no-toolchain|--toolchain-only] [--no-runtime] [--beta|--stable]
 inka doctor  [artifact] [--json] [--beta|--stable]
@@ -57,7 +57,9 @@ runtime. The entry must serve HTTP (`export default { fetch }` or
 and builds a Vite project. Defaults come from `deno.json`'s `desktop` block
 (`app.name`/`app.identifier`/`app.icons`/`backend`/`output`/`release.baseUrl`/
 `errorReporting.url`, plus top-level `version`); CLI flags override them. The
-output is an app directory, a `.desktop` entry, and a `.tar.gz`. Linux only
+output is an app directory, a `.desktop` entry, and a `.tar.gz`; `--installer`
+additionally emits a portable `<App>.tar.gz` + `<App>.install.sh` that provisions
+the shared engine (and CEF runtime) on the target machine. Linux only
 today. Dev modes run the source tree directly (no packaging): `--hmr` watches
 and hot-replaces modules (falling back to a window reload), and
 `--inspect`/`--inspect-brk`/`--inspect-wait` start the CDP mux for the runtime
@@ -135,6 +137,7 @@ honor them.
 | `INKA_DESKTOP_SHIM` | per-app shim path for `inka desktop` (default: next to `inka`) |
 | `INKA_LAUFEY_BACKEND` / `LAUFEY_DEV_DIR` | laufey backend binary / source checkout for `inka desktop` |
 | `INKA_LAUFEY_CACHE` | laufey backend cache root (default `~/.cache/inka/laufey`) |
+| `INKA_CEF_HOME` | shared CEF runtime dir (default `~/.local/share/cef/<ver>/<target>`) |
 | `INKA_DEBUG` | verbose runtime/resolution logging |
 | `INK_LOG` | log level: `error`\|`warn`\|`info`\|`debug`\|`trace` (default `info`) |
 | `INK_LOG_STYLE` | color: `auto` (default; TTY only), `always`, `never` |

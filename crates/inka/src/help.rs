@@ -393,6 +393,14 @@ pub(crate) fn desktop() -> &'static Help {
                 "--error-reporting <url>",
                 "POST uncaught errors here (default: deno.json desktop.errorReporting.url)",
             ),
+            (
+                "--installer",
+                "also emit <App>.tar.gz + <App>.install.sh (script installer)",
+            ),
+            (
+                "--engine-base <url>",
+                "inka release base the installer provisions the engine/CEF from",
+            ),
             ("-h, --help", "show this help"),
         ],
         permissions: &[],
@@ -411,6 +419,14 @@ pub(crate) fn desktop() -> &'static Help {
             (
                 "INKA_DESKTOP_RUNTIME",
                 "path to the shared libinka_runtime (runtime override)",
+            ),
+            (
+                "INKA_CEF_HOME",
+                "override the shared CEF runtime dir (default: ~/.local/share/cef/<ver>/<target>)",
+            ),
+            (
+                "INKA_RELEASE_BASE",
+                "inka release base the installer provisions from (default: the baked tag)",
             ),
         ],
     }

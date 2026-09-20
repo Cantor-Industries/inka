@@ -177,6 +177,7 @@ The base defaults to the GitHub latest-release URL and is overridable with
 | Deno cache (read for `jsr:`) | `~/.cache/deno` | `DENO_DIR` |
 | laufey backends (`inka desktop`) | `~/.cache/inka/laufey` | `INKA_LAUFEY_CACHE` |
 | Shared CEF runtime (`--backend cef`) | `~/.local/share/cef/<ver>/<target>` | `INKA_CEF_HOME` |
+| Desktop apps (script installer) | `~/.local/share/inka/apps/<id>`, launcher in `~/.local/bin` | `XDG_DATA_HOME` |
 | Desktop payload extraction | `~/.cache/inka/desktop` | — |
 
 `~/.local/share` is `$XDG_DATA_HOME` when set.

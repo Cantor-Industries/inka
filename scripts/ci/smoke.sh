@@ -137,4 +137,49 @@ echo "== runtime CJS/ESM contract matrix =="
 if [ -d "$SCRATCH/deno" ]; then export DENO_DIR="$SCRATCH/deno"; fi
 bash "$SCRIPT_DIR/runtime-matrix.sh" "$INKA"
 
+echo "== desktop app installer =="
+# Build a CEF app with `--installer`, then provision it from the staged release
+# into a throwaway HOME/XDG. The CEF archive is only present in a full release
+# staging dir; skip cleanly if this smoke runs against a partial one.
+CEF_ARCHIVE="$(bash "$SCRIPT_DIR/laufey-asset.sh" cef x86_64-unknown-linux-gnu | awk '{print $1}')"
+if [ -f "$STAGE/$CEF_ARCHIVE" ]; then
+    APP_HOME="$SCRATCH/apphome"; APP_DATA="$SCRATCH/appdata"
+    mkdir -p "$APP_HOME" "$APP_DATA" "$SCRATCH/deskapp"
+    cd "$SCRATCH/deskapp"
+    printf 'export default { fetch() { return new Response("smoke-desktop"); } };\n' > main.ts
+    "$INKA" desktop main.ts --name SmokeApp --backend cef --installer
+
+    APP_ID=com.inka.desktop.smokeapp
+    APP_RUNTIME="$(cat "$SCRATCH/deskapp/SmokeApp/runtime-version")"
+    # Drop INKA_RUNTIME_HOME so the installer proves it can provision the engine
+    # into the XDG runtime dir from the release base.
+    env -u INKA_RUNTIME_HOME HOME="$APP_HOME" XDG_DATA_HOME="$APP_DATA" \
+        sh "$SCRATCH/deskapp/SmokeApp.install.sh" \
+        --from "$SCRATCH/deskapp" --engine-base "$STAGE" --no-modify-path
+
+    test -f "$APP_DATA/inka/runtime/libinka_runtime-$APP_RUNTIME.so" \
+        || { echo "smoke: app installer did not provision the engine" >&2; exit 1; }
+    test -f "$APP_DATA/inka/apps/$APP_ID/SmokeApp" \
+        || { echo "smoke: app installer did not extract the app" >&2; exit 1; }
+    CEF_LIB="$(ls "$APP_DATA"/cef/*/x86_64-unknown-linux-gnu/libcef.so 2>/dev/null | head -1)"
+    test -n "$CEF_LIB" \
+        || { echo "smoke: app installer did not provision the shared CEF runtime" >&2; exit 1; }
+    test -L "$APP_HOME/.local/bin/SmokeApp" \
+        || { echo "smoke: app installer did not link the launcher" >&2; exit 1; }
+
+    if command -v xvfb-run >/dev/null 2>&1; then
+        app_out="$(HOME="$APP_HOME" XDG_DATA_HOME="$APP_DATA" \
+            timeout 30 xvfb-run -a "$APP_HOME/.local/bin/SmokeApp" 2>&1 || true)"
+        case "$app_out" in
+            *"Runtime started"*) ;;
+            *) echo "smoke: desktop app did not start ($app_out)" >&2; exit 1 ;;
+        esac
+    else
+        echo "skip: xvfb-run not installed (app launch)"
+    fi
+    echo "app installer: OK"
+else
+    echo "skip: $CEF_ARCHIVE not staged (app installer)"
+fi
+
 echo "smoke: OK"

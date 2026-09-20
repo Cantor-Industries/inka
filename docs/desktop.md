@@ -34,9 +34,10 @@ name, `<App>.so`, from its own path). The shared dir is versioned by the pinned
 laufey release; if symlinks are unavailable on the filesystem, inka falls back
 to bundling a full copy.
 
-Because the app is not self-contained, a `<App>.tar.gz` unpacked on another
-machine needs the shared CEF runtime installed there too (as with the shared
-engine) — or set `INKA_CEF_HOME`.
+Because the app is not self-contained, a runnable app dir (or its default
+`<App>.tar.gz`) copied to another machine needs the shared CEF runtime there too
+(as with the shared engine) — or set `INKA_CEF_HOME`. For distribution, prefer
+the portable `--installer` artifacts, which provision both at install time.
 
 The runtime is a normal inka runtime with the `desktop` feature compiled in; the
 same `.so` still serves headless `inka run` and built artifacts.
@@ -144,11 +145,51 @@ inka desktop [entry] [options]
       --app-version <ver>  version for Deno.autoUpdate
       --release-base <url> auto-update manifest host
       --error-reporting <url>  POST uncaught errors here
+      --installer          also emit <App>.tar.gz + <App>.install.sh
+      --engine-base <url>  inka release base for the installer's engine/CEF
 ```
 
 The entry is bundled with the same resolver as `inka build` (import maps,
 `npm:`/`jsr:`, `node_modules`). Use `--payload <dir>` to package an already-built
 directory.
+
+## Distribution: the script installer
+
+`inka desktop --installer` adds three files beside the app directory:
+
+```
+<App>.tar.gz          app-specific files only (+ an embedded install.sh)
+<App>.install.sh      the installer, run standalone
+<App>.tar.gz.sha256   checksum the installer verifies when it downloads
+```
+
+Unlike the runnable app directory (whose CEF symlinks point into the builder's
+home and are therefore not portable), the installer tarball contains **real**
+app files only — the launcher, the shim+payload, `runtime-version`, the
+`.desktop` entry and icon. The generated `install.sh` reproduces the machine
+layout at install time:
+
+- **Shared engine** — if `<XDG_DATA_HOME>/inka/runtime/libinka_runtime-<tuple>.so`
+  is already present it is reused; otherwise it is downloaded from the inka
+  release the app was built against (its baked tag) and checksum-verified.
+- **Shared CEF runtime** (`--backend cef`) — if
+  `<XDG_DATA_HOME>/cef/<laufey-version>/<target>/.installed` matches it is
+  reused; otherwise the pinned `laufey-cef-<target>.tar.gz` is downloaded from
+  the inka release, verified, filtered (no launcher/markers), and installed.
+- **App** — extracted to `<XDG_DATA_HOME>/inka/apps/<id>/`, with the CEF
+  symlinks created from the shared dir; a `~/.local/bin/<App>` launcher, a
+  `.desktop` entry and icon are installed, and `~/.local/bin` is added to
+  `PATH` (unless `--no-modify-path`).
+
+```sh
+inka desktop . --backend cef --installer
+sh MyApp.install.sh                 # or: curl …/MyApp.install.sh | sh
+sh MyApp.install.sh --uninstall     # leaves the shared engine/CEF in place
+```
+
+The inka release page publishes the matching `versions.json` (with a `laufey`
+backends block) and the pinned `laufey-<backend>-<target>.tar.gz` archives, so
+the installer never depends on laufey's own host.
 
 ## Permissions
 
@@ -207,6 +248,7 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 | `LAUFEY_DEV_DIR` | a laufey source checkout to source the backend from |
 | `INKA_LAUFEY_CACHE` | override the laufey backend cache root |
 | `INKA_CEF_HOME` | override the shared CEF runtime dir (default `~/.local/share/cef/<ver>/<target>`) |
+| `INKA_RELEASE_BASE` | inka release base the installer provisions the engine/CEF from |
 
 ## Caveats & roadmap
 
@@ -214,7 +256,8 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 - The bundled payload is extracted to `~/.cache/inka/desktop/<hash>` and is not
   pruned yet.
 - HMR, DevTools multiplexing, and `.AppImage`/`.deb`/`.rpm` distribution are
-  follow-ups; the packaged app is a directory plus a `.tar.gz`.
+  follow-ups; distribution today is the script installer (`--installer`) or the
+  runnable directory plus `.tar.gz`.
 - The per-app `<App>.so` is only the shim + your payload — never the engine.
 - The `cef` backend relies on user namespaces for Chromium's sandbox (setuid
   bits are stripped from the downloaded archive, as in Deno). Removing the

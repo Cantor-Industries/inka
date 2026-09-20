@@ -49,6 +49,17 @@ with no engine change ships the existing runtime tuple.
   desktop` and the per-app shim with `-p inka-desktop-shim`; both the runtime
   `.so` and the shim (`libinka_desktop_shim.so`, staged into the toolchain
   archive) are required for `inka desktop` to work.
+- The workflow also mirrors the pinned laufey archive(s) as release assets
+  (`scripts/ci/laufey-asset.sh <backend> <target>` reads the archive name and
+  SHA-256 from `desktop.rs`), and records them in `versions.json` under
+  `laufey.backends`. `inka desktop --installer` provisions the shared engine and
+  CEF runtime from these assets, so app installers never reach laufey's host.
+- The toolchain is built with `INKA_BUILD_TAG=$GITHUB_REF_NAME` baked in, so a
+  generated installer pins the exact release (not `releases/latest`); override
+  at install time with `--engine-base`/`INKA_RELEASE_BASE`.
+- `scripts/ci/smoke.sh` builds a CEF app with `--installer`, runs the generated
+  installer against the staging dir into a throwaway HOME/XDG, and asserts the
+  engine + CEF provisioning, the app tree, and (under `xvfb-run`) launch.
 - `crates/inka-runtime/runtime-version` therefore tracks a **desktop-enabled**
   tuple: bumping it (e.g. to force `inka update` to fetch an engine with the
   laufey ABI) is the tool for changing the desktop engine without changing the

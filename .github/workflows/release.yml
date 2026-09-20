@@ -88,8 +88,11 @@ jobs:
           set -euo pipefail
           # Bake the release identity into inka/inka-launcher so `--version` and
           # channel defaults reflect the installed release, not the crate version.
+          # INKA_BUILD_TAG lets `inka desktop --installer` pin the exact release
+          # that serves the shared engine/CEF runtime.
           export INKA_BUILD_VERSION="$REL"
           export INKA_BUILD_COMMIT="${GITHUB_SHA:0:7}"
+          export INKA_BUILD_TAG="$GITHUB_REF_NAME"
           cargo build --locked --release -p inka --features bundle
           cargo build --locked --release -p inka-launcher
           # Per-app desktop shim (cdylib); the laufey backends load it and it
@@ -119,6 +122,22 @@ jobs:
 
           # Engine asset (always published; consumers keep only newer tuples).
           cp "$BIN/libinka_runtime.so" "$STAGE/libinka_runtime-$RUNTIME.so"
+
+          # Shared CEF runtime: mirror the pinned laufey archive on this release
+          # so `inka desktop --installer` can provision it without reaching
+          # laufey's host, and verify it against the inka trust anchor.
+          LAUFEY_VERSION="$(sed -n 's/.*const LAUFEY_VERSION: &str = "\([0-9][0-9.]*\)".*/\1/p' \
+            crates/inka/src/desktop.rs | head -1)"
+          CEF_ASSET="$(scripts/ci/laufey-asset.sh cef "$TARGET")"
+          CEF_ARCHIVE="${CEF_ASSET%% *}"
+          CEF_SHA="${CEF_ASSET##* }"
+          curl --proto '=https' --tlsv1.2 -fsSL \
+            "https://github.com/littledivy/laufey/releases/download/v$LAUFEY_VERSION/$CEF_ARCHIVE" \
+            -o "$STAGE/$CEF_ARCHIVE"
+          GOT="$(sha256sum "$STAGE/$CEF_ARCHIVE" | awk '{print $1}')"
+          [ "$GOT" = "$CEF_SHA" ] \
+            || { echo "error: checksum mismatch for $CEF_ARCHIVE (pinned $CEF_SHA, got $GOT)" >&2; exit 1; }
+          printf '%s\n' "$GOT" > "$STAGE/$CEF_ARCHIVE.sha256"
 
           # The bootstrap script and the curated release notes. The notes carry
           # {{REL}}/{{RUNTIME}} placeholders (substituted here) and a leading
@@ -157,7 +176,17 @@ jobs:
             },
             "runtime": "$RUNTIME",
             "deno_runtime": "$DENO",
-            "runtime_sha256": "$RT_SHA"
+            "runtime_sha256": "$RT_SHA",
+            "laufey": {
+              "version": "$LAUFEY_VERSION",
+              "target": "$TARGET",
+              "backends": {
+                "cef": {
+                  "archive": "$CEF_ARCHIVE",
+                  "sha256": "$CEF_SHA"
+                }
+              }
+            }
           }
           EOF
           echo "staged:"; ls -1 "$STAGE"
@@ -188,5 +217,7 @@ jobs:
             ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz.sha256
             ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so
             ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so.sha256
+            ${{ env.STAGE }}/laufey-*.tar.gz
+            ${{ env.STAGE }}/laufey-*.tar.gz.sha256
             ${{ env.STAGE }}/versions.json
             ${{ env.STAGE }}/install.sh

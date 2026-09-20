@@ -18,6 +18,7 @@ mod desktop_devtools;
 mod embed;
 mod framework;
 mod help;
+mod installer;
 mod permissions;
 mod run;
 mod ui;

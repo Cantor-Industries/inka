@@ -64,6 +64,13 @@ pub(crate) fn build_commit() -> Option<&'static str> {
     option_env!("INKA_BUILD_COMMIT")
 }
 
+/// The exact git tag baked by the release pipeline (e.g.
+/// `v0.8.1-beta.6-4a8e573`), when present. `inka desktop --installer` pins the
+/// app's engine/CEF downloads to this release.
+pub(crate) fn build_tag() -> Option<&'static str> {
+    option_env!("INKA_BUILD_TAG")
+}
+
 /// Classify a version string: a `-beta.`/`-rc.` prerelease is beta; anything
 /// else (including an unbaked fallback) is stable.
 fn channel_of_version(v: &str) -> Channel {
