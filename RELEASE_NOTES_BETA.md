@@ -98,6 +98,13 @@ tuple's advertised capabilities (including `desktop`) and the shim.
 
 ### Also in the 0.8.1 beta line
 
+- **Script installers for desktop apps.** `inka desktop --installer` emits a
+  portable `<App>.tar.gz` (app files only), a standalone `<App>.install.sh`, and
+  a `.sha256` sidecar. The installer reuses the shared engine/CEF runtime when
+  present and otherwise downloads the exact versions from the inka release the
+  app was built against (mirrored there, checksum-pinned), then installs the app
+  under `~/.local/share/inka/apps/<id>` with a `~/.local/bin` launcher,
+  `.desktop` entry, and icon (`--uninstall` reverses it).
 - **Shared CEF location.** The `--backend cef` Chromium runtime now lives at
   `~/.local/share/cef/<laufey-version>/<target>` (`$XDG_DATA_HOME/cef/...`),
   not under `inka/`, so it is a generic per-user store other CEF apps can share.
