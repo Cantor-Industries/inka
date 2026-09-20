@@ -5,7 +5,7 @@
 // reachable from every app dir. Instead of copying ~360 MB per app, inka keeps
 // one versioned copy under the XDG data dir and symlinks it into each app:
 //
-//   ~/.local/share/inka/cef/<laufey-version>/<target>/
+//   ~/.local/share/cef/<laufey-version>/<target>/
 //
 // The launcher itself is never shared: laufey derives the runtime library name
 // from its own executable path (`<exe-stem>.so`), so it stays a real per-app
@@ -22,14 +22,17 @@ use crate::desktop::{LAUFEY_TARGET, LAUFEY_VERSION};
 const INSTALLED_MARKER: &str = ".installed";
 
 /// Where the shared CEF runtime lives: `INKA_CEF_HOME`, else
-/// `$XDG_DATA_HOME/inka/cef/<version>/<target>`.
+/// `$XDG_DATA_HOME/cef/<version>/<target>` (`~/.local/share/cef/...`).
+///
+/// It sits at the data root rather than under `inka/` so other CEF-based apps
+/// can share the same versioned runtime.
 pub(crate) fn shared_cef_dir() -> PathBuf {
     if let Some(h) = env::var_os("INKA_CEF_HOME") {
         if !h.is_empty() {
             return PathBuf::from(h);
         }
     }
-    crate::inka_data_dir()
+    crate::data_root_now()
         .join("cef")
         .join(LAUFEY_VERSION)
         .join(LAUFEY_TARGET)
@@ -345,16 +348,25 @@ mod tests {
     }
 
     #[test]
-    fn shared_cef_dir_is_versioned_under_inka_data() {
+    fn shared_cef_dir_is_versioned_under_data_root() {
         // `INKA_CEF_HOME` is process-global, so only assert the default shape
         // when it is unset (the test harness does not set it).
         if env::var_os("INKA_CEF_HOME").is_none() {
             let d = shared_cef_dir();
-            assert!(d.ends_with(
-                PathBuf::from("inka/cef")
-                    .join(LAUFEY_VERSION)
-                    .join(LAUFEY_TARGET)
-            ));
+            assert!(
+                d.ends_with(
+                    PathBuf::from("cef")
+                        .join(LAUFEY_VERSION)
+                        .join(LAUFEY_TARGET)
+                ),
+                "got {}",
+                d.display()
+            );
+            assert!(
+                !d.to_string_lossy().contains("inka/cef"),
+                "the shared CEF dir must not be namespaced under inka: {}",
+                d.display()
+            );
         }
     }
 }

@@ -7,7 +7,7 @@ megabytes instead of the ~150 MB a per-app engine would cost.
 
 ```
 ~/.local/share/inka/runtime/libinka_runtime-<tuple>.so   # shared (desktop-enabled)
-~/.local/share/inka/cef/<ver>/<target>/                  # shared CEF runtime (--backend cef)
+~/.local/share/cef/<ver>/<target>/                       # shared CEF runtime (--backend cef)
 <App>/                                                    # one packaged app
   <App>            laufey backend (window + renderer), renamed
   <App>.so         per-app shim + your bundled payload
@@ -24,7 +24,7 @@ runtime, `dlopen`s it, and forwards the window/runtime ABI. The engine itself is
 never copied into your app.
 
 With `--backend cef` the Chromium runtime is shared per machine: the first CEF
-app populates `~/.local/share/inka/cef/<laufey-version>/<target>/` (about
+app populates `~/.local/share/cef/<laufey-version>/<target>/` (about
 360 MB) and every app symlinks those files next to its launcher. laufey links
 `libcef.so` with `RPATH=.:$ORIGIN` and CEF reads its
 `*.pak`/`icudtl.dat`/`locales/` resources from beside the launcher, so the
@@ -206,7 +206,7 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 | `INKA_LAUFEY_BACKEND` | use a specific laufey backend binary |
 | `LAUFEY_DEV_DIR` | a laufey source checkout to source the backend from |
 | `INKA_LAUFEY_CACHE` | override the laufey backend cache root |
-| `INKA_CEF_HOME` | override the shared CEF runtime dir (default `~/.local/share/inka/cef/<ver>/<target>`) |
+| `INKA_CEF_HOME` | override the shared CEF runtime dir (default `~/.local/share/cef/<ver>/<target>`) |
 
 ## Caveats & roadmap
 
@@ -218,7 +218,7 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 - The per-app `<App>.so` is only the shim + your payload — never the engine.
 - The `cef` backend relies on user namespaces for Chromium's sandbox (setuid
   bits are stripped from the downloaded archive, as in Deno). Removing the
-  shared CEF runtime (`~/.local/share/inka/cef/...`) breaks packaged CEF apps;
+  shared CEF runtime (`~/.local/share/cef/...`) breaks packaged CEF apps;
   `inka doctor` reports its presence. macOS/Windows CEF packaging is
   unimplemented.
 

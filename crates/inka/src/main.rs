@@ -58,7 +58,7 @@ fn data_root(home: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>) -> P
     PathBuf::from(".")
 }
 
-fn data_root_now() -> PathBuf {
+pub(crate) fn data_root_now() -> PathBuf {
     data_root(
         env::var_os("HOME").as_deref(),
         env::var_os("XDG_DATA_HOME").as_deref(),
