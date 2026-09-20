@@ -84,7 +84,13 @@ and loads the shared, desktop-enabled runtime. Linux/webview today.
   staged `.update`/`.backup`/`.update-ok` swap; uncaught JS errors **and Rust
   panics** POST to `errorReporting.url` over the runtime's own HTTP client.
 - **Packaging output**: an app directory (`<App>`, `<App>.so`, `runtime-version`,
-  `<id>.desktop`, optional `AppIcon.png`) plus a `<App>.tar.gz`.
+  `<id>.desktop`, optional `AppIcon.png`) plus a `<App>.tar.gz`. Re-packaging
+  clears a previous build in place (tracked by a `.inka-desktop-app` marker) and
+  refuses to delete a directory it didn't create. The `cef` backend now installs
+  its ~360 MB Chromium runtime once under
+  `~/.local/share/inka/cef/<laufey-version>/<target>` and symlinks it into each
+  app, so a CEF app directory stays a few megabytes and `libcef.so`/resources
+  are still found at launch (`inka doctor` reports the shared dir).
 
 The desktop-enabled engine is runtime tuple `{{RUNTIME}}`; the release runtime
 is built with `--features desktop`, and `inka doctor` now reports the selected
