@@ -144,7 +144,11 @@ echo "== desktop app installer =="
 CEF_ARCHIVE="$(bash "$SCRIPT_DIR/laufey-asset.sh" cef x86_64-unknown-linux-gnu | awk '{print $1}')"
 if [ -f "$STAGE/$CEF_ARCHIVE" ]; then
     APP_HOME="$SCRATCH/apphome"; APP_DATA="$SCRATCH/appdata"
-    mkdir -p "$APP_HOME" "$APP_DATA" "$SCRATCH/deskapp"
+    mkdir -p "$APP_HOME" "$APP_DATA" "$SCRATCH/deskapp" "$SCRATCH/laufey"
+    # Use the staged archive as the backend source so packaging stays offline
+    # and exercises the published artifact rather than re-fetching laufey.
+    tar -xzf "$STAGE/$CEF_ARCHIVE" --no-same-owner --no-same-permissions -C "$SCRATCH/laufey"
+    export INKA_LAUFEY_BACKEND="$SCRATCH/laufey/laufey"
     cd "$SCRATCH/deskapp"
     printf 'export default { fetch() { return new Response("smoke-desktop"); } };\n' > main.ts
     "$INKA" desktop main.ts --name SmokeApp --backend cef --installer

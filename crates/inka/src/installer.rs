@@ -229,6 +229,12 @@ mod tests {
         let sha = laufey_sha(&laufey_archive_name("cef")).unwrap();
         assert!(s.contains(&format!("CEF_SHA256='{sha}'")));
         assert!(!s.contains("{{"), "no unsubstituted placeholders");
+        // The script must end with an explicit success: a trailing conditional
+        // (e.g. `--no-modify-path`) must not make a successful install exit 1.
+        assert!(
+            s.trim_end().ends_with("exit 0"),
+            "installer must end with `exit 0`"
+        );
     }
 
     #[test]

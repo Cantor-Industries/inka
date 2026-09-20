@@ -328,11 +328,18 @@ if [ -f "$APPS/AppIcon.png" ]; then
     mkdir -p "$_icons"
     cp -f "$APPS/AppIcon.png" "$_icons/$APP_ID.png"
 fi
-[ "$MODIFY_PATH" = 1 ] && add_path_block
+if [ "$MODIFY_PATH" = 1 ]; then
+    add_path_block
+fi
 
 info "$APP_NAME installed at $APPS"
 info "launch with: $BIN/$APP_NAME"
-case ":$PATH:" in
-    *":$BIN:"*) ;;
-    *) [ "$MODIFY_PATH" = 1 ] && info "restart your shell, or run: . \"$HOME/.profile\"" ;;
-esac
+if [ "$MODIFY_PATH" = 1 ]; then
+    case ":$PATH:" in
+        *":$BIN:"*) ;;
+        *) info "restart your shell, or run: . \"$HOME/.profile\"" ;;
+    esac
+fi
+
+# Success: never let the last conditional decide the exit status.
+exit 0
