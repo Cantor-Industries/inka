@@ -88,7 +88,7 @@ and loads the shared, desktop-enabled runtime. Linux/webview today.
   clears a previous build in place (tracked by a `.inka-desktop-app` marker) and
   refuses to delete a directory it didn't create. The `cef` backend now installs
   its ~360 MB Chromium runtime once under
-  `~/.local/share/inka/cef/<laufey-version>/<target>` and symlinks it into each
+  `~/.local/share/cef/<laufey-version>/<target>` and symlinks it into each
   app, so a CEF app directory stays a few megabytes and `libcef.so`/resources
   are still found at launch (`inka doctor` reports the shared dir).
 
@@ -98,6 +98,11 @@ tuple's advertised capabilities (including `desktop`) and the shim.
 
 ### Also in the 0.8.1 beta line
 
+- **Shared CEF location.** The `--backend cef` Chromium runtime now lives at
+  `~/.local/share/cef/<laufey-version>/<target>` (`$XDG_DATA_HOME/cef/...`),
+  not under `inka/`, so it is a generic per-user store other CEF apps can share.
+  Override with `INKA_CEF_HOME`. A dir left at the old
+  `~/.local/share/inka/cef` can be deleted.
 - **Fixed: import-map npm/jsr subpath resolution.** `inka run` resolves a
   subpath import such as `import x from "@scope/pkg/sub"` when `@scope/pkg` is
   mapped to `npm:`/`jsr:` in `deno.json`, instead of failing with
