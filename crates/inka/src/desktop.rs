@@ -669,11 +669,8 @@ pub fn cmd_desktop(args: &[String]) {
     }
     apply_config_defaults(&mut a, cfg);
 
-    let entry = a.entry.clone().unwrap_or_else(|| {
-        ui::log_error("no entry file given");
-        ui::hint("pass an entry (e.g. `inka desktop main.ts`)");
-        usage()
-    });
+    // No entry: package the current directory (`inka desktop` == `inka desktop .`).
+    let entry = a.entry.clone().unwrap_or_else(|| PathBuf::from("."));
     let app_name = a.app_name.clone().unwrap_or_else(|| {
         if entry.is_dir() {
             entry

@@ -337,7 +337,7 @@ pub(crate) fn desktop() -> &'static Help {
         commands: &[],
         arguments: &[(
             "entry",
-            "the app's server entry (uses `Deno.serve` / `export default { fetch }`)",
+            "the app's server entry or framework dir (default: the current directory)",
         )],
         options: &[
             (
@@ -405,6 +405,7 @@ pub(crate) fn desktop() -> &'static Help {
         ],
         permissions: &[],
         examples: &[
+            "inka desktop",
             "inka desktop main.ts",
             "inka desktop . -o dist/MyApp",
             "inka desktop main.ts --payload ./dist",

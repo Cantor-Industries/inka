@@ -53,7 +53,8 @@ same `.so` still serves headless `inka run` and built artifacts.
   checksum-verified against pinned SHA-256s (laufey `0.7.0`). The `cef` backend
   installs a shared Chromium runtime once and symlinks it into each app (see
   below); `webview` uses the system WebKitGTK.
-- For framework mode (`inka desktop .`), a **Vite** project.
+- For framework mode (`inka desktop`, which defaults to the current directory),
+  a **Vite** project.
 
 ## Quick start
 
@@ -77,10 +78,12 @@ inka desktop main.ts --name Hello   # -> Hello/Hello (+ Hello.tar.gz)
 ./Hello/Hello
 ```
 
-Framework mode builds the frontend and serves its `dist/`:
+Framework mode builds the frontend and serves its `dist/`. With no `entry`,
+`inka desktop` packages the current directory (equivalent to `inka desktop .`):
 
 ```sh
-inka desktop . -o dist/MyApp       # detects Vite, runs its build, serves dist/
+inka desktop                       # detects Vite in $PWD, runs its build
+inka desktop . -o dist/MyApp       # same, with an explicit output directory
 ```
 
 ## Configuration (`deno.json`)

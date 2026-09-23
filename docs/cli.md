@@ -53,8 +53,8 @@ Requires a build with bundling support. See
 
 Package a web app as a native desktop application that shares the machine's
 runtime. The entry must serve HTTP (`export default { fetch }` or
-`Deno.serve`); `inka desktop <entry>` bundles it, and `inka desktop .` detects
-and builds a Vite project. Defaults come from `deno.json`'s `desktop` block
+`Deno.serve`); `inka desktop <entry>` bundles it, and `inka desktop` (entry
+defaults to the current directory) detects and builds a Vite project. Defaults come from `deno.json`'s `desktop` block
 (`app.name`/`app.identifier`/`app.icons`/`backend`/`output`/`release.baseUrl`/
 `errorReporting.url`, plus top-level `version`); CLI flags override them. The
 output is an app directory, a `.desktop` entry, and a `.tar.gz`; `--installer`
