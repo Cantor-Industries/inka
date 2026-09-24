@@ -70,6 +70,22 @@ async fn wait_for_server(host: &str, port: u16) -> bool {
     }
 }
 
+/// Poll until the bootstrap window id is published (created on the module
+/// thread during worker bootstrap) or the timeout elapses. Used by external
+/// dev mode, where there is no local server to wait on first.
+async fn wait_for_initial_window(timeout: Duration) -> Option<u32> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(id) = INITIAL_WINDOW.get().copied() {
+            return Some(id);
+        }
+        if should_shutdown() || tokio::time::Instant::now() >= deadline {
+            return INITIAL_WINDOW.get().copied();
+        }
+        tokio::time::sleep(SERVE_POLL).await;
+    }
+}
+
 /// Apply a staged `.update` next to the loaded app dylib before the app boots,
 /// and roll back a previous update that never reached its `.update-ok`
 /// sentinel. This mirrors Deno's `cli/rt_desktop` auto-update swap; the file it
@@ -215,26 +231,85 @@ fn run_desktop() {
         }
     }
 
+    // Desktop e2e battery (feature `desktop-e2e`, run by
+    // `scripts/ci/desktop-e2e.sh`): instead of booting an app, run the
+    // `DesktopApi` assertions against the live backend and exit with their
+    // result.
+    #[cfg(feature = "desktop-e2e")]
+    if std::env::var("INKA_DESKTOP_E2E").is_ok() {
+        // A multi-thread runtime so laufey's JS-call pump keeps running on
+        // another worker even if a battery assertion blocks (e.g. a backend
+        // synchronous D-Bus call).
+        let rt = match tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                eprintln!("[inka-desktop] failed to build e2e runtime: {e}");
+                laufey::quit();
+                return;
+            }
+        };
+        rt.block_on(async {
+            let pump = tokio::spawn(async { laufey::run().await });
+            if tokio::time::timeout(Duration::from_secs(90), crate::desktop_e2e::run_battery())
+                .await
+                .is_err()
+            {
+                crate::desktop_e2e::report_timeout();
+            }
+            laufey::quit();
+            let _ = pump.await;
+        });
+        eprintln!(
+            "[e2e] {}",
+            if crate::desktop_e2e::exit_code() == 0 {
+                "OK"
+            } else {
+                "FAILED"
+            }
+        );
+        std::process::exit(crate::desktop_e2e::exit_code());
+    }
+
     let payload = std::env::var("INKA_DESKTOP_PAYLOAD").unwrap_or_else(|_| ".".to_string());
     let entry = std::env::var("INKA_DESKTOP_ENTRY").unwrap_or_else(|_| DEFAULT_ENTRY.to_string());
     let host = "127.0.0.1".to_string();
 
-    let port = match allocate_port(&host) {
-        Ok(p) => p,
-        Err(e) => {
-            eprintln!("[inka-desktop] failed to allocate a serve port: {e}");
-            laufey::quit();
-            return;
+    // External framework dev server (`inka desktop --hmr .` for a framework
+    // whose dev CLI isn't a plain `vite dev`): the CLI already spawned it and
+    // parsed its URL, so navigate straight there and run no app server here.
+    let dev_url = std::env::var("INKA_DESKTOP_DEV_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let port = if dev_url.is_some() {
+        0
+    } else {
+        match allocate_port(&host) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("[inka-desktop] failed to allocate a serve port: {e}");
+                laufey::quit();
+                return;
+            }
         }
     };
-    let url = format!("http://{host}:{port}/");
+    let url = match &dev_url {
+        Some(d) => d.clone(),
+        None => format!("http://{host}:{port}/"),
+    };
     eprintln!("[inka-desktop] payload={payload} entry={entry} url={url}");
 
-    // Publish the address so `Deno.serve()` without an explicit port binds to
-    // the same loopback endpoint the window is navigated to. Set before any
-    // thread the runtime spawns (setenv is not thread-safe afterwards).
-    unsafe {
-        std::env::set_var("DENO_SERVE_ADDRESS", format!("tcp:{host}:{port}"));
+    if dev_url.is_none() {
+        // Publish the address so `Deno.serve()` without an explicit port binds
+        // to the same loopback endpoint the window is navigated to. Set before
+        // any thread the runtime spawns (setenv is not thread-safe afterwards).
+        unsafe {
+            std::env::set_var("DENO_SERVE_ADDRESS", format!("tcp:{host}:{port}"));
+        }
     }
 
     // Permissions come from the build manifest when provided; otherwise grant
@@ -261,8 +336,8 @@ fn run_desktop() {
         });
     let worker_payload = payload.clone();
     let worker_entry = entry.clone();
-    let worker_host = host.clone();
     let worker_perms = perms.clone();
+    let worker_serve = dev_url.is_none().then_some((port, host.clone()));
     std::thread::Builder::new()
         .name("inka-desktop-module".to_string())
         .spawn(move || {
@@ -271,7 +346,7 @@ fn run_desktop() {
                 &worker_entry,
                 &[],
                 Some(&worker_perms),
-                Some((port, worker_host)),
+                worker_serve,
                 hmr,
             ) {
                 Ok(code) => eprintln!("[inka-desktop] app exited with {code}"),
@@ -301,8 +376,17 @@ fn run_desktop() {
         // second window. On Linux the backend only quits once every window is
         // destroyed, so a stray hidden window keeps the process alive after the
         // visible one is closed.
-        let server_up = wait_for_server(&host, port).await;
-        let window_id = INITIAL_WINDOW.get().copied();
+        //
+        // External dev mode has no local server, so wait for the bootstrap
+        // window instead (the CLI already waited for the dev server's URL).
+        let (server_up, window_id) = if dev_url.is_some() {
+            (true, wait_for_initial_window(SERVE_WAIT).await)
+        } else {
+            (
+                wait_for_server(&host, port).await,
+                INITIAL_WINDOW.get().copied(),
+            )
+        };
 
         if !should_shutdown() {
             match window_id {

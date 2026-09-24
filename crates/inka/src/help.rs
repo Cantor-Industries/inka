@@ -373,7 +373,7 @@ pub(crate) fn desktop() -> &'static Help {
             ("--sourcemap", "embed an inline source map"),
             (
                 "--hmr",
-                "dev-run the entry with hot module replacement (no packaging)",
+                "dev-run with HMR: a framework directory boots its dev server (Vite in-runtime, else the project's dev command); an entry file uses inka's V8 HMR",
             ),
             (
                 "--inspect[=host:port]",
@@ -381,6 +381,10 @@ pub(crate) fn desktop() -> &'static Help {
             ),
             ("--inspect-brk[=host:port]", "like --inspect, but pause on the first statement"),
             ("--inspect-wait[=host:port]", "like --inspect, but wait for a client to attach"),
+            (
+                "--dev-command <cmd>",
+                "external dev-server command for framework --hmr (default: package.json scripts.dev, else deno task dev)",
+            ),
             (
                 "--app-version <ver>",
                 "app version for Deno.autoUpdate (default: deno.json version)",
@@ -409,6 +413,8 @@ pub(crate) fn desktop() -> &'static Help {
             "inka desktop main.ts",
             "inka desktop . -o dist/MyApp",
             "inka desktop main.ts --payload ./dist",
+            "inka desktop --hmr .",
+            "inka desktop --hmr main.ts",
         ],
         env: &[
             ("INKA_LAUFEY_BACKEND", "path to a laufey backend binary"),

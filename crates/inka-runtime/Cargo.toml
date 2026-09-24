@@ -18,6 +18,9 @@ desktop = [
     "dep:deno_media_type",
     "dep:notify",
 ]
+# Test-only: compile the in-runtime `DesktopApi` e2e battery (see
+# `scripts/ci/desktop-e2e.sh`). Not enabled in release builds.
+desktop-e2e = ["desktop"]
 
 [dependencies]
 async-trait = "=0.1.73"

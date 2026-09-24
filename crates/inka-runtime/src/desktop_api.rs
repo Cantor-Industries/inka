@@ -883,3 +883,135 @@ fn desktop_value_to_laufey_value(v: DesktopValue) -> laufey::Value {
         DesktopValue::Binary(b) => laufey::Value::Binary(b),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permission_status_maps_each_variant() {
+        assert!(matches!(
+            map_permission_status(laufey::PermissionStatus::Granted),
+            PermissionState::Granted
+        ));
+        assert!(matches!(
+            map_permission_status(laufey::PermissionStatus::Denied),
+            PermissionState::Denied
+        ));
+        assert!(matches!(
+            map_permission_status(laufey::PermissionStatus::Prompt),
+            PermissionState::Prompt
+        ));
+        assert!(matches!(
+            map_permission_status(laufey::PermissionStatus::Unsupported),
+            PermissionState::Unsupported
+        ));
+    }
+
+    #[test]
+    fn menu_items_map_all_variants() {
+        let mapped = desktop_menu_item_to_laufey_menu_item(MenuItem::Item {
+            label: "Open".into(),
+            id: Some("open".into()),
+            accelerator: Some("CmdOrCtrl+O".into()),
+            enabled: false,
+            checked: true,
+            icon: Some(vec![1, 2, 3]),
+            tooltip: Some("hint".into()),
+        });
+        match mapped {
+            laufey::MenuItem::Item {
+                label,
+                id,
+                accelerator,
+                enabled,
+                checked,
+                icon,
+                tooltip,
+            } => {
+                assert_eq!(label, "Open");
+                assert_eq!(id.as_deref(), Some("open"));
+                assert_eq!(accelerator.as_deref(), Some("CmdOrCtrl+O"));
+                assert!(!enabled);
+                assert!(checked);
+                assert_eq!(icon, Some(vec![1, 2, 3]));
+                assert_eq!(tooltip.as_deref(), Some("hint"));
+            }
+            other => panic!("expected Item, got {other:?}"),
+        }
+
+        let submenu = desktop_menu_item_to_laufey_menu_item(MenuItem::Submenu {
+            label: "File".into(),
+            items: vec![
+                MenuItem::Separator,
+                MenuItem::Role {
+                    role: "quit".into(),
+                },
+            ],
+        });
+        match submenu {
+            laufey::MenuItem::Submenu { label, items } => {
+                assert_eq!(label, "File");
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0], laufey::MenuItem::Separator));
+                assert!(matches!(items[1], laufey::MenuItem::Role { .. }));
+            }
+            other => panic!("expected Submenu, got {other:?}"),
+        }
+    }
+
+    /// Convert to `DesktopValue`, back to `laufey::Value`, then to
+    /// `DesktopValue` again — the two `DesktopValue`s must agree. (`laufey::Value`
+    /// has no `PartialEq`, so compare through the lossless second conversion.)
+    fn round_trip(v: DesktopValue) -> DesktopValue {
+        let laufey = desktop_value_to_laufey_value(v);
+        laufey_value_to_desktop_value(laufey).expect("re-conversion")
+    }
+
+    #[test]
+    fn value_conversion_round_trips_scalars_and_binary() {
+        assert_eq!(round_trip(DesktopValue::Null), DesktopValue::Null);
+        assert_eq!(
+            round_trip(DesktopValue::Bool(true)),
+            DesktopValue::Bool(true)
+        );
+        assert_eq!(round_trip(DesktopValue::Int(-7)), DesktopValue::Int(-7));
+        assert_eq!(
+            round_trip(DesktopValue::Double(1.5)),
+            DesktopValue::Double(1.5)
+        );
+        assert_eq!(
+            round_trip(DesktopValue::String("hi".into())),
+            DesktopValue::String("hi".into())
+        );
+        assert_eq!(
+            round_trip(DesktopValue::Binary(vec![0, 255, 1])),
+            DesktopValue::Binary(vec![0, 255, 1])
+        );
+    }
+
+    #[test]
+    fn value_conversion_round_trips_nested() {
+        let v = DesktopValue::List(vec![
+            DesktopValue::Int(1),
+            DesktopValue::Dict(vec![("k".into(), DesktopValue::Bool(false))]),
+        ]);
+        assert_eq!(round_trip(v.clone()), v);
+    }
+
+    #[test]
+    fn nested_depth_enforces_max() {
+        assert_eq!(nested_depth(0).unwrap(), 1);
+        assert_eq!(nested_depth(MAX_DEPTH - 1).unwrap(), MAX_DEPTH);
+        assert!(nested_depth(MAX_DEPTH).is_err());
+    }
+
+    #[test]
+    fn value_nested_past_max_is_rejected() {
+        let mut v = laufey::Value::Null;
+        for _ in 0..(MAX_DEPTH + 2) {
+            v = laufey::Value::List(vec![v]);
+        }
+        assert!(laufey_value_to_desktop_value(v).is_err());
+    }
+}

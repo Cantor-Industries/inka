@@ -81,10 +81,23 @@ jobs:
           # The desktop feature pulls in laufey (bindgen), which the release
           # build already compiles, so libclang is present on the runner.
           cargo clippy --locked -p inka-runtime --features desktop --all-targets -- -D warnings
+          # `desktop-e2e` adds the in-runtime DesktopApi battery (test-only).
+          cargo clippy --locked -p inka-runtime --features desktop,desktop-e2e --all-targets -- -D warnings
           cargo clippy --locked -p inka-desktop-shim --all-targets -- -D warnings
           cargo test --locked -p inka-bundler
           cargo test --locked -p inka --bin inka --features bundle
           cargo test --locked -p inka-desktop-shim
+          # Pure-helper unit tests for the desktop runtime (release reuses the
+          # engine built above; the test harness is what gets compiled here).
+          cargo test --locked --release -p inka-runtime --features desktop --lib
+
+      - name: Desktop e2e battery (CEF under Xvfb)
+        run: |
+          set -euo pipefail
+          # Reuses the release engine build above; only inka-runtime is relinked
+          # with the test feature. Downloads the pinned CEF backend on first run.
+          DESKTOP_E2E_PROFILE=release DESKTOP_E2E_FETCH=1 \
+            bash scripts/ci/desktop-e2e.sh
 
       - name: Stage runtime for the matrix
         run: |

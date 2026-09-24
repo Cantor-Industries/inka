@@ -86,6 +86,36 @@ inka desktop                       # detects Vite in $PWD, runs its build
 inka desktop . -o dist/MyApp       # same, with an explicit output directory
 ```
 
+## Dev mode (`--hmr` and `--inspect`)
+
+`--hmr` and `--inspect*` run the source tree directly through the shared runtime
+and the laufey backend — no packaging. The target may be an entry file or a
+project directory.
+
+```sh
+inka desktop --hmr main.ts         # an entry file: inka's V8 HMR
+inka desktop --hmr .               # a framework directory: the framework's HMR
+inka desktop --inspect .           # framework production entrypoint + CDP mux
+```
+
+For a directory, inka detects the framework and picks a dev-server shape:
+
+- **In-runtime** (`Vite`, `SvelteKit`): the generated entrypoint boots the
+  project's Vite dev server *inside* the desktop runtime, so server-side code
+  keeps `Deno.desktop`; HMR is Vite's own websocket and the window loads the
+  serve port as usual.
+- **External** (`Fresh` 2, `Remix`, `React Router`, `Nuxt`, `SolidStart`,
+  `TanStack Start`): inka spawns the project's dev command, reads the local URL
+  it prints (`Local: http://…`), and navigates the window there. Server-side
+  code runs in that separate process, so it does **not** have `Deno.desktop`.
+  The command is, in order: `--dev-command`, `package.json` `scripts.dev` (via
+  the lockfile's package manager: bun/pnpm/yarn/npm), then `deno task dev`.
+
+`--hmr` on an explicit entry file watches the tree and hot-replaces modules
+through V8 (`Debugger.setScriptSource`), reloading the window when a change
+can't be applied in place. `--inspect`/`--inspect-brk`/`--inspect-wait` front
+the runtime isolate with a CDP mux; use `/deno` via `chrome://inspect`.
+
 ## Configuration (`deno.json`)
 
 Put a `desktop` block in `deno.json` (or `deno.jsonc`) to set defaults; CLI
@@ -258,9 +288,10 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 - **Linux only.** macOS/Windows bundling and backends are unimplemented.
 - The bundled payload is extracted to `~/.cache/inka/desktop/<hash>` and is not
   pruned yet.
-- HMR, DevTools multiplexing, and `.AppImage`/`.deb`/`.rpm` distribution are
-  follow-ups; distribution today is the script installer (`--installer`) or the
-  runnable directory plus `.tar.gz`.
+- HMR (in-runtime Vite, external dev server, and inka's V8 HMR), DevTools
+  multiplexing, and framework detection are implemented; `.AppImage`/`.deb`/
+  `.rpm` distribution and Next.js remain follow-ups. Distribution today is the
+  script installer (`--installer`) or the runnable directory plus `.tar.gz`.
 - The per-app `<App>.so` is only the shim + your payload — never the engine.
 - The `cef` backend relies on user namespaces for Chromium's sandbox (setuid
   bits are stripped from the downloaded archive, as in Deno). Removing the

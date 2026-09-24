@@ -163,6 +163,7 @@ struct Args {
     error_reporting: Option<String>,
     installer: bool,
     engine_base: Option<String>,
+    dev_command: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -187,6 +188,7 @@ fn parse_args(args: &[String]) -> Args {
         error_reporting: None,
         installer: false,
         engine_base: None,
+        dev_command: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -229,6 +231,7 @@ fn parse_args(args: &[String]) -> Args {
             "--error-reporting" => a.error_reporting = Some(next(&mut it, arg)),
             "--installer" => a.installer = true,
             "--engine-base" => a.engine_base = Some(next(&mut it, arg)),
+            "--dev-command" => a.dev_command = Some(next(&mut it, arg)),
             other if other.starts_with("--external=") => {
                 a.external.push(other["--external=".len()..].to_string());
             }
@@ -556,48 +559,322 @@ fn parse_inspect_addr(value: Option<&str>) -> String {
     }
 }
 
-/// `inka desktop --hmr` / `--inspect*`: run `entry` (a source tree) through the
-/// shared desktop runtime and the laufey backend, without packaging. Optionally
-/// watches `base` for HMR and/or fronts the runtime inspector with the CDP
-/// mux. Never returns.
-fn run_desktop_dev(a: &Args, entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
-    if entry.is_dir() {
-        fail(
-            "dev mode runs an entry file today; framework dev-server HMR is not wired yet \
-             (pass an entry, e.g. `inka desktop --hmr main.ts`)",
-        );
+/// A child framework dev server spawned for external `--hmr` mode. Killed on
+/// drop so it can't outlive the desktop app.
+struct DevServer {
+    child: std::process::Child,
+    url: String,
+}
+
+impl Drop for DevServer {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
-    let entry_abs = entry
+}
+
+/// Prefix of the generated dev/inspect entrypoint written into the project.
+/// Swept on start and removed on exit (a Ctrl-C still runs the `status` path
+/// here, since the CLI blocks on the backend).
+const DEV_ENTRY_PREFIX: &str = ".inka-desktop-entry-";
+
+/// Remove temp entrypoints leaked by an interrupted previous run.
+fn sweep_stale_dev_entries(dir: &Path) {
+    if let Ok(rd) = fs::read_dir(dir) {
+        for ent in rd.flatten() {
+            if ent
+                .file_name()
+                .to_string_lossy()
+                .starts_with(DEV_ENTRY_PREFIX)
+            {
+                let _ = fs::remove_file(ent.path());
+            }
+        }
+    }
+}
+
+/// Write a generated dev entrypoint into `base`, returning its file name
+/// (relative to `base`).
+fn write_dev_entry(base: &Path, code: &str) -> Result<String, String> {
+    let name = format!("{DEV_ENTRY_PREFIX}{}.ts", std::process::id());
+    let path = base.join(&name);
+    fs::write(&path, code).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(name)
+}
+
+/// Whether `dir/package.json` declares a `scripts.<script>` entry.
+fn has_package_script(dir: &Path, script: &str) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join("package.json")) else {
+        return false;
+    };
+    let Ok(pkg) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return false;
+    };
+    pkg.get("scripts").and_then(|s| s.get(script)).is_some()
+}
+
+/// The package manager implied by the project's lockfile (default `npm`).
+fn detect_package_manager(dir: &Path) -> &'static str {
+    if dir.join("bun.lock").exists() || dir.join("bun.lockb").exists() {
+        "bun"
+    } else if dir.join("pnpm-lock.yaml").exists() {
+        "pnpm"
+    } else if dir.join("yarn.lock").exists() {
+        "yarn"
+    } else {
+        "npm"
+    }
+}
+
+/// Whether `dir/deno.json[c]` declares a task named `task`.
+fn has_deno_task(dir: &Path, task: &str) -> bool {
+    let Ok(text) = fs::read_to_string(dir.join("deno.json"))
+        .or_else(|_| fs::read_to_string(dir.join("deno.jsonc")))
+    else {
+        return false;
+    };
+    let Ok(cfg) = crate::config::parse_jsonc(&text) else {
+        return false;
+    };
+    cfg.get("tasks").and_then(|t| t.get(task)).is_some()
+}
+
+/// Resolve the project's dev-server command for external `--hmr`: an explicit
+/// `--dev-command`, else `package.json` `scripts.dev` via the lockfile's
+/// package manager, else `deno task dev`.
+fn resolve_dev_command(dir: &Path, explicit: Option<&str>) -> Result<Vec<String>, String> {
+    if let Some(cmd) = explicit {
+        let parts: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
+        if parts.is_empty() {
+            return Err("--dev-command is empty".to_string());
+        }
+        return Ok(parts);
+    }
+    if has_package_script(dir, "dev") {
+        return Ok(vec![
+            detect_package_manager(dir).to_string(),
+            "run".into(),
+            "dev".into(),
+        ]);
+    }
+    if has_deno_task(dir, "dev") {
+        return Ok(vec!["deno".into(), "task".into(), "dev".into()]);
+    }
+    Err(
+        "no `dev` script found: add one to package.json (`scripts.dev`) or deno.json \
+         (`tasks.dev`), or pass --dev-command <cmd>"
+            .to_string(),
+    )
+}
+
+/// Spawn the project's dev server and return once it prints its local URL
+/// (15s budget). Its output is forwarded to stderr; the reader thread lives as
+/// long as the child.
+fn spawn_dev_server(cmd: &[String], dir: &Path, name: &str) -> Result<DevServer, String> {
+    use std::io::BufRead;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::Ordering;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::{Duration, Instant};
+
+    let mut child = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .current_dir(dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "could not start the {name} dev server ({}): {e}",
+                cmd.join(" ")
+            )
+        })?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "could not capture the dev server's output".to_string())?;
+
+    let slot: Arc<(Mutex<Option<String>>, Condvar)> = Arc::new((Mutex::new(None), Condvar::new()));
+    let done = Arc::new(AtomicBool::new(false));
+    let thread_slot = slot.clone();
+    let thread_done = done.clone();
+    std::thread::Builder::new()
+        .name("inka-dev-server".to_string())
+        .spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            for line in reader.lines().map_while(Result::ok) {
+                eprintln!("{line}");
+                if let Some(url) = crate::framework::parse_dev_server_url(&line) {
+                    let (m, cv) = &*thread_slot;
+                    let mut guard = m.lock().unwrap();
+                    if guard.is_none() {
+                        *guard = Some(url);
+                        cv.notify_all();
+                    }
+                }
+            }
+            let (m, cv) = &*thread_slot;
+            let _guard = m.lock().unwrap();
+            thread_done.store(true, Ordering::Release);
+            cv.notify_all();
+        })
+        .map_err(|e| format!("could not start the dev server reader: {e}"))?;
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    let (m, cv) = &*slot;
+    let mut guard = m.lock().unwrap();
+    while guard.is_none() && !done.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        let (next, _) = cv.wait_timeout(guard, remaining).unwrap();
+        guard = next;
+    }
+    let url = guard.clone();
+    drop(guard);
+
+    match url {
+        Some(url) => Ok(DevServer { child, url }),
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            if done.load(Ordering::Acquire) {
+                Err(format!(
+                    "the {name} dev server exited before printing a local URL"
+                ))
+            } else {
+                Err(format!(
+                    "the {name} dev server did not print a local URL within 15s"
+                ))
+            }
+        }
+    }
+}
+
+/// `inka desktop --hmr` / `--inspect*`: run a source tree through the shared
+/// desktop runtime and the laufey backend, without packaging. A directory entry
+/// detects a framework (in-runtime Vite dev, external dev server, or the
+/// production entrypoint for `--inspect`); a file entry runs with inka's own
+/// V8 HMR when `--hmr` is set. Never returns.
+fn run_desktop_dev(a: &Args, entry: &Path, app_name: &str, base: &Path, backend: &Path) -> ! {
+    // A directory entry *is* the project tree; a file entry lives inside `base`.
+    let project = if entry.is_dir() { entry } else { base };
+    let project_abs = project
         .canonicalize()
-        .unwrap_or_else(|e| fail(&format!("cannot resolve {}: {e}", entry.display())));
+        .unwrap_or_else(|e| fail(&format!("cannot resolve {}: {e}", project.display())));
     let base_abs = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
-    let entry_rel = entry_abs
-        .strip_prefix(&base_abs)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| {
-            fail(&format!(
-                "entry {} is outside the project dir {}",
-                entry_abs.display(),
-                base_abs.display()
-            ))
-        });
+
+    // Run the backend with the project as CWD so framework tooling (Vite) finds
+    // its config/root in the source tree, not the invocation directory.
+    let _ = env::set_current_dir(&project_abs);
+
+    let mut temp_entry: Option<PathBuf> = None;
+    let mut dev_server: Option<DevServer> = None;
+    let mut hmr_dir: Option<PathBuf> = None;
+    let mut dev_url: Option<String> = None;
+    let mut perms: Option<String> = None;
+
+    let entry_rel = if entry.is_dir() {
+        sweep_stale_dev_entries(&project_abs);
+        let detection = match crate::framework::detect_framework(&project_abs) {
+            Ok(Some(d)) => d,
+            Ok(None) => fail(
+                "could not detect a supported framework in this directory (supported: \
+                 Fresh, Astro, Remix, React Router, SvelteKit, Nuxt, SolidStart, TanStack \
+                 Start, Vite); pass an explicit entry file instead",
+            ),
+            Err(e) => fail(&e),
+        };
+        let code = if a.hmr {
+            if let Some(code) = detection.hmr_entrypoint_code() {
+                // In-runtime dev server: Vite runs inside the runtime and owns
+                // HMR; the webview uses the regular serve-port poll.
+                perms = Some("permissions=all".to_string());
+                code.to_string()
+            } else if detection.needs_external_dev_server() {
+                let cmd = resolve_dev_command(&project_abs, a.dev_command.as_deref())
+                    .unwrap_or_else(|e| fail(&e));
+                ui::info(format!(
+                    "running {} dev server: {}",
+                    detection.name,
+                    cmd.join(" ")
+                ));
+                let server = spawn_dev_server(&cmd, &project_abs, detection.name)
+                    .unwrap_or_else(|e| fail(&e));
+                dev_url = Some(server.url.clone());
+                dev_server = Some(server);
+                perms = Some("permissions=all".to_string());
+                crate::framework::NOOP_ENTRYPOINT.to_string()
+            } else {
+                fail(&format!(
+                    "{} has no framework dev server for `--hmr`; package it with \
+                     `inka desktop .` instead",
+                    detection.name
+                ));
+            }
+        } else {
+            if detection.name == "Next.js" {
+                fail("Next.js is not supported for desktop dev; pass an explicit entry file");
+            }
+            // `--inspect` only: run the production entrypoint, building first so
+            // its output (`dist`, etc.) exists.
+            if detection.build {
+                if let Err(e) = run_build(&project_abs) {
+                    fail(&e);
+                }
+            }
+            detection.entrypoint_code.clone()
+        };
+        let name = write_dev_entry(&project_abs, &code).unwrap_or_else(|e| fail(&e));
+        temp_entry = Some(project_abs.join(&name));
+        name
+    } else {
+        let entry_abs = entry
+            .canonicalize()
+            .unwrap_or_else(|e| fail(&format!("cannot resolve {}: {e}", entry.display())));
+        let rel = entry_abs
+            .strip_prefix(&base_abs)
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .unwrap_or_else(|_| {
+                fail(&format!(
+                    "entry {} is outside the project dir {}",
+                    entry_abs.display(),
+                    base_abs.display()
+                ))
+            });
+        if a.hmr {
+            hmr_dir = Some(base_abs.clone());
+        }
+        rel
+    };
     let runtime = resolve_desktop_runtime();
 
     ui::title("desktop dev");
     ui::row("entry", &entry_rel);
-    if a.hmr {
-        ui::row("watch", base_abs.display());
+    if let Some(url) = &dev_url {
+        ui::row("dev url", url);
+    } else if a.hmr {
+        ui::row("watch", project_abs.display());
     }
     ui::row("runtime", runtime.display());
     ui::row("backend", backend.display());
 
     let mut cmd = Command::new(backend);
     cmd.env("LAUFEY_RUNTIME_PATH", &runtime)
-        .env("INKA_DESKTOP_PAYLOAD", &base_abs)
+        .env("INKA_DESKTOP_PAYLOAD", &project_abs)
         .env("INKA_DESKTOP_ENTRY", &entry_rel)
-        .env("INKA_DESKTOP_APP_NAME", app_name);
-    if a.hmr {
-        cmd.env("INKA_DESKTOP_HMR_DIR", &base_abs);
+        .env("INKA_DESKTOP_APP_NAME", app_name)
+        .current_dir(&project_abs);
+    if let Some(d) = &hmr_dir {
+        cmd.env("INKA_DESKTOP_HMR_DIR", d);
+    }
+    if let Some(u) = &dev_url {
+        cmd.env("INKA_DESKTOP_DEV_URL", u);
+    }
+    if let Some(p) = &perms {
+        cmd.env("INKA_DESKTOP_PERMS", p);
     }
 
     // Keep the tokio runtime and mux handle alive for the child's lifetime.
@@ -650,6 +927,10 @@ fn run_desktop_dev(a: &Args, entry: &Path, app_name: &str, base: &Path, backend:
     }
 
     let status = cmd.status();
+    drop(dev_server);
+    if let Some(p) = &temp_entry {
+        let _ = fs::remove_file(p);
+    }
     drop(_mux);
     match status {
         Ok(s) => std::process::exit(s.code().unwrap_or(1)),
@@ -1356,5 +1637,44 @@ mod tests {
         .is_ok());
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn resolve_dev_command_prefers_explicit_then_package_json_then_deno() {
+        let dir = std::env::temp_dir().join(format!("inka-devcmd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        // Explicit flag wins and is whitespace-split.
+        assert_eq!(
+            resolve_dev_command(&dir, Some("vite dev --host")).unwrap(),
+            vec!["vite", "dev", "--host"]
+        );
+
+        // Nothing configured -> an actionable error.
+        assert!(resolve_dev_command(&dir, None).is_err());
+
+        // package.json `scripts.dev` uses the lockfile's package manager.
+        fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"vite"}}"#).unwrap();
+        fs::write(dir.join("yarn.lock"), "").unwrap();
+        assert_eq!(
+            resolve_dev_command(&dir, None).unwrap(),
+            vec!["yarn", "run", "dev"]
+        );
+
+        // Fall back to `deno task dev` when only deno.json has the task.
+        fs::remove_file(dir.join("package.json")).unwrap();
+        fs::remove_file(dir.join("yarn.lock")).unwrap();
+        fs::write(
+            dir.join("deno.json"),
+            r#"{"tasks":{"dev":"deno run -A dev.ts"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_dev_command(&dir, None).unwrap(),
+            vec!["deno", "task", "dev"]
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

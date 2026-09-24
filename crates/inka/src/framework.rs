@@ -9,7 +9,8 @@
 //
 // Adaptations from Deno's version: the build step runs the project's own
 // `deno task build` / `npm run build` (Deno spawns its own binary), and the HMR
-// command plumbing is dropped (inka's `--hmr` dev-runs an explicit entry).
+// command is represented as a [`DevServer`] shape rather than a `Vec<String>`
+// (inka has no `deno task`; the CLI resolves the project's own dev command).
 
 use std::path::Path;
 use std::path::PathBuf;
@@ -47,13 +48,29 @@ pub struct FrameworkDetection {
     pub include_paths: Vec<String>,
     /// Whether the framework's build task must run before bundling.
     pub build: bool,
+    /// How `--hmr` should run the framework's dev server.
+    pub dev_server: DevServer,
+}
+
+/// How `--hmr` runs a framework's dev server (mirrors Deno's `hmr_command`
+/// plus `hmr_entrypoint_code`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevServer {
+    /// No dev server (the framework ships a production server only).
+    None,
+    /// Boot the project's Vite dev server *inside* the desktop runtime (Vite's
+    /// JS API), keeping `Deno.desktop` available to server-side code. The
+    /// webview uses the regular `DENO_SERVE_ADDRESS` poll; HMR is Vite's own
+    /// websocket.
+    InRuntime,
+    /// Run the project's own dev command as an external process and navigate
+    /// the window to the URL it prints. Server-side code loses `Deno.desktop`.
+    External,
 }
 
 /// Entrypoint that boots the project's own Vite dev server *inside* the
 /// desktop runtime for `inka desktop --hmr` (server code keeps `Deno.desktop`
-/// access), adapted from Deno. Retained for framework dev-server HMR; inka's
-/// `--hmr` currently runs an explicit entry file.
-#[allow(dead_code)]
+/// access), adapted from Deno. inka's `--hmr` runs this for `Vite`/`SvelteKit`.
 pub const VITE_DEV_ENTRYPOINT: &str = r#"// @ts-nocheck
 import { createServer } from "vite";
 const addr = Deno.env.get("DENO_SERVE_ADDRESS") ?? "";
@@ -67,16 +84,31 @@ await server.listen();
 server.printUrls();
 "#;
 
+/// No-op entrypoint used by `--hmr` external dev-server mode: the runtime still
+/// bootstraps its isolate (desktop JS, window, `DesktopApi`) but runs no app
+/// server, because the framework's dev server serves the webview from outside.
+/// The long timer keeps the isolate (and window) alive until the shell quits;
+/// the vendored desktop event polling loop is deliberately `unrefOpPromise`d and
+/// so does not hold the loop open on its own.
+pub const NOOP_ENTRYPOINT: &str = r#"// @ts-nocheck
+setInterval(() => {}, 1 << 30);
+"#;
+
 impl FrameworkDetection {
     /// Entrypoint that boots the framework's dev server inside the desktop
     /// runtime for `--hmr`, matching Deno (#35899). Only plain `vite dev`
     /// frameworks qualify.
-    #[allow(dead_code)]
     pub fn hmr_entrypoint_code(&self) -> Option<&'static str> {
-        match self.name {
-            "Vite" | "SvelteKit" => Some(VITE_DEV_ENTRYPOINT),
+        match self.dev_server {
+            DevServer::InRuntime => Some(VITE_DEV_ENTRYPOINT),
             _ => None,
         }
+    }
+
+    /// Whether `--hmr` must run this framework's dev server as an external
+    /// process (its dev CLI isn't a plain `vite dev`).
+    pub fn needs_external_dev_server(&self) -> bool {
+        self.dev_server == DevServer::External
     }
 
     /// Directories where the framework keeps static assets like favicons.
@@ -106,6 +138,48 @@ pub fn find_framework_favicon(dir: &Path, detection: &FrameworkDetection) -> Opt
         }
     }
     None
+}
+
+/// Remove ANSI SGR/CSI escape sequences (e.g. Vite's colored banner) so a URL
+/// split by color codes still parses.
+fn strip_ansi_codes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC '[' params... final-letter. Skip the whole sequence.
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c2 in chars.by_ref() {
+                    if c2.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+                continue;
+            }
+            // Any other escape: drop ESC and the following byte.
+            chars.next();
+            continue;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// Extract the local URL from a line of dev-server output. Vite prints
+/// `  ➜  Local:   http://localhost:5173/`; wrapper CLIs follow the same shape.
+pub fn parse_dev_server_url(line: &str) -> Option<String> {
+    let line = strip_ansi_codes(line);
+    let after = line.split_once("Local:")?.1.trim_start();
+    let start = match (after.find("http://"), after.find("https://")) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return None,
+    };
+    let url = &after[start..];
+    let end = url.find(char::is_whitespace).unwrap_or(url.len());
+    Some(url[..end].to_string())
 }
 
 /// Detect a web framework in `dir`.
@@ -179,6 +253,7 @@ fn detect_nextjs(_dir: &Path) -> FrameworkDetection {
         entrypoint_code: String::new(),
         include_paths: Vec::new(),
         build: false,
+        dev_server: DevServer::None,
     }
 }
 
@@ -188,6 +263,7 @@ fn detect_astro(_dir: &Path) -> FrameworkDetection {
         entrypoint_code: "// @ts-nocheck\nimport \"./dist/server/entry.mjs\";\n".into(),
         include_paths: vec!["dist".into()],
         build: true,
+        dev_server: DevServer::None,
     }
 }
 
@@ -210,6 +286,7 @@ Deno.serve(mod.default.fetch);
             .into(),
             include_paths,
             build: true,
+            dev_server: DevServer::External,
         }
     } else {
         FrameworkDetection {
@@ -217,6 +294,7 @@ Deno.serve(mod.default.fetch);
             entrypoint_code: "// @ts-nocheck\nimport \"./main.ts\";\n".into(),
             include_paths: Vec::new(),
             build: false,
+            dev_server: DevServer::None,
         }
     }
 }
@@ -231,6 +309,7 @@ fn detect_remix(dir: &Path) -> FrameworkDetection {
         entrypoint_code: "// @ts-nocheck\nimport \"./build/server/index.js\";\n".into(),
         include_paths,
         build: true,
+        dev_server: DevServer::External,
     }
 }
 
@@ -273,6 +352,7 @@ Deno.serve(async (req) => {
             entrypoint_code: format!("// @ts-nocheck\n{STATIC_HELPER}{body}"),
             include_paths: vec!["build/client".into()],
             build: true,
+            dev_server: DevServer::External,
         }
     } else {
         let body = r#"import { createRequestHandler } from "react-router";
@@ -294,6 +374,7 @@ Deno.serve(async (req) => {
             entrypoint_code: format!("// @ts-nocheck\n{STATIC_HELPER}{body}"),
             include_paths: vec!["build".into()],
             build: true,
+            dev_server: DevServer::External,
         }
     }
 }
@@ -340,6 +421,7 @@ fn detect_sveltekit(dir: &Path) -> Result<FrameworkDetection, String> {
         entrypoint_code: format!("// @ts-nocheck\n{entry}"),
         include_paths: include,
         build: true,
+        dev_server: DevServer::InRuntime,
     };
 
     if dir.join(".deno-deploy/server.ts").exists() {
@@ -420,6 +502,7 @@ fn detect_nitro_framework(dir: &Path, name: &'static str) -> FrameworkDetection 
         entrypoint_code: format!("// @ts-nocheck\n{entry}"),
         include_paths: vec![".output".into()],
         build: true,
+        dev_server: DevServer::External,
     }
 }
 
@@ -433,6 +516,7 @@ fn detect_vite(dir: &Path) -> FrameworkDetection {
             entrypoint_code: format!("// @ts-nocheck\nimport \"./{server_file}\";\n"),
             include_paths: vec!["dist".into()],
             build: true,
+            dev_server: DevServer::InRuntime,
         };
     }
 
@@ -457,6 +541,7 @@ Deno.serve(async (req) => {
         entrypoint_code: format!("// @ts-nocheck\n{STATIC_HELPER}{body}"),
         include_paths: vec!["dist".into()],
         build: true,
+        dev_server: DevServer::InRuntime,
     }
 }
 
@@ -551,7 +636,55 @@ mod tests {
         assert!(det.build);
         assert!(det.entrypoint_code.contains("serveDir"));
         assert!(det.hmr_entrypoint_code().is_some());
+        assert!(!det.needs_external_dev_server());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn nitro_frameworks_use_external_dev_server() {
+        let dir = tmp("nuxt-hmr");
+        write(&dir, "nuxt.config.ts", "");
+        let det = detect_framework(&dir).unwrap().unwrap();
+        assert_eq!(det.name, "Nuxt");
+        assert!(det.needs_external_dev_server());
+        assert!(det.hmr_entrypoint_code().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn parse_dev_server_url_cases() {
+        assert_eq!(
+            parse_dev_server_url("  ➜  Local:   http://localhost:5173/").as_deref(),
+            Some("http://localhost:5173/")
+        );
+        assert_eq!(
+            parse_dev_server_url("  Local:   https://localhost:5173/").as_deref(),
+            Some("https://localhost:5173/")
+        );
+        assert_eq!(
+            parse_dev_server_url("  Local:   http://localhost:5173/app").as_deref(),
+            Some("http://localhost:5173/app")
+        );
+        assert_eq!(
+            parse_dev_server_url("  Local:   http://192.168.1.1:5173").as_deref(),
+            Some("http://192.168.1.1:5173")
+        );
+        // ANSI color codes split across the URL must be stripped first.
+        assert_eq!(
+            parse_dev_server_url(
+                "\x1b[32m➜\x1b[39m  \x1b[1mLocal\x1b[22m:   \
+                 \x1b[36mhttp://127.0.0.1:\x1b[1m5173\x1b[22m/\x1b[39m"
+            )
+            .as_deref(),
+            Some("http://127.0.0.1:5173/")
+        );
+        // The Network line (and prose) must not match.
+        assert_eq!(parse_dev_server_url("Watching for file changes..."), None);
+        assert_eq!(parse_dev_server_url(""), None);
+        assert_eq!(
+            parse_dev_server_url("  Network:  http://192.168.1.1:5173/"),
+            None
+        );
     }
 
     #[test]

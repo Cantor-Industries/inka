@@ -52,6 +52,8 @@ mod tsconfig;
 mod desktop;
 #[cfg(feature = "desktop")]
 mod desktop_api;
+#[cfg(all(feature = "desktop-e2e", feature = "desktop"))]
+mod desktop_e2e;
 #[cfg(feature = "desktop")]
 mod desktop_js;
 #[cfg(feature = "desktop")]

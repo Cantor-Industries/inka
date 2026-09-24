@@ -4,7 +4,7 @@
 inka build   [source] [-s <file>] [-o <file>] [--runtime <spec>] [--tested-against <ver>] [-A|--allow-all] [-R|-W|-N|-E|-S[=list]] [--allow-<cat>[=list]] [--deny-<cat>[=list]] [-P[=<set>]] [--minify] [--sourcemap] [--external[=<pkg>]]... [--embed-dir] [--path-base <exe|cwd>] [--fetch] [--beta|--stable]
 inka run     [-A] [-P[=name]] [--allow-<cat>[=list]|--deny-<cat>[=list]]... [--path-base <exe|cwd>] [--fetch] [--beta|--stable] <file> [args...]
 inka cache   <file>
-inka desktop [entry] [-o <dir>] [--name <name>] [--identifier <id>] [--backend <kind>] [--icon <png>] [--payload <dir>] [--external[=<pkg>]]... [--no-bundle] [--minify] [--sourcemap] [--hmr] [--inspect[=host:port]|--inspect-brk|--inspect-wait] [--app-version <ver>] [--release-base <url>] [--error-reporting <url>] [--installer] [--engine-base <url>]
+inka desktop [entry] [-o <dir>] [--name <name>] [--identifier <id>] [--backend <kind>] [--icon <png>] [--payload <dir>] [--external[=<pkg>]]... [--no-bundle] [--minify] [--sourcemap] [--hmr] [--dev-command <cmd>] [--inspect[=host:port]|--inspect-brk|--inspect-wait] [--app-version <ver>] [--release-base <url>] [--error-reporting <url>] [--installer] [--engine-base <url>]
 inka update  [<version>] [--from <dir-or-url>] [--sha256 <hex>] [--insecure] [--home <dir>]
              [--no-toolchain|--toolchain-only] [--no-runtime] [--beta|--stable]
 inka doctor  [artifact] [--json] [--beta|--stable]
@@ -60,8 +60,10 @@ defaults to the current directory) detects and builds a Vite project. Defaults c
 output is an app directory, a `.desktop` entry, and a `.tar.gz`; `--installer`
 additionally emits a portable `<App>.tar.gz` + `<App>.install.sh` that provisions
 the shared engine (and CEF runtime) on the target machine. Linux only
-today. Dev modes run the source tree directly (no packaging): `--hmr` watches
-and hot-replaces modules (falling back to a window reload), and
+today. Dev modes run the source tree directly (no packaging): `--hmr` on a
+framework directory boots the framework's dev server (Vite in-runtime, else the
+project's own dev command), `--hmr` on an entry file watches and hot-replaces
+modules (falling back to a window reload), and
 `--inspect`/`--inspect-brk`/`--inspect-wait` start the CDP mux for the runtime
 isolate (use `/deno` via `chrome://inspect`). See [Desktop apps](desktop.md).
 
