@@ -2,25 +2,22 @@
 #
 # Triggered by every `v*` tag.
 #   - `build` (self-hosted Linux): builds the toolchain (inka, inka-launcher,
-#     shim) and the heavy runtime, stages a toolchain tarball + engine assets +
-#     versions.json, and smoke-tests the whole release through install.sh.
+#     shim) and the desktop runtime, stages a toolchain tarball + engine assets +
+#     versions.json, and smoke-tests the release through install.sh.
 #   - `build-windows` (self-hosted Windows): builds the Windows toolchain + core
 #     runtime (no `desktop` feature), stages a toolchain `.zip` + runtime `.dll`
-#     + install.ps1, and merges `versions.json` into a per-target map. Uploads
-#     its assets so a separate Windows machine can publish.
-#   - `publish` (self-hosted Linux, contents: write): downloads the Windows
-#     assets, then runs the release action for both platforms. Its `needs` make
-#     a Windows failure block the release.
+#     + install.ps1, and merges `versions.json` into a per-target map.
+#   - `publish` (self-hosted Linux, contents: write): attaches both platforms.
 #
 # Runner requirements:
-#   - Linux `runs-on: self-hosted`: CARGO_HOME/CARGO_TARGET_DIR on a big disk,
-#     network (npm/deno for the smoke test). Both Linux jobs share the filesystem
-#     and the `/tmp/inka-release-<run_id>` stage path.
-#   - Windows `runs-on: [self-hosted, windows, x64]` (adjust labels): Rust
-#     (x86_64-pc-windows-msvc), VS Build Tools, Git, and PowerShell 7 (`pwsh`).
-#     The core runtime needs no libclang; the `desktop` feature is not enabled.
-#   - Artifacts move the Windows assets between machines, so the two runners may
-#     be separate hosts.
+#   - Both self-hosted runners are on the same machine and share one stage
+#     directory, exposed to each as `INKA_STAGE_DIR` in that OS's native path
+#     (e.g. Linux `/mnt/.../inka-stage`, Windows `C:\...\inka-stage`). Build
+#     outputs cross jobs through that directory instead of artifacts.
+#   - Linux: CARGO_HOME/CARGO_TARGET_DIR on a big disk, network (npm/deno for the
+#     smoke test).
+#   - Windows: Rust (x86_64-pc-windows-msvc), VS Build Tools, Git, and PowerShell
+#     7 (`pwsh`). The core runtime needs no libclang.
 
 name: release
 
@@ -43,8 +40,6 @@ jobs:
     permissions:
       contents: read
     env:
-      # A stable path on the (single) self-hosted runner, shared with `publish`.
-      STAGE: /tmp/inka-release-${{ github.run_id }}
       TARGET: x86_64-unknown-linux-gnu
     outputs:
       rel: ${{ steps.versions.outputs.rel }}
@@ -59,10 +54,13 @@ jobs:
           set -euo pipefail
           : "${CARGO_TARGET_DIR:?CARGO_TARGET_DIR must be set on the runner}"
           : "${CARGO_HOME:?CARGO_HOME must be set on the runner}"
+          : "${INKA_STAGE_DIR:?INKA_STAGE_DIR must be set on the runner (shared with the Windows runner)}"
+          STAGE="$INKA_STAGE_DIR/release-${{ github.run_id }}"
           mkdir -p "$CARGO_TARGET_DIR" "$STAGE"
           echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
           echo "CARGO_HOME=$CARGO_HOME"
           echo "STAGE=$STAGE"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
 
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
@@ -201,14 +199,6 @@ jobs:
       - name: Smoke test (never publish a broken release)
         run: scripts/ci/smoke.sh "$STAGE"
 
-      # The Windows job merges this into the final per-target versions.json.
-      - name: Upload versions.json (for the Windows build)
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: inka-versions-linux
-          if-no-files-found: error
-          path: ${{ env.STAGE }}/versions.json
-
   # Windows core toolchain + runtime. Built without the `desktop` feature: the
   # core CLI (`run`/`build`/`update`) does not need laufey, so the runner avoids
   # libclang/bindgen. The Windows desktop runtime comes in a later release.
@@ -229,19 +219,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      # `runner` is not available in job-level `env`; compute the stage path at
-      # step scope and export it for the rest of the job.
+      # Both runners share one stage directory (native path per OS). Fail fast
+      # if the runner is not configured for it.
       - name: Prepare stage
         run: |
-          $stage = Join-Path $env:RUNNER_TEMP "inka-release-${{ github.run_id }}"
+          if (-not $env:INKA_STAGE_DIR) {
+            throw 'INKA_STAGE_DIR must be set on the runner (shared with the Linux runner)'
+          }
+          $stage = Join-Path $env:INKA_STAGE_DIR "release-${{ github.run_id }}"
           New-Item -ItemType Directory -Force -Path $stage | Out-Null
           "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
-
-      - name: Download Linux versions.json
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: inka-versions-linux
-          path: ${{ runner.temp }}\inka-release-${{ github.run_id }}\linux
 
       - name: Build toolchain + runtime
         env:
@@ -281,7 +268,7 @@ jobs:
 
           # Merge the Linux record with a per-target map. Top-level keys stay
           # pointing at Linux so install.sh / older `inka update` keep working.
-          $doc = Get-Content -LiteralPath (Join-Path $stage 'linux/versions.json') -Raw | ConvertFrom-Json
+          $doc = Get-Content -LiteralPath (Join-Path $stage 'versions.json') -Raw | ConvertFrom-Json
           $targets = [ordered]@{}
           $targets['x86_64-unknown-linux-gnu'] = [ordered]@{
             toolchain      = $doc.toolchain
@@ -300,35 +287,19 @@ jobs:
       - name: Smoke test
         run: '& "$PWD/scripts/ci/smoke.ps1" -Stage $env:STAGE'
 
-      - name: Upload Windows assets
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: inka-windows
-          if-no-files-found: error
-          path: |
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\inka-toolchain-*.zip
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\inka-toolchain-*.zip.sha256
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll.sha256
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\install.ps1
-            ${{ runner.temp }}\inka-release-${{ github.run_id }}\versions.json
-
   publish:
     needs: [build, build-windows]
     runs-on: self-hosted
     permissions:
       contents: write
     env:
-      STAGE: /tmp/inka-release-${{ github.run_id }}
       TARGET: x86_64-unknown-linux-gnu
     steps:
-      # Pull the Windows assets (built on the Windows runner) into the same
-      # staging dir. This also brings the merged per-target versions.json.
-      - name: Download Windows assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: inka-windows
-          path: ${{ env.STAGE }}
+      - name: Resolve stage
+        run: |
+          set -euo pipefail
+          : "${INKA_STAGE_DIR:?INKA_STAGE_DIR must be set on the runner}"
+          echo "STAGE=$INKA_STAGE_DIR/release-${{ github.run_id }}" >> "$GITHUB_ENV"
 
       # No checkout and no package-manager code here: only the publish action.
       - name: Publish GitHub Release
