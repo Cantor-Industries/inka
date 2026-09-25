@@ -1,17 +1,13 @@
-# Heavy runtime/bundler matrix on the self-hosted runners (Linux + Windows).
+# Runtime contract matrix on the self-hosted runner.
 #
 # The heavy crates (`inka-runtime`, `inka-bundler`/rolldown) build here; the
 # hosted `ci.yml` rust job only covers the fast crates. Built in release so the
 # matrix exercises the same optimized runtime that ships. Triggered only when
-# runtime/bundler-coupled files change, so the shared runner is not scheduled for
-# unrelated PRs.
+# runtime/bundler-coupled files change, so the shared release runner is not
+# scheduled for unrelated PRs.
 #
-# Security: never run untrusted fork code on the self-hosted runners. Both jobs
-# are skipped for pull requests whose head repo is not this repository.
-#
-# Windows runner requirements: Rust (x86_64-pc-windows-msvc), VS Build Tools,
-# PowerShell 7 (`pwsh`), and LLVM (libclang) for the `desktop` feature's bindgen
-# (`LIBCLANG_PATH`, adjusted below if installed elsewhere).
+# Security: never run untrusted fork code on the self-hosted runner. The job is
+# skipped for pull requests whose head repo is not this repository.
 
 name: runtime-ci
 
@@ -23,9 +19,7 @@ on:
       - 'crates/inka-format/**'
       - 'crates/inka/**'
       - 'crates/inka-launcher/**'
-      - 'crates/inka-desktop-shim/**'
       - 'scripts/ci/**'
-      - 'install.ps1'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/runtime-ci.yml'
@@ -37,9 +31,7 @@ on:
       - 'crates/inka-format/**'
       - 'crates/inka/**'
       - 'crates/inka-launcher/**'
-      - 'crates/inka-desktop-shim/**'
       - 'scripts/ci/**'
-      - 'install.ps1'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/runtime-ci.yml'
@@ -52,7 +44,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  linux:
+  matrix:
     runs-on: self-hosted
     timeout-minutes: 60
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -161,81 +153,3 @@ jobs:
             *e2e-ok*) ;;
             *) echo "e2e: unexpected artifact output: $out" >&2; exit 1 ;;
           esac
-
-  windows:
-    runs-on: [self-hosted, windows, x64]
-    timeout-minutes: 120
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    defaults:
-      run:
-        shell: pwsh
-    env:
-      CARGO_TERM_COLOR: always
-    steps:
-      - name: Checkout
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-
-      - name: Rust components
-        run: rustup component add clippy rustfmt
-
-      - name: Windows target
-        run: rustup target add x86_64-pc-windows-msvc
-
-      - name: Rustfmt
-        run: cargo fmt --all -- --check
-
-      - name: Clippy (fast crates, deny warnings)
-        run: |
-          cargo clippy --locked -p inka --bin inka -p inka-launcher `
-            -p inka-runtime-stub -p inka-desktop-shim -p inka-format `
-            --all-targets -- -D warnings
-
-      - name: Fast-crate tests
-        run: |
-          cargo test --locked -p inka --bin inka
-          cargo test --locked -p inka-format -p inka-launcher -p inka-desktop-shim
-
-      # Heavy: V8 snapshot + laufey (bindgen). libclang must be discoverable.
-      - name: Build toolchain + runtime (release, desktop)
-        env:
-          # TODO: adjust if LLVM is installed elsewhere on the runner.
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
-        run: |
-          cargo build --locked --release -p inka --features bundle
-          cargo build --locked --release -p inka-launcher
-          cargo build --locked --release -p inka-desktop-shim
-          cargo build --locked --release -p inka-runtime --features desktop
-
-      - name: Clippy runtime (desktop)
-        env:
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
-        run: cargo clippy --locked -p inka-runtime --features desktop --all-targets -- -D warnings
-
-      - name: Runtime lib tests (desktop)
-        env:
-          LIBCLANG_PATH: C:\Program Files\LLVM\bin
-        run: cargo test --locked --release -p inka-runtime --features desktop --lib
-
-      - name: Stage runtime
-        run: |
-          $runtime = (Get-Content crates/inka-runtime/runtime-version -Raw).Trim()
-          $home = Join-Path $env:RUNNER_TEMP 'inka-runtime'
-          New-Item -ItemType Directory -Force -Path $home | Out-Null
-          Copy-Item 'target/release/inka_runtime.dll' "$home/libinka_runtime-$runtime.dll"
-          "INKA_RUNTIME_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
-          # A prerelease tuple is only selected in the beta channel.
-          if ($runtime -match '-(beta|rc)\.') {
-            "INKA_CHANNEL=beta" | Out-File -FilePath $env:GITHUB_ENV -Append
-          }
-
-      - name: Smoke (build + run an artifact)
-        run: |
-          $bin = 'target/release'
-          New-Item -ItemType Directory -Force -Path smoke | Out-Null
-          Set-Content -Path smoke/main.js -Value 'console.log("smoke-artifact");'
-          & "$bin/inka.exe" build smoke/main.js -o smoke/hello.exe
-          $out = & 'smoke/hello.exe'
-          if ($out -notmatch 'smoke-artifact') {
-            throw "artifact output missing: $out"
-          }
-          & "$bin/inka.exe" doctor
