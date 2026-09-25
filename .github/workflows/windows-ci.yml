@@ -76,10 +76,12 @@ jobs:
         run: |
           $runtime = (Get-Content crates/inka-runtime/runtime-version -Raw).Trim()
           $bin = "target/release"
-          $home = Join-Path $env:RUNNER_TEMP "inka-runtime"
-          New-Item -ItemType Directory -Force -Path $home | Out-Null
-          Copy-Item "$bin/inka_runtime.dll" "$home/libinka_runtime-$runtime.dll"
-          "INKA_RUNTIME_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # Not `$home`: PowerShell variable names are case-insensitive and
+          # `$HOME` is a read-only automatic variable.
+          $rtHome = Join-Path $env:RUNNER_TEMP "inka-runtime"
+          New-Item -ItemType Directory -Force -Path $rtHome | Out-Null
+          Copy-Item "$bin/inka_runtime.dll" "$rtHome/libinka_runtime-$runtime.dll"
+          "INKA_RUNTIME_HOME=$rtHome" | Out-File -FilePath $env:GITHUB_ENV -Append
           # A prerelease engine tuple is only selected in the beta channel.
           if ($runtime -match '-(beta|rc)\.') {
             "INKA_CHANNEL=beta" | Out-File -FilePath $env:GITHUB_ENV -Append
