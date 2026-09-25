@@ -4642,6 +4642,7 @@ dependencies = [
 name = "inka-desktop-shim"
 version = "0.8.1"
 dependencies = [
+ "filetime",
  "fslock",
  "inka-format",
  "libloading 0.8.9",

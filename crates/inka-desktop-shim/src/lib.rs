@@ -353,18 +353,26 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("inka-shim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        for n in [
-            "libinka_runtime-0.267.2.so",
-            "libinka_runtime-0.267.10.so",
-            "libinka_runtime-0.267.9-beta.1.so",
-            "not-a-runtime.so",
-        ] {
+        for n in
+            ["0.267.2", "0.267.10", "0.267.9-beta.1"].map(inka_format::platform::runtime_lib_name)
+        {
             std::fs::write(dir.join(n), b"x").unwrap();
         }
+        // A non-runtime file must be ignored (platform-appropriate suffix).
+        std::fs::write(
+            dir.join(format!(
+                "not-a-runtime{}",
+                inka_format::platform::runtime_lib_suffix()
+            )),
+            b"x",
+        )
+        .unwrap();
         let got = newest_runtime_in(&dir, None).unwrap();
-        assert_eq!(got.file_name().unwrap(), "libinka_runtime-0.267.10.so");
+        let max = inka_format::platform::runtime_lib_name("0.267.10");
+        assert_eq!(got.file_name().unwrap().to_str().unwrap(), max.as_str());
         let exact = newest_runtime_in(&dir, Some("0.267.2")).unwrap();
-        assert_eq!(exact.file_name().unwrap(), "libinka_runtime-0.267.2.so");
+        let want = inka_format::platform::runtime_lib_name("0.267.2");
+        assert_eq!(exact.file_name().unwrap().to_str().unwrap(), want.as_str());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -403,10 +411,13 @@ mod tests {
             let d = root.join(format!("payload{i}"));
             std::fs::create_dir_all(&d).unwrap();
             std::fs::write(d.join(".ok"), b"ok").unwrap();
-            std::fs::File::open(&d)
-                .unwrap()
-                .set_modified(base + std::time::Duration::from_secs(i))
-                .unwrap();
+            // `filetime` can set a directory's mtime cross-platform (std's
+            // `File::open` on a directory is denied on Windows).
+            filetime::set_file_mtime(
+                &d,
+                filetime::FileTime::from_system_time(base + std::time::Duration::from_secs(i)),
+            )
+            .unwrap();
             dirs.push(d);
         }
         // Lock the oldest payload; it must survive the prune.

@@ -18,3 +18,7 @@ libsui = "0.16"
 libloading = "0.8"
 # Cross-platform advisory file lock for the extracted-payload cache.
 fslock = "0.2"
+
+[dev-dependencies]
+# Set directory mtimes in tests without unix-only `File::open(dir)`.
+filetime = "0.2"
