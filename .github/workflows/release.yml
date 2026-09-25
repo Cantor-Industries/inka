@@ -225,19 +225,23 @@ jobs:
         shell: pwsh
     env:
       TARGET: x86_64-pc-windows-msvc
-      STAGE: ${{ runner.temp }}\inka-release-${{ github.run_id }}
     steps:
       - name: Checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
+      # `runner` is not available in job-level `env`; compute the stage path at
+      # step scope and export it for the rest of the job.
       - name: Prepare stage
-        run: New-Item -ItemType Directory -Force -Path $env:STAGE | Out-Null
+        run: |
+          $stage = Join-Path $env:RUNNER_TEMP "inka-release-${{ github.run_id }}"
+          New-Item -ItemType Directory -Force -Path $stage | Out-Null
+          "STAGE=$stage" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Download Linux versions.json
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: inka-versions-linux
-          path: ${{ env.STAGE }}\linux
+          path: ${{ runner.temp }}\inka-release-${{ github.run_id }}\linux
 
       - name: Build toolchain + runtime
         env:
@@ -302,12 +306,12 @@ jobs:
           name: inka-windows
           if-no-files-found: error
           path: |
-            ${{ env.STAGE }}\inka-toolchain-*.zip
-            ${{ env.STAGE }}\inka-toolchain-*.zip.sha256
-            ${{ env.STAGE }}\libinka_runtime-*.dll
-            ${{ env.STAGE }}\libinka_runtime-*.dll.sha256
-            ${{ env.STAGE }}\install.ps1
-            ${{ env.STAGE }}\versions.json
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\inka-toolchain-*.zip
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\inka-toolchain-*.zip.sha256
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll.sha256
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\install.ps1
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\versions.json
 
   publish:
     needs: [build, build-windows]
