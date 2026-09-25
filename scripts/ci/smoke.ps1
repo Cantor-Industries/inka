@@ -38,6 +38,7 @@ New-Item -ItemType Directory -Force -Path $scratch | Out-Null
 $env:INKA_RUNTIME_HOME = Join-Path $scratch 'runtime'
 $prefix = Join-Path $scratch 'prefix'
 $inka = Join-Path $prefix 'bin\inka.exe'
+$originalLocation = (Get-Location).Path
 try {
     Info 'install via install.ps1 (toolchain + engine)'
     & (Join-Path $Stage 'install.ps1') -From $Stage -Prefix $prefix -NoModifyPath
@@ -56,12 +57,15 @@ try {
     $apps = Join-Path $scratch 'apps'
     New-Item -ItemType Directory -Force -Path $apps | Out-Null
     Set-Content -Path (Join-Path $apps 'simple.js') -Value 'console.log("smoke-run");'
-    $out = & $inka run (Join-Path $apps 'simple.js')
+    # `inka build` confines the source to the current working directory, so run
+    # from inside the app dir (mirrors the Linux smoke.sh).
+    Set-Location -LiteralPath $apps
+    $out = & $inka run simple.js
     if ($out -notmatch 'smoke-run') { Fail "run output missing: $out" }
 
     Info 'inka build + run artifact'
     Set-Content -Path (Join-Path $apps 'artifact.js') -Value 'console.log("smoke-artifact");'
-    & $inka build (Join-Path $apps 'artifact.js')
+    & $inka build artifact.js
     if ($LASTEXITCODE -ne 0) { Fail "build exited $LASTEXITCODE" }
     $artifact = Join-Path $apps 'artifact.exe'
     if (-not (Test-Path -LiteralPath $artifact)) { Fail "build did not produce $artifact" }
@@ -76,5 +80,7 @@ try {
 
     Write-Host 'smoke: OK' -ForegroundColor Green
 } finally {
+    # Leave the scratch dir before deleting it (Windows can't remove the cwd).
+    Set-Location -LiteralPath $originalLocation
     Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue
 }
