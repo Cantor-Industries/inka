@@ -1,19 +1,26 @@
 # Release pipeline for inka.
 #
-# Triggered by every `v*` tag. On a self-hosted runner:
-#   - `build`: builds the toolchain (inka, inka-launcher) and the heavy runtime,
-#     stages a toolchain tarball + engine assets + versions.json, and smoke-tests
-#     the whole release through install.sh (this job runs npm/deno, so it only
-#     has `contents: read`).
-#   - `publish`: a separate job with `contents: write` that only runs the
-#     release action; it carries no untrusted package-manager code.
+# Triggered by every `v*` tag.
+#   - `build` (self-hosted Linux): builds the toolchain (inka, inka-launcher,
+#     shim) and the heavy runtime, stages a toolchain tarball + engine assets +
+#     versions.json, and smoke-tests the whole release through install.sh.
+#   - `build-windows` (self-hosted Windows): builds the Windows toolchain + core
+#     runtime (no `desktop` feature), stages a toolchain `.zip` + runtime `.dll`
+#     + install.ps1, and merges `versions.json` into a per-target map. Uploads
+#     its assets so a separate Windows machine can publish.
+#   - `publish` (self-hosted Linux, contents: write): downloads the Windows
+#     assets, then runs the release action for both platforms. Its `needs` make
+#     a Windows failure block the release.
 #
 # Runner requirements:
-#   - runs-on: self-hosted (a single runner, so both jobs share the filesystem
-#     and the `/tmp/inka-release-<run_id>` stage path)
-#   - the runner's own environment provides CARGO_HOME and CARGO_TARGET_DIR
-#     (a big disk; the Deno runtime build is ~10-15 min and needs several GB).
-#   - network (npm/deno for the smoke test).
+#   - Linux `runs-on: self-hosted`: CARGO_HOME/CARGO_TARGET_DIR on a big disk,
+#     network (npm/deno for the smoke test). Both Linux jobs share the filesystem
+#     and the `/tmp/inka-release-<run_id>` stage path.
+#   - Windows `runs-on: [self-hosted, windows, x64]` (adjust labels): Rust
+#     (x86_64-pc-windows-msvc), VS Build Tools, Git, and PowerShell 7 (`pwsh`).
+#     The core runtime needs no libclang; the `desktop` feature is not enabled.
+#   - Artifacts move the Windows assets between machines, so the two runners may
+#     be separate hosts.
 
 name: release
 
@@ -194,8 +201,116 @@ jobs:
       - name: Smoke test (never publish a broken release)
         run: scripts/ci/smoke.sh "$STAGE"
 
-  publish:
+      # The Windows job merges this into the final per-target versions.json.
+      - name: Upload versions.json (for the Windows build)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inka-versions-linux
+          if-no-files-found: error
+          path: ${{ env.STAGE }}/versions.json
+
+  # Windows core toolchain + runtime. Built without the `desktop` feature: the
+  # core CLI (`run`/`build`/`update`) does not need laufey, so the runner avoids
+  # libclang/bindgen. The Windows desktop runtime comes in a later release.
+  #
+  # Runner requirements: Rust (x86_64-pc-windows-msvc), VS Build Tools, Git, and
+  # PowerShell 7 (`pwsh`).
+  build-windows:
     needs: build
+    # TODO: match the self-hosted Windows runner's labels.
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      STAGE: ${{ runner.temp }}\inka-release-${{ github.run_id }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Prepare stage
+        run: New-Item -ItemType Directory -Force -Path $env:STAGE | Out-Null
+
+      - name: Download Linux versions.json
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: inka-versions-linux
+          path: ${{ env.STAGE }}\linux
+
+      - name: Build toolchain + runtime
+        env:
+          INKA_BUILD_VERSION: ${{ needs.build.outputs.rel }}
+          INKA_BUILD_TAG: ${{ github.ref_name }}
+        run: |
+          $env:INKA_BUILD_COMMIT = $env:GITHUB_SHA.Substring(0, 7)
+          cargo build --locked --release -p inka --features bundle
+          cargo build --locked --release -p inka-launcher
+          cargo build --locked --release -p inka-desktop-shim
+          cargo build --locked --release -p inka-runtime
+
+      - name: Stage assets
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bin = 'target/release'
+          $stage = $env:STAGE
+          $rel = '${{ needs.build.outputs.rel }}'
+          $runtime = '${{ needs.build.outputs.runtime }}'
+          $tc = "inka-toolchain-$rel-x86_64-pc-windows-msvc.zip"
+          Copy-Item "$bin/inka.exe" (Join-Path $stage 'inka.exe') -Force
+          Copy-Item "$bin/inka-launcher.exe" (Join-Path $stage 'inka-launcher.exe') -Force
+          Copy-Item "$bin/inka_desktop_shim.dll" (Join-Path $stage 'libinka_desktop_shim.dll') -Force
+          $files = @(
+            (Join-Path $stage 'inka.exe')
+            (Join-Path $stage 'inka-launcher.exe')
+            (Join-Path $stage 'libinka_desktop_shim.dll')
+          )
+          Compress-Archive -Force -DestinationPath (Join-Path $stage $tc) -Path $files
+          $rtName = "libinka_runtime-$runtime.dll"
+          Copy-Item "$bin/inka_runtime.dll" (Join-Path $stage $rtName) -Force
+          Copy-Item 'install.ps1' (Join-Path $stage 'install.ps1') -Force
+          $tcSha = (Get-FileHash -LiteralPath (Join-Path $stage $tc) -Algorithm SHA256).Hash.ToLower()
+          Set-Content -LiteralPath (Join-Path $stage "$tc.sha256") -Value $tcSha
+          $rtSha = (Get-FileHash -LiteralPath (Join-Path $stage $rtName) -Algorithm SHA256).Hash.ToLower()
+          Set-Content -LiteralPath (Join-Path $stage "$rtName.sha256") -Value $rtSha
+
+          # Merge the Linux record with a per-target map. Top-level keys stay
+          # pointing at Linux so install.sh / older `inka update` keep working.
+          $doc = Get-Content -LiteralPath (Join-Path $stage 'linux/versions.json') -Raw | ConvertFrom-Json
+          $targets = [ordered]@{}
+          $targets['x86_64-unknown-linux-gnu'] = [ordered]@{
+            toolchain      = $doc.toolchain
+            runtime        = $doc.runtime
+            runtime_sha256 = $doc.runtime_sha256
+            laufey         = $doc.laufey
+          }
+          $targets['x86_64-pc-windows-msvc'] = [ordered]@{
+            toolchain      = [ordered]@{ version = $rel; target = 'x86_64-pc-windows-msvc'; archive = $tc; sha256 = $tcSha }
+            runtime        = $runtime
+            runtime_sha256 = $rtSha
+          }
+          $doc | Add-Member -NotePropertyName targets -NotePropertyValue $targets -Force
+          $doc | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stage 'versions.json')
+
+      - name: Smoke test
+        run: '& "$PWD/scripts/ci/smoke.ps1" -Stage $env:STAGE'
+
+      - name: Upload Windows assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: inka-windows
+          if-no-files-found: error
+          path: |
+            ${{ env.STAGE }}\inka-toolchain-*.zip
+            ${{ env.STAGE }}\inka-toolchain-*.zip.sha256
+            ${{ env.STAGE }}\libinka_runtime-*.dll
+            ${{ env.STAGE }}\libinka_runtime-*.dll.sha256
+            ${{ env.STAGE }}\install.ps1
+            ${{ env.STAGE }}\versions.json
+
+  publish:
+    needs: [build, build-windows]
     runs-on: self-hosted
     permissions:
       contents: write
@@ -203,6 +318,14 @@ jobs:
       STAGE: /tmp/inka-release-${{ github.run_id }}
       TARGET: x86_64-unknown-linux-gnu
     steps:
+      # Pull the Windows assets (built on the Windows runner) into the same
+      # staging dir. This also brings the merged per-target versions.json.
+      - name: Download Windows assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: inka-windows
+          path: ${{ env.STAGE }}
+
       # No checkout and no package-manager code here: only the publish action.
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
@@ -217,7 +340,12 @@ jobs:
             ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-${{ env.TARGET }}.tar.gz.sha256
             ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so
             ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.so.sha256
+            ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-x86_64-pc-windows-msvc.zip
+            ${{ env.STAGE }}/inka-toolchain-${{ needs.build.outputs.rel }}-x86_64-pc-windows-msvc.zip.sha256
+            ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.dll
+            ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.dll.sha256
             ${{ env.STAGE }}/laufey-*.tar.gz
             ${{ env.STAGE }}/laufey-*.tar.gz.sha256
             ${{ env.STAGE }}/versions.json
             ${{ env.STAGE }}/install.sh
+            ${{ env.STAGE }}/install.ps1

@@ -401,6 +401,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn collect_package_skips_out_of_tree_symlinks() {
         let cwd = scratch();
         let outside = scratch();
@@ -474,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn collect_package_resolves_workspace_member_from_entry_dir() {
         let cwd = scratch();
         mk(
@@ -506,6 +508,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn collect_package_follows_pnpm_symlinks() {
         let cwd = scratch();
         mk(

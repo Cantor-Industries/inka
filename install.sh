@@ -364,6 +364,9 @@ TMP=$(mktemp -d "${TMPDIR:-/tmp}/inka-install.XXXXXX")
 trap 'rm -rf "$TMP"' EXIT INT TERM
 
 # ---- read versions.json -----------------------------------------------------
+# This installer is Linux-only. It reads the legacy top-level keys; the release
+# pipeline keeps those pointing at the Linux target alongside the per-target
+# `targets.x86_64-unknown-linux-gnu` entry consumed by `inka update`.
 fetch_text "$BASE" versions.json > "$TMP/versions.json" \
     || die "cannot read versions.json from $BASE"
 VERSIONS=$(cat "$TMP/versions.json")

@@ -43,9 +43,17 @@ raw-window-handle = { version = "=0.6.2", optional = true }
 node_resolver = "=0.97.0"
 oxc_resolver = "=11.24.3"
 serde = { version = "1", features = ["derive"] }
-sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }
+sys_traits = { version = "=0.1.28", features = ["real", "filetime", "getrandom"] }
 tokio = { version = "=1.53.1", features = ["rt", "time", "sync", "process", "fs", "net", "io-util", "io-std", "macros", "signal"] }
 url = "2"
+
+# `sys_traits` needs a platform backend for `RealSys`: `libc` on unix, `winapi`
+# on Windows (junction + windows-sys). Features are additive per target.
+[target.'cfg(unix)'.dependencies]
+sys_traits = { version = "=0.1.28", features = ["libc"] }
+
+[target.'cfg(windows)'.dependencies]
+sys_traits = { version = "=0.1.28", features = ["winapi"] }
 
 [build-dependencies]
 deno_core = "=0.412.0"

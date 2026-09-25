@@ -27,6 +27,13 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   | sh -s -- --beta
 ```
 
+Windows (preview):
+
+```powershell
+irm https://github.com/Cantor-Industries/inka/releases/download/{{TAG}}/install.ps1 -OutFile install.ps1
+.\install.ps1 -Version {{TAG}}
+```
+
 Already installed? `inka update --beta` moves the toolchain and runtime to the
 newest beta; `inka update --stable` (or re-running the stable `install.sh`)
 returns to the stable channel.
@@ -96,6 +103,18 @@ The desktop-enabled engine is runtime tuple `{{RUNTIME}}`; the release runtime
 is built with `--features desktop`, and `inka doctor` now reports the selected
 tuple's advertised capabilities (including `desktop`) and the shim.
 
+### Windows core (preview)
+
+Core `inka` now builds and runs on `x86_64-pc-windows-msvc`:
+
+- **Install** with `install.ps1` (per-user, `%LOCALAPPDATA%\inka\bin`, verified
+  toolchain `.zip`), then `inka run`, `inka build` (the default output gains
+  `.exe`), `inka doctor`, and `inka update`.
+- **Runtime** is published as `libinka_runtime-{{RUNTIME}}.dll`; `inka update`
+  provisions it and the toolchain self-update uses a rename-aside swap on the
+  running `inka.exe`.
+- **Not yet:** `inka desktop` on Windows (packaging lands in a later release).
+
 ### Also in the 0.8.1 beta line
 
 - **Script installers for desktop apps.** `inka desktop --installer` emits a
@@ -130,6 +149,11 @@ tuple's advertised capabilities (including `desktop`) and the shim.
 - `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
   desktop shim (`libinka_desktop_shim.so`)
 - `libinka_runtime-{{RUNTIME}}.so` — shared runtime tuple (desktop-enabled)
-- `install.sh` + `versions.json` — bootstrap installer + version record
+- `inka-toolchain-{{REL}}-x86_64-pc-windows-msvc.zip` — Windows CLI + launcher +
+  desktop shim (`libinka_desktop_shim.dll`)
+- `libinka_runtime-{{RUNTIME}}.dll` — Windows shared runtime (core; not built
+  with the `desktop` feature yet)
+- `install.sh` / `install.ps1` + `versions.json` — bootstrap installers + version
+  record
 
-`.sha256` sidecars are published for the toolchain and runtime.
+`.sha256` sidecars are published for the toolchains and runtimes.

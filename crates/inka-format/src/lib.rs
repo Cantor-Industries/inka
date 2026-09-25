@@ -12,6 +12,8 @@
 use std::fmt;
 use std::path::Path;
 
+pub mod platform;
+
 pub const FOOTER_LEN: usize = 24;
 pub const MAGIC: &[u8; 8] = b"INKFOOT5";
 
@@ -183,6 +185,50 @@ pub fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         out.extend_from_slice(data);
     }
     out
+}
+
+// ---- embedded section payload ----------------------------------------------
+
+/// Name of the binary section carrying a desktop app's payload. The `inka
+/// desktop` writer embeds it and the per-app shim reads it (via `libsui`), so
+/// both must agree. Kept <= 16 bytes for the Mach-O section-name field.
+pub const SECTION_NAME: &str = "inka";
+
+/// The decoded embedded payload: the manifest bytes plus the archive blob.
+pub struct SectionPayload<'a> {
+    pub manifest: &'a [u8],
+    pub archive: &'a [u8],
+}
+
+/// Encode a desktop payload as `[manifest_len u64 LE][manifest][archive]`.
+/// Unlike the launcher's trailing artifact footer, this lives inside a binary
+/// section, so the image bytes before it are never modified or re-scanned.
+pub fn encode_section_payload(files: &[(String, Vec<u8>)], manifest: &str) -> Vec<u8> {
+    let archive = encode_archive(files);
+    let mut out = Vec::with_capacity(8 + manifest.len() + archive.len());
+    out.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
+    out.extend_from_slice(manifest.as_bytes());
+    out.extend_from_slice(&archive);
+    out
+}
+
+/// Decode a payload written by [`encode_section_payload`].
+pub fn read_section_payload(bytes: &[u8]) -> Result<SectionPayload<'_>, String> {
+    if bytes.len() < 8 {
+        return Err("embedded payload is smaller than its header".into());
+    }
+    let mlen = usize::try_from(u64::from_le_bytes(bytes[0..8].try_into().unwrap()))
+        .map_err(|_| "embedded payload manifest length out of range".to_string())?;
+    let manifest_end = 8usize
+        .checked_add(mlen)
+        .ok_or_else(|| "embedded payload manifest length overflows".to_string())?;
+    if manifest_end > bytes.len() {
+        return Err("embedded payload manifest length out of range".into());
+    }
+    Ok(SectionPayload {
+        manifest: &bytes[8..manifest_end],
+        archive: &bytes[manifest_end..],
+    })
 }
 
 /// The 24-byte footer: `MAGIC` + archive length + manifest length (LE `u64`).
@@ -573,6 +619,31 @@ mod tests {
     fn archive_rejects_parent_dir() {
         assert!(parse_archive(&entry("../evil", b"x")).is_err());
         assert!(parse_archive(&entry("/abs", b"x")).is_err());
+    }
+
+    #[test]
+    fn section_payload_roundtrip() {
+        let files = vec![
+            ("main.js".to_string(), b"console.log(1)".to_vec()),
+            ("assets/a.txt".to_string(), b"a".to_vec()),
+        ];
+        let manifest = "module=main.js\napp-name=Demo\n";
+        let payload = encode_section_payload(&files, manifest);
+        let got = read_section_payload(&payload).unwrap();
+        assert_eq!(got.manifest, manifest.as_bytes());
+        assert_eq!(parse_archive(got.archive).unwrap(), files);
+    }
+
+    #[test]
+    fn section_payload_rejects_truncated_and_oversized() {
+        assert!(read_section_payload(&[]).is_err());
+        // Header claims a 1-byte manifest but provides none.
+        assert!(read_section_payload(&1u64.to_le_bytes()).is_err());
+        // Header claims a manifest longer than the payload; rejected before
+        // overflowing (all-ones manifest length).
+        let mut blob = u64::MAX.to_le_bytes().to_vec();
+        blob.extend_from_slice(b"x");
+        assert!(read_section_payload(&blob).is_err());
     }
 
     #[test]

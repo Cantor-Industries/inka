@@ -9,7 +9,8 @@
 //
 // Defaults:
 //   source    first positional argument (or -s/--source)
-//   output    source path with its final extension stripped (app.js -> app)
+//   output    source path with its final extension stripped (app.js -> app;
+//             app.exe on Windows)
 //   manifest  always derived from package.json / deno.json(.jsonc) and embedded;
 //             there is no on-disk manifest input
 //   launcher  $INKA_LAUNCHER, else <dir of inka binary>/inka-launcher
@@ -18,8 +19,6 @@
 use std::env;
 #[cfg(feature = "bundle")]
 use std::fs;
-#[cfg(feature = "bundle")]
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "bundle")]
@@ -28,10 +27,9 @@ use inka_format::{manifest_has_key, manifest_set_key};
 
 use crate::help::{self, Mode};
 use crate::permissions::{self, Flags, PermFlag};
-use crate::ui;
-
 #[cfg(feature = "bundle")]
-const LAUNCHER_BIN: &str = "inka-launcher";
+use crate::platform;
+use crate::ui;
 
 /// A usage error (bad/unknown option, missing argument): print to stderr and
 /// exit 2, so CI and callers do not mistake it for success.
@@ -172,12 +170,21 @@ pub fn cmd_build(args: &[String]) {
 
     let output = match output_flag {
         Some(o) => o,
-        None => strip_extension(&source).unwrap_or_else(|| {
-            err(&format!(
-                "cannot derive an output name from '{}' (no extension); pass -o <file>",
-                source.display()
-            ))
-        }),
+        None => {
+            let base = strip_extension(&source).unwrap_or_else(|| {
+                err(&format!(
+                    "cannot derive an output name from '{}' (no extension); pass -o <file>",
+                    source.display()
+                ))
+            });
+            // Windows needs the `.exe` suffix for the artifact to run; unix
+            // executables have no suffix.
+            if cfg!(windows) {
+                base.with_extension("exe")
+            } else {
+                base
+            }
+        }
     };
 
     if let Err(e) = check_output(&source, &output) {
@@ -427,7 +434,7 @@ fn write_executable(output: &Path, bytes: &[u8]) -> std::io::Result<()> {
         return Err(e);
     }
     drop(f);
-    if let Err(e) = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755)) {
+    if let Err(e) = platform::set_exec(&tmp) {
         let _ = fs::remove_file(&tmp);
         return Err(e);
     }
@@ -540,15 +547,16 @@ fn find_launcher() -> PathBuf {
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let adjacent = dir.join(LAUNCHER_BIN);
+            let adjacent = dir.join(platform::launcher_name());
             if adjacent.is_file() {
                 return adjacent;
             }
         }
     }
     err(&format!(
-        "cannot find the '{LAUNCHER_BIN}' launcher (build it with `cargo build --release -p inka-launcher`, \
-         keep it next to this inka binary, or set INKA_LAUNCHER)"
+        "cannot find the '{}' launcher (build it with `cargo build --release -p inka-launcher`, \
+         keep it next to this inka binary, or set INKA_LAUNCHER)",
+        platform::launcher_name()
     ))
 }
 
@@ -678,10 +686,14 @@ mod tests {
         assert!(check_output(&src, &cwd.join("./app.ts")).is_err());
         // A distinct output is fine.
         assert!(check_output(&src, &cwd.join("app")).is_ok());
-        // A symlink pointing at the source must be refused.
-        let link = cwd.join("link");
-        std::os::unix::fs::symlink(&src, &link).unwrap();
-        assert!(check_output(&src, &link).is_err());
+        // A symlink pointing at the source must be refused (unix only; creating
+        // symlinks on Windows needs privileges).
+        #[cfg(unix)]
+        {
+            let link = cwd.join("link");
+            std::os::unix::fs::symlink(&src, &link).unwrap();
+            assert!(check_output(&src, &link).is_err());
+        }
         let _ = fs::remove_dir_all(&cwd);
     }
 }

@@ -16,7 +16,8 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::desktop::{LAUFEY_TARGET, LAUFEY_VERSION};
+use crate::desktop::LAUFEY_VERSION;
+use crate::platform;
 
 /// Marker recording the version/target a shared dir was populated from.
 const INSTALLED_MARKER: &str = ".installed";
@@ -35,7 +36,7 @@ pub(crate) fn shared_cef_dir() -> PathBuf {
     crate::data_root_now()
         .join("cef")
         .join(LAUFEY_VERSION)
-        .join(LAUFEY_TARGET)
+        .join(platform::laufey_target())
 }
 
 /// CEF runtime entries are everything in the laufey backend directory except
@@ -122,7 +123,7 @@ fn copy_cef_runtime(src: &Path, backend_exe: &OsStr, dest: &Path) -> Result<(), 
 
 /// Whether `shared` already holds the CEF runtime for this laufey version/target.
 fn shared_installed(shared: &Path) -> bool {
-    let expected = format!("v{LAUFEY_VERSION} {LAUFEY_TARGET}");
+    let expected = format!("v{LAUFEY_VERSION} {}", platform::laufey_target());
     match fs::read_to_string(shared.join(INSTALLED_MARKER)) {
         Ok(marker) if marker.trim() == expected => shared.join("libcef.so").is_file(),
         _ => false,
@@ -166,7 +167,7 @@ pub(crate) fn ensure_shared_cef_at(
     })?;
     fs::write(
         shared.join(INSTALLED_MARKER),
-        format!("v{LAUFEY_VERSION} {LAUFEY_TARGET}\n"),
+        format!("v{LAUFEY_VERSION} {}\n", platform::laufey_target()),
     )
     .map_err(|e| {
         format!(
@@ -357,7 +358,7 @@ mod tests {
                 d.ends_with(
                     PathBuf::from("cef")
                         .join(LAUFEY_VERSION)
-                        .join(LAUFEY_TARGET)
+                        .join(platform::laufey_target())
                 ),
                 "got {}",
                 d.display()

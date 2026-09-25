@@ -34,36 +34,13 @@ use deno_terminal::colors;
 use inka_format::{archive_index, constraint_allows, parse_manifest, read_layout};
 use sha2::{Digest, Sha256};
 
-pub(crate) const FILENAME_PREFIX: &str = "libinka_runtime-";
-pub(crate) const FILENAME_SUFFIX: &str = ".so";
+/// Version parsing/rendering and host-platform facts live in `inka-format`,
+/// shared with the launcher and the desktop shim.
+pub(crate) use inka_format::{parse_version, platform, Version};
 
-/// Version parsing/rendering lives in `inka-format`, shared with the launcher.
-pub(crate) use inka_format::{parse_version, Version};
-
-/// `$XDG_DATA_HOME` when set (non-empty, absolute), else `$HOME/.local/share`,
-/// else the current directory.
-fn data_root(home: Option<&std::ffi::OsStr>, xdg: Option<&std::ffi::OsStr>) -> PathBuf {
-    if let Some(x) = xdg {
-        if !x.is_empty() {
-            let p = PathBuf::from(x);
-            if p.is_absolute() {
-                return p;
-            }
-        }
-    }
-    if let Some(h) = home {
-        if !h.is_empty() {
-            return PathBuf::from(h).join(".local/share");
-        }
-    }
-    PathBuf::from(".")
-}
-
+/// The per-user data root (see `inka_format::platform::data_dir`).
 pub(crate) fn data_root_now() -> PathBuf {
-    data_root(
-        env::var_os("HOME").as_deref(),
-        env::var_os("XDG_DATA_HOME").as_deref(),
-    )
+    platform::data_dir()
 }
 
 /// Per-user inka data dir: `$XDG_DATA_HOME/inka` (`~/.local/share/inka`).
@@ -112,6 +89,7 @@ fn main() {
     // Restore the default SIGPIPE disposition: piping output into `head`/`grep -q`
     // closes the pipe, and the default action (terminate quietly) is preferable to
     // Rust's panic-on-EPIPE, which aborts with `panic = "abort"`.
+    #[cfg(unix)]
     unsafe {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
@@ -480,8 +458,8 @@ pub(crate) fn installed_parts(dir: &Path) -> Vec<(Version, PathBuf)> {
     if let Ok(rd) = fs::read_dir(dir) {
         for ent in rd.flatten() {
             let name = ent.file_name().to_string_lossy().into_owned();
-            if let Some(stripped) = name.strip_prefix(FILENAME_PREFIX) {
-                if let Some(vstr) = stripped.strip_suffix(FILENAME_SUFFIX) {
+            if let Some(stripped) = name.strip_prefix(platform::RUNTIME_LIB_PREFIX) {
+                if let Some(vstr) = stripped.strip_suffix(platform::runtime_lib_suffix()) {
                     if let Some(v) = parse_version(vstr) {
                         found.push((v, ent.path()));
                     }
@@ -503,24 +481,9 @@ pub(crate) fn installed_parts_all(dirs: &[PathBuf]) -> Vec<(Version, PathBuf)> {
     found
 }
 
-/// Effective Deno cache dir from `$DENO_DIR` (non-empty) else `~/.cache/deno`.
-fn deno_dir_root(env_deno: Option<&std::ffi::OsStr>, home: Option<&std::ffi::OsStr>) -> PathBuf {
-    if let Some(d) = env_deno {
-        if !d.is_empty() {
-            return PathBuf::from(d);
-        }
-    }
-    let home = home
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| std::ffi::OsStr::new("."));
-    PathBuf::from(home).join(".cache/deno")
-}
-
+/// Effective Deno cache dir (see `inka_format::platform::deno_dir`).
 pub(crate) fn default_deno_dir() -> PathBuf {
-    deno_dir_root(
-        env::var_os("DENO_DIR").as_deref(),
-        env::var_os("HOME").as_deref(),
-    )
+    platform::deno_dir()
 }
 
 /// Path to the `inka-launcher` binary (`$INKA_LAUNCHER`, else next to the
@@ -534,7 +497,7 @@ fn launcher_path() -> Option<PathBuf> {
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let adjacent = dir.join("inka-launcher");
+            let adjacent = dir.join(platform::launcher_name());
             if adjacent.is_file() {
                 return Some(adjacent);
             }
@@ -1035,7 +998,7 @@ fn doctor_machine(effective: channel::Channel) {
         None => {
             ui::bad_row("launcher", "not found");
             problems.push((
-                "the `inka-launcher` binary was not found".to_string(),
+                format!("the `{}` binary was not found", platform::launcher_name()),
                 "reinstall the toolchain, or set INKA_LAUNCHER".to_string(),
             ));
         }
@@ -1049,7 +1012,7 @@ fn doctor_machine(effective: channel::Channel) {
         .or_else(|| {
             env::current_exe().ok().and_then(|e| {
                 e.parent()
-                    .map(|d| d.join("libinka_desktop_shim.so"))
+                    .map(|d| d.join(platform::shim_lib_name()))
                     .filter(|p| p.is_file())
             })
         });
@@ -1059,9 +1022,9 @@ fn doctor_machine(effective: channel::Channel) {
     }
 
     // Shared CEF runtime: installed lazily by `inka desktop --backend cef` and
-    // symlinked into each CEF app.
+    // shared per machine (symlinked in on unix, copied on Windows).
     let cef_dir = cef::shared_cef_dir();
-    if cef_dir.join("libcef.so").is_file() {
+    if cef_dir.join(platform::cef_lib_name()).is_file() {
         ui::ok("shared cef", cef_dir.display().to_string());
     } else {
         ui::row(
@@ -1108,68 +1071,6 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::ffi::OsStr;
-
-    fn os(s: &str) -> &OsStr {
-        OsStr::new(s)
-    }
-
-    #[test]
-    fn data_root_prefers_absolute_xdg() {
-        assert_eq!(
-            data_root(Some(os("/home/u")), Some(os("/xdg"))),
-            PathBuf::from("/xdg")
-        );
-    }
-
-    #[test]
-    fn data_root_ignores_relative_or_empty_xdg() {
-        assert_eq!(
-            data_root(Some(os("/home/u")), Some(os("relative"))),
-            PathBuf::from("/home/u/.local/share")
-        );
-        assert_eq!(
-            data_root(Some(os("/home/u")), Some(os(""))),
-            PathBuf::from("/home/u/.local/share")
-        );
-    }
-
-    #[test]
-    fn data_root_falls_back_to_home_then_dot() {
-        assert_eq!(
-            data_root(Some(os("/home/u")), None),
-            PathBuf::from("/home/u/.local/share")
-        );
-        assert_eq!(data_root(None, None), PathBuf::from("."));
-        assert_eq!(data_root(Some(os("")), None), PathBuf::from("."));
-    }
-
-    #[test]
-    fn xdg_runtime_is_under_inka() {
-        // Derived from data_root; assert the shape without touching the env.
-        let root = data_root(Some(os("/home/u")), None);
-        assert_eq!(
-            root.join("inka/runtime"),
-            PathBuf::from("/home/u/.local/share/inka/runtime")
-        );
-    }
-
-    #[test]
-    fn deno_dir_prefers_env_then_home() {
-        assert_eq!(
-            deno_dir_root(Some(os("/custom")), Some(os("/home/u"))),
-            PathBuf::from("/custom")
-        );
-        assert_eq!(
-            deno_dir_root(Some(os("")), Some(os("/home/u"))),
-            PathBuf::from("/home/u/.cache/deno")
-        );
-        assert_eq!(
-            deno_dir_root(None, Some(os("/home/u"))),
-            PathBuf::from("/home/u/.cache/deno")
-        );
-        assert_eq!(deno_dir_root(None, None), PathBuf::from("./.cache/deno"));
-    }
 
     /// A minimal INKFOOT5 image: launcher stub + archive + manifest + footer.
     fn artifact_image(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {

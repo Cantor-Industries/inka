@@ -12,4 +12,9 @@ crate-type = ["cdylib"]
 [dependencies]
 inka-format = { path = "../inka-format" }
 sha2 = "0.10"
-libc = "0.2"
+# Read the per-app payload embedded as the `inka` binary section (Deno's libsui).
+libsui = "0.16"
+# Load the shared runtime; same cross-platform loader Deno's `deno_napi` uses.
+libloading = "0.8"
+# Cross-platform advisory file lock for the extracted-payload cache.
+fslock = "0.2"

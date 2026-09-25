@@ -1,25 +1,26 @@
 // Per-app desktop shim: the file the laufey backend loads as its "runtime".
 //
-// The laufey backend `dlopen`s `<app>.so` (derived from the executable name)
-// and resolves the runtime C ABI (`laufey_runtime_init/start/shutdown`). This
-// shim implements that ABI but contains no engine of its own: it extracts the
-// app payload bundled next to/inside itself, locates the machine-shared
-// `libinka_runtime-<tuple>.so`, and forwards the three entry points to it.
+// The laufey backend loads `<app>.<dylib ext>` (derived from the executable
+// name) and resolves the runtime C ABI (`laufey_runtime_init/start/shutdown`).
+// This shim implements that ABI but contains no engine of its own: it reads the
+// app payload from the `inka` binary section embedded in itself (via `libsui`,
+// the same mechanism `libdenort` uses), locates the machine-shared
+// `libinka_runtime-<tuple>.<ext>`, and forwards the three entry points to it.
 //
 // That indirection is what lets many desktop apps share one heavy Deno
 // runtime instead of each embedding a ~150MB copy.
 //
 // Payload resolution:
-//   1. an `INKFOOT5` archive appended to this shim (the shipped layout), or
+//   1. the embedded `inka` section (the shipped layout), or
 //   2. a sibling `app/` directory (dev/simple layout).
 // Runtime resolution:
 //   1. `$INKA_DESKTOP_RUNTIME` (exact path),
-//   2. a co-located `libinka_runtime-*.so`,
-//   3. `<data>/inka/runtime/libinka_runtime-<tuple>.so` from a sibling
+//   2. a co-located `libinka_runtime-*.<ext>`,
+//   3. `<data>/inka/runtime/libinka_runtime-<tuple>.<ext>` from a sibling
 //      `runtime-version` marker, else the newest there.
 #![allow(clippy::missing_safety_doc)]
 
-use std::ffi::{c_char, c_int, c_void, CStr, CString};
+use std::ffi::{c_int, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -37,94 +38,38 @@ static SHARED: OnceLock<Shared> = OnceLock::new();
 static PAYLOAD: OnceLock<PathBuf> = OnceLock::new();
 static APP_DYLIB: OnceLock<PathBuf> = OnceLock::new();
 
-/// Path of this shim, via `dladdr`.
-#[cfg(unix)]
-fn self_path() -> Option<PathBuf> {
-    #[repr(C)]
-    struct DlInfo {
-        dli_fname: *const c_char,
-        dli_fbase: *mut c_void,
-        dli_sname: *const c_char,
-        dli_saddr: *mut c_void,
-    }
-    unsafe extern "C" {
-        fn dladdr(addr: *const c_void, info: *mut DlInfo) -> c_int;
-    }
-    let mut info: DlInfo = unsafe { std::mem::zeroed() };
-    if unsafe { dladdr(self_path as *const c_void, &mut info) } == 0 || info.dli_fname.is_null() {
-        return None;
-    }
-    Some(PathBuf::from(
-        unsafe { CStr::from_ptr(info.dli_fname) }
-            .to_string_lossy()
-            .into_owned(),
-    ))
-}
-
-#[cfg(not(unix))]
-fn self_path() -> Option<PathBuf> {
-    None
-}
-
 fn data_runtime_dir() -> Option<PathBuf> {
     if let Ok(h) = std::env::var("INKA_RUNTIME_HOME") {
         if !h.is_empty() {
             return Some(PathBuf::from(h));
         }
     }
-    if let Some(x) = std::env::var_os("XDG_DATA_HOME") {
-        let p = PathBuf::from(x);
-        if p.is_absolute() {
-            return Some(p.join("inka/runtime"));
-        }
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share/inka/runtime"))
+    Some(inka_format::platform::data_dir().join("inka/runtime"))
 }
 
 fn cache_root() -> Option<PathBuf> {
-    if let Some(x) = std::env::var_os("XDG_CACHE_HOME") {
-        let p = PathBuf::from(x);
-        if p.is_absolute() {
-            return Some(p.join("inka/desktop"));
-        }
-    }
-    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/inka/desktop"))
+    inka_format::platform::cache_root().map(|c| c.join("inka/desktop"))
 }
 
 /// How many extracted payloads to keep cached (newest by mtime). Beyond this,
 /// unlocked entries are pruned on launch so the cache can't grow unbounded.
 const CACHE_KEEP: usize = 4;
 
-/// Try a non-blocking `flock` on `file`. Returns true on success.
-#[cfg(unix)]
-fn flock_nb(file: &std::fs::File, exclusive: bool) -> bool {
-    use std::os::unix::io::AsRawFd;
-    let op = if exclusive {
-        libc::LOCK_EX
-    } else {
-        libc::LOCK_SH
-    } | libc::LOCK_NB;
-    unsafe { libc::flock(file.as_raw_fd(), op) == 0 }
+/// Try a non-blocking exclusive lock on `path` (creating the lock file). Holds
+/// the lock only if acquired; the caller keeps the returned handle alive.
+fn try_lock_file(path: &Path) -> Option<fslock::LockFile> {
+    let mut lock = fslock::LockFile::open(path).ok()?;
+    match lock.try_lock() {
+        Ok(true) => Some(lock),
+        _ => None,
+    }
 }
 
-#[cfg(not(unix))]
-fn flock_nb(_file: &std::fs::File, _exclusive: bool) -> bool {
-    false
-}
-
-/// Hold a shared lock on a payload directory for the life of the process, so a
+/// Hold a lock on a payload directory for the life of the process, so a
 /// concurrent launch's prune leaves an in-use payload alone.
 fn lock_payload(dir: &Path) {
-    if let Ok(file) = std::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(dir.join(".lock"))
-    {
-        if flock_nb(&file, false) {
-            std::mem::forget(file);
-        }
+    if let Some(lock) = try_lock_file(&dir.join(".lock")) {
+        std::mem::forget(lock);
     }
 }
 
@@ -156,13 +101,15 @@ fn prune_cache(root: &Path, current: &Path) {
     // Newest first; drop the tail beyond the keep count when unlocked.
     extracted.sort_by_key(|a| std::cmp::Reverse(a.0));
     for (_, path) in extracted.into_iter().skip(CACHE_KEEP) {
-        let removable = match std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(path.join(".lock"))
-        {
-            Ok(file) => flock_nb(&file, true), // lock drops on scope end
-            Err(_) => true,                    // no lock file => not in use
+        // Take the lock, release it, then remove: Windows cannot delete a file
+        // with an open handle, and the race is acceptable for a best-effort
+        // cache prune.
+        let removable = match try_lock_file(&path.join(".lock")) {
+            Some(lock) => {
+                drop(lock);
+                true
+            }
+            None => !path.join(".lock").exists(),
         };
         if removable {
             let _ = std::fs::remove_dir_all(&path);
@@ -170,10 +117,10 @@ fn prune_cache(root: &Path, current: &Path) {
     }
 }
 
-/// Newest `libinka_runtime-*.so` in `dir`, or an exact tuple when given.
+/// Newest `libinka_runtime-*.<ext>` in `dir`, or an exact tuple when given.
 fn newest_runtime_in(dir: &Path, want: Option<&str>) -> Option<PathBuf> {
     if let Some(v) = want {
-        let p = dir.join(format!("libinka_runtime-{v}.so"));
+        let p = dir.join(inka_format::platform::runtime_lib_name(v));
         if p.is_file() {
             return Some(p);
         }
@@ -182,8 +129,8 @@ fn newest_runtime_in(dir: &Path, want: Option<&str>) -> Option<PathBuf> {
     for ent in std::fs::read_dir(dir).ok()?.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
         let Some(vs) = name
-            .strip_prefix("libinka_runtime-")
-            .and_then(|s| s.strip_suffix(".so"))
+            .strip_prefix(inka_format::platform::RUNTIME_LIB_PREFIX)
+            .and_then(|s| s.strip_suffix(inka_format::platform::runtime_lib_suffix()))
         else {
             continue;
         };
@@ -220,28 +167,23 @@ fn find_runtime(self_dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
-/// Extract an appended `INKFOOT5` archive (if present) and return the payload
-/// root; otherwise fall back to a sibling `app/` directory.
-fn resolve_payload(self_path: &Path) -> Result<PathBuf, String> {
-    let self_dir = self_path
-        .parent()
-        .ok_or_else(|| "shim has no parent directory".to_string())?;
+/// Extract the embedded `inka` section payload (if present) and return its
+/// on-disk root; otherwise fall back to a sibling `app/` directory (dev).
+fn resolve_payload(embedded: Option<&[u8]>, self_dir: &Path) -> Result<PathBuf, String> {
     let sibling = self_dir.join("app");
     if sibling.is_dir() {
         return Ok(sibling);
     }
-    let bytes = std::fs::read(self_path)
-        .map_err(|e| format!("cannot read {}: {e}", self_path.display()))?;
-    let layout = match inka_format::read_layout(&bytes) {
-        Ok(l) => l,
-        Err(_) => return Err("no appended payload and no sibling app/ directory".to_string()),
-    };
-    let archive = &bytes[layout.archive_off..layout.archive_off + layout.archive_len];
-    let files = inka_format::parse_archive(archive).map_err(|e| format!("bad payload: {e}"))?;
+    let payload = embedded
+        .ok_or_else(|| "no embedded payload section and no sibling app/ directory".to_string())?;
+    let section = inka_format::read_section_payload(payload)
+        .map_err(|e| format!("bad embedded payload: {e}"))?;
+    let files =
+        inka_format::parse_archive(section.archive).map_err(|e| format!("bad payload: {e}"))?;
 
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(&bytes[layout.archive_off..layout.manifest_off]);
+    hasher.update(section.archive);
     let key: String = hasher.finalize()[..8]
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -275,35 +217,41 @@ fn resolve_payload(self_path: &Path) -> Result<PathBuf, String> {
     Ok(root)
 }
 
+/// Load the shared runtime with the cross-platform loader Deno's `deno_napi`
+/// uses (`libloading`). On unix we keep `RTLD_GLOBAL` so native N-API addons
+/// `dlopen`ed later can resolve the runtime's symbols; on Windows the loader's
+/// default search is already process-global.
+#[cfg(unix)]
+fn load_runtime(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    use libloading::os::unix::{Library as UnixLibrary, RTLD_GLOBAL, RTLD_LAZY};
+    unsafe { UnixLibrary::open(Some(path), RTLD_LAZY | RTLD_GLOBAL).map(libloading::Library::from) }
+}
+
+#[cfg(not(unix))]
+fn load_runtime(path: &Path) -> Result<libloading::Library, libloading::Error> {
+    unsafe { libloading::Library::new(path) }
+}
+
 fn resolve_shared(runtime: &Path) -> Result<Shared, String> {
-    let cpath = CString::new(runtime.to_string_lossy().as_bytes())
-        .map_err(|_| "runtime path contains NUL".to_string())?;
-    let handle = unsafe { libc::dlopen(cpath.as_ptr(), libc::RTLD_NOW | libc::RTLD_GLOBAL) };
-    if handle.is_null() {
-        let err = unsafe { CStr::from_ptr(libc::dlerror()) }
-            .to_string_lossy()
-            .into_owned();
-        return Err(format!("dlopen {}: {err}", runtime.display()));
+    let library =
+        load_runtime(runtime).map_err(|e| format!("cannot load {}: {e}", runtime.display()))?;
+
+    unsafe fn sym<T: Copy>(library: &libloading::Library, name: &str) -> Result<T, String> {
+        // SAFETY: the symbol type is asserted by the caller to match the C ABI
+        // exported by the shared runtime.
+        let symbol = library
+            .get::<T>(name.as_bytes())
+            .map_err(|e| format!("{name} not found in shared runtime: {e}"))?;
+        Ok(*symbol)
     }
-    // The library is intentionally never closed: it owns the V8 isolate for
-    // the life of the process.
-    unsafe fn sym(handle: *mut c_void, name: &str) -> Result<*mut c_void, String> {
-        let c = CString::new(name).unwrap();
-        let p = unsafe { libc::dlsym(handle, c.as_ptr()) };
-        if p.is_null() {
-            Err(format!("{name} not found in shared runtime"))
-        } else {
-            Ok(p)
-        }
-    }
-    let init =
-        unsafe { std::mem::transmute::<*mut c_void, InitFn>(sym(handle, "laufey_runtime_init")?) };
-    let start = unsafe {
-        std::mem::transmute::<*mut c_void, StartFn>(sym(handle, "laufey_runtime_start")?)
-    };
-    let shutdown = unsafe {
-        std::mem::transmute::<*mut c_void, ShutdownFn>(sym(handle, "laufey_runtime_shutdown")?)
-    };
+
+    let init = unsafe { sym::<InitFn>(&library, "laufey_runtime_init")? };
+    let start = unsafe { sym::<StartFn>(&library, "laufey_runtime_start")? };
+    let shutdown = unsafe { sym::<ShutdownFn>(&library, "laufey_runtime_shutdown")? };
+
+    // The library is intentionally never closed: it owns the V8 isolate for the
+    // life of the process.
+    std::mem::forget(library);
     Ok(Shared {
         init,
         start,
@@ -311,39 +259,28 @@ fn resolve_shared(runtime: &Path) -> Result<Shared, String> {
     })
 }
 
-/// Read the appended `INKFOOT5` manifest (footer + manifest region only).
-fn read_appended_manifest(path: &Path) -> Option<String> {
-    use std::io::{Read, Seek, SeekFrom};
-    let mut f = std::fs::File::open(path).ok()?;
-    let len = f.metadata().ok()?.len();
-    if len < 24 {
-        return None;
-    }
-    f.seek(SeekFrom::Start(len - 24)).ok()?;
-    let mut footer = [0u8; 24];
-    f.read_exact(&mut footer).ok()?;
-    if &footer[0..8] != b"INKFOOT5" {
-        return None;
-    }
-    let mlen = u64::from_le_bytes(footer[16..24].try_into().ok()?) as usize;
-    if mlen == 0 || (mlen as u64) > len - 24 {
-        return None;
-    }
-    f.seek(SeekFrom::Start(len - 24 - mlen as u64)).ok()?;
-    let mut buf = vec![0u8; mlen];
-    f.read_exact(&mut buf).ok()?;
-    Some(String::from_utf8_lossy(&buf).into_owned())
-}
-
 fn setup() -> Result<&'static Shared, String> {
-    let self_path =
-        self_path().ok_or_else(|| "cannot locate the shim itself (dladdr)".to_string())?;
-    let _ = APP_DYLIB.set(self_path.clone());
-    let app_dir = self_path.parent().unwrap_or(Path::new("."));
-    let _ = PAYLOAD.set(resolve_payload(&self_path)?);
+    // A GUI-subsystem backend may have no valid stdio handles; repair them
+    // before anything writes to stderr (Windows only; a no-op elsewhere).
+    inka_format::platform::ensure_stdio_open();
+    // The backend executable and this shim are co-located, and the shim is
+    // named `<App>.<ext>` after the backend. `current_exe()` therefore gives
+    // both the app directory and the shim path without any dladdr/self-path
+    // probing.
+    let exe = std::env::current_exe()
+        .map_err(|e| format!("cannot locate the desktop executable: {e}"))?;
+    let app_dir = exe.parent().unwrap_or(Path::new("."));
+    let _ = APP_DYLIB.set(exe.with_extension(inka_format::platform::dylib_ext()));
+
+    let embedded = libsui::find_section_in_current_image(inka_format::SECTION_NAME)
+        .map_err(|e| format!("cannot read the embedded payload section: {e}"))?;
+    let _ = PAYLOAD.set(resolve_payload(embedded, app_dir)?);
+
     // Surface manifest metadata to the shared runtime before it boots.
-    if let Some(manifest) = read_appended_manifest(&self_path) {
-        for line in manifest.lines() {
+    if let Some(payload) = embedded {
+        let section = inka_format::read_section_payload(payload)
+            .map_err(|e| format!("bad embedded payload: {e}"))?;
+        for line in String::from_utf8_lossy(section.manifest).lines() {
             let line = line.trim();
             for (key, var) in [
                 ("app-name", "INKA_DESKTOP_APP_NAME"),
@@ -432,36 +369,20 @@ mod tests {
     }
 
     #[test]
-    fn reads_appended_manifest() {
-        let dir = std::env::temp_dir().join(format!("inka-shim-man-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let p = dir.join("App.so");
-        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
-        let archive = inka_format::encode_archive(&files);
-        let manifest = b"module=main.js\napp-name=Demo\n";
-        let mut bytes = b"\x7fELFfake-shim".to_vec();
-        bytes.extend_from_slice(&archive);
-        bytes.extend_from_slice(manifest);
-        bytes.extend_from_slice(&inka_format::encode_footer(
-            archive.len() as u64,
-            manifest.len() as u64,
-        ));
-        std::fs::write(&p, &bytes).unwrap();
-        let m = read_appended_manifest(&p).expect("manifest");
-        assert!(m.contains("app-name=Demo"), "{m}");
-        assert!(m.contains("module=main.js"), "{m}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn payload_falls_back_to_sibling_app_dir() {
         let dir = std::env::temp_dir().join(format!("inka-shim-app-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("app")).unwrap();
-        let fake = dir.join("MyApp.so");
-        std::fs::write(&fake, b"not an archive").unwrap();
-        assert_eq!(resolve_payload(&fake).unwrap(), dir.join("app"));
+        assert_eq!(resolve_payload(None, &dir).unwrap(), dir.join("app"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn payload_missing_without_app_or_section_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("inka-shim-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(resolve_payload(None, &dir).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -489,14 +410,7 @@ mod tests {
             dirs.push(d);
         }
         // Lock the oldest payload; it must survive the prune.
-        let locked = std::fs::OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(dirs[0].join(".lock"))
-            .unwrap();
-        assert!(flock_nb(&locked, true));
+        let locked = try_lock_file(&dirs[0].join(".lock")).expect("take payload lock");
 
         prune_cache(&root, &current);
 
@@ -506,6 +420,7 @@ mod tests {
         );
         assert!(current.exists(), "current skipped");
         assert!(dirs[0].exists(), "locked payload kept");
+        drop(locked);
         let remaining = (0..6)
             .filter(|i| root.join(format!("payload{i}")).exists())
             .count();

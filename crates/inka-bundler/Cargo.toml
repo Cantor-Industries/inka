@@ -18,7 +18,14 @@ rolldown = "=1.2.7"
 rolldown_common = "=1.2.7"
 rolldown_utils = "=1.2.7"
 serde_json = "1"
-sys_traits = { version = "=0.1.28", features = ["real", "libc", "filetime", "getrandom"] }
+sys_traits = { version = "=0.1.28", features = ["real", "filetime", "getrandom"] }
 tokio = { version = "=1.53.1", features = ["rt", "macros"] }
 url = "2"
 ureq = { version = "=3.4.2", default-features = false, features = ["rustls"] }
+
+# Platform backend for `sys_traits::RealSys` (see inka-runtime's note).
+[target.'cfg(unix)'.dependencies]
+sys_traits = { version = "=0.1.28", features = ["libc"] }
+
+[target.'cfg(windows)'.dependencies]
+sys_traits = { version = "=0.1.28", features = ["winapi"] }

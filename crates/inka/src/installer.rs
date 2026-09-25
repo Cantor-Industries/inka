@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::channel;
-use crate::desktop::{laufey_archive_name, LAUFEY_SUMS, LAUFEY_TARGET, LAUFEY_VERSION};
+use crate::desktop::{laufey_archive_name, LAUFEY_SUMS, LAUFEY_VERSION};
+use crate::platform;
 
 /// The install script template (placeholders are `{{NAME}}`).
 const TEMPLATE: &str = include_str!("../assets/install-app.sh");
@@ -91,7 +92,7 @@ pub(crate) fn render(spec: &Spec) -> Result<String, String> {
         .replace("{{BACKEND}}", &sh_quote(spec.backend))
         .replace("{{RUNTIME}}", &sh_quote(spec.runtime))
         .replace("{{LAUFEY_VERSION}}", &sh_quote(LAUFEY_VERSION))
-        .replace("{{TARGET}}", &sh_quote(LAUFEY_TARGET))
+        .replace("{{TARGET}}", &sh_quote(platform::laufey_target()))
         .replace("{{APP_VERSION}}", &sh_quote(spec.app_version.unwrap_or("")))
         .replace("{{APP_BASE}}", &sh_quote(spec.app_base.unwrap_or("")))
         .replace("{{INKA_BASE}}", &sh_quote(&base))
@@ -188,10 +189,13 @@ fn set_exec(path: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::atomic::{AtomicU32, Ordering};
 
+    #[cfg(unix)]
     static N: AtomicU32 = AtomicU32::new(0);
 
+    #[cfg(unix)]
     fn scratch(tag: &str) -> PathBuf {
         let d = env::temp_dir().join(format!(
             "inka-installer-{tag}-{}-{}",
@@ -224,7 +228,7 @@ mod tests {
         assert!(s.contains("RUNTIME='0.267.2-beta.2'"));
         assert!(s.contains("APP_VERSION='1.2.3'"));
         assert!(s.contains("INKA_BASE='https://example.test/dl'"));
-        assert!(s.contains("CEF_ARCHIVE='laufey-cef-x86_64-unknown-linux-gnu.tar.gz'"));
+        assert!(s.contains(&format!("CEF_ARCHIVE='{}'", laufey_archive_name("cef"))));
         // The pinned laufey checksum is embedded (64 hex chars).
         let sha = laufey_sha(&laufey_archive_name("cef")).unwrap();
         assert!(s.contains(&format!("CEF_SHA256='{sha}'")));

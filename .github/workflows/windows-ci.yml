@@ -1,0 +1,110 @@
+# Windows build/test on the project's self-hosted Windows runner.
+#
+# Runner prerequisites (one-time provisioning, not handled here):
+#   - Rust stable with the `x86_64-pc-windows-msvc` toolchain.
+#   - Visual Studio Build Tools (link.exe, ml64.exe) — needed to build the V8
+#     snapshot and the toolchain binaries.
+#   - LLVM (libclang.dll) on the path or `LIBCLANG_PATH` set, for laufey's
+#     bindgen; without it `inka-runtime --features desktop` cannot build.
+#     (Not needed for the core-only release job, which omits `desktop`.)
+#   - The VC++ 2015-2022 Redistributable (the runtime is built /MD).
+#   - PowerShell 7 (`pwsh`) for the workflow steps.
+#
+# `CARGO_HOME`/`CARGO_TARGET_DIR` are used if the runner provides them.
+
+name: windows-ci
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-ci.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/windows-ci.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows:
+    # TODO: adjust these labels to match the self-hosted Windows runner.
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - name: Rust components
+        run: rustup component add clippy rustfmt
+
+      - name: Windows target
+        run: rustup target add x86_64-pc-windows-msvc
+
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+
+      # Fast crates; `inka-runtime`/the bundler build in the heavy job below.
+      - name: Clippy (fast crates, deny warnings)
+        run: |
+          cargo clippy --locked -p inka --bin inka -p inka-launcher `
+            -p inka-runtime-stub -p inka-desktop-shim --all-targets -- -D warnings
+
+      - name: Fast-crate tests
+        run: |
+          cargo test --locked -p inka --bin inka
+          cargo test --locked -p inka-format -p inka-launcher -p inka-desktop-shim
+
+      # Heavy: V8 snapshot + laufey (bindgen). libclang must be discoverable.
+      - name: Build runtime + toolchain (release)
+        env:
+          # TODO: adjust if LLVM is installed elsewhere.
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
+        run: |
+          cargo build --locked --release -p inka-runtime --features desktop
+          cargo build --locked --release -p inka --features bundle -p inka-launcher -p inka-desktop-shim
+
+      # Rename the cdylib outputs to the released names and expose the runtime
+      # to the launcher, mirroring the Linux release staging.
+      - name: Stage runtime
+        run: |
+          $runtime = (Get-Content crates/inka-runtime/runtime-version -Raw).Trim()
+          $bin = "target/release"
+          $home = Join-Path $env:RUNNER_TEMP "inka-runtime"
+          New-Item -ItemType Directory -Force -Path $home | Out-Null
+          Copy-Item "$bin/inka_runtime.dll" "$home/libinka_runtime-$runtime.dll"
+          "INKA_RUNTIME_HOME=$home" | Out-File -FilePath $env:GITHUB_ENV -Append
+          # A prerelease engine tuple is only selected in the beta channel.
+          if ($runtime -match '-(beta|rc)\.') {
+            "INKA_CHANNEL=beta" | Out-File -FilePath $env:GITHUB_ENV -Append
+          }
+
+      - name: Smoke (build + run an artifact)
+        run: |
+          $bin = "target/release"
+          New-Item -ItemType Directory -Force -Path smoke | Out-Null
+          Set-Content -Path smoke/main.js -Value 'console.log("smoke-artifact");'
+          & "$bin/inka.exe" build smoke/main.js -o smoke/hello.exe
+          $out = & "smoke/hello.exe"
+          if ($out -notmatch "smoke-artifact") {
+            throw "artifact output missing: $out"
+          }
+          & "$bin/inka.exe" doctor
+
+      # Later: `inka desktop . --backend webview` packaging assertions, then
+      # upload the toolchain zip + runtime dll as workflow artifacts.

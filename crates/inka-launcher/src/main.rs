@@ -15,9 +15,9 @@ const STALE_LEGACY_AGE: std::time::Duration = std::time::Duration::from_secs(24 
 
 /// Remove the extracted tree if the process exits from inside the runtime
 /// (e.g. `Deno.exit`), which calls `exit()` and skips Rust destructors. The
-/// `atexit` handler runs on that path; the `TempTree` `Drop` covers normal
-/// returns. Declared `extern` to avoid a `libc` dependency.
-#[cfg(unix)]
+/// `atexit` handler runs on that path (the MSVC/ucrt CRT provides `atexit` too);
+/// the `TempTree` `Drop` covers normal returns. Declared `extern` to avoid a
+/// `libc` dependency on unix.
 mod tree_cleanup {
     use std::path::Path;
     use std::sync::{Once, OnceLock};
@@ -41,12 +41,6 @@ mod tree_cleanup {
             atexit(cleanup);
         });
     }
-}
-
-#[cfg(not(unix))]
-mod tree_cleanup {
-    use std::path::Path;
-    pub(super) fn arm(_root: &Path) {}
 }
 
 /// Minimal ANSI styling for the launcher's own diagnostics. No dependency:
@@ -80,6 +74,9 @@ mod style {
     pub(super) fn red_bold(s: impl Display) -> String {
         paint("1;31", s)
     }
+    /// Only used by the unix world-writable check; keep it out of the Windows
+    /// dead-code lint.
+    #[cfg_attr(windows, allow(dead_code))]
     pub(super) fn yellow_bold(s: impl Display) -> String {
         paint("1;33", s)
     }
@@ -107,6 +104,7 @@ fn error(msg: impl std::fmt::Display) {
     }
 }
 
+#[cfg_attr(windows, allow(dead_code))]
 fn warning(msg: impl std::fmt::Display) {
     eprintln!("{}: {}", style::yellow_bold("warning"), msg);
 }
@@ -235,8 +233,16 @@ fn pid_alive(pid: u32) -> bool {
     pid == std::process::id() || Path::new("/proc").join(pid.to_string()).exists()
 }
 
-/// No reliable liveness probe off Linux, so never reap by pid there.
-#[cfg(not(target_os = "linux"))]
+/// Windows liveness probe: a handle we can open (and query) means the process
+/// still exists; `None` means it exited or access was denied. Vendored from
+/// Deno's `cli/util/windows.rs`.
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    pid == std::process::id() || inka_format::platform::windows::process_image_path(pid).is_some()
+}
+
+/// No reliable liveness probe on other platforms, so never reap by pid there.
+#[cfg(not(any(target_os = "linux", windows)))]
 fn pid_alive(_pid: u32) -> bool {
     true
 }
@@ -347,25 +353,14 @@ fn check_reported_version(lib: &Path, reported: &str, expected: Version) -> Resu
     }
 }
 
-/// `$XDG_DATA_HOME` when absolute, else `$HOME/.local/share`.
-fn xdg_data_root() -> Option<PathBuf> {
-    if let Some(x) = env::var_os("XDG_DATA_HOME") {
-        let p = PathBuf::from(x);
-        if p.is_absolute() {
-            return Some(p);
-        }
-    }
-    env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/share"))
-}
-
+/// Directories searched for installed runtime libraries, in order:
+/// `INKA_RUNTIME_HOME`, then the per-user inka runtime dir (`platform`).
 fn runtime_dirs() -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Some(h) = env::var_os("INKA_RUNTIME_HOME") {
         out.push(PathBuf::from(h));
     }
-    if let Some(d) = xdg_data_root() {
-        out.push(d.join("inka/runtime"));
-    }
+    out.push(inka_format::platform::data_dir().join("inka/runtime"));
     out
 }
 
@@ -413,10 +408,12 @@ fn resolve_runtime_with(
                 continue;
             }
             let name = ent.file_name().to_string_lossy().into_owned();
-            let Some(stripped) = name.strip_prefix("libinka_runtime-") else {
+            let Some(stripped) = name.strip_prefix(inka_format::platform::RUNTIME_LIB_PREFIX)
+            else {
                 continue;
             };
-            let Some(vstr) = stripped.strip_suffix(".so") else {
+            let Some(vstr) = stripped.strip_suffix(inka_format::platform::runtime_lib_suffix())
+            else {
                 continue;
             };
             let Some(v) = parse_version(vstr) else {
@@ -628,8 +625,11 @@ fn release_version() -> &'static str {
 }
 
 fn main() {
+    // A GUI-subsystem parent may have no valid stdio handles; repair them before
+    // anything writes to stderr (Windows only; a no-op elsewhere).
+    inka_format::platform::ensure_stdio_open();
     let args: Vec<String> = env::args().skip(1).collect();
-    let me = fs::read_link("/proc/self/exe").expect("read /proc/self/exe");
+    let me = env::current_exe().expect("cannot locate the launcher executable");
     let bytes = fs::read(&me).expect("read own executable");
 
     let trailer = match parse_trailer(&bytes) {
@@ -817,11 +817,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("inka-launcher-want-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
-        for name in [
-            "libinka_runtime-0.267.1.so",
-            "libinka_runtime-0.267.2-beta.1.so",
-        ] {
-            fs::write(base.join(name), b"x").unwrap();
+        for v in ["0.267.1", "0.267.2-beta.1"] {
+            fs::write(base.join(inka_format::platform::runtime_lib_name(v)), b"x").unwrap();
         }
         let dirs = vec![base.clone()];
         // A prerelease runtime constraint (no `channel=beta`) opts the artifact in.
@@ -873,11 +870,8 @@ mod tests {
         let base = std::env::temp_dir().join(format!("inka-launcher-pre-{}", std::process::id()));
         let _ = fs::remove_dir_all(&base);
         fs::create_dir_all(&base).unwrap();
-        for name in [
-            "libinka_runtime-0.267.1.so",
-            "libinka_runtime-0.267.2-beta.1.so",
-        ] {
-            fs::write(base.join(name), b"x").unwrap();
+        for v in ["0.267.1", "0.267.2-beta.1"] {
+            fs::write(base.join(inka_format::platform::runtime_lib_name(v)), b"x").unwrap();
         }
         let dirs = vec![base.clone()];
         let m = parse_manifest(b"module=main.js\n");
@@ -891,7 +885,11 @@ mod tests {
         assert_eq!(v, parse_version("0.267.2-beta.1").unwrap());
 
         // A stable release always wins over a beta of the same base.
-        fs::write(base.join("libinka_runtime-0.267.2.so"), b"x").unwrap();
+        fs::write(
+            base.join(inka_format::platform::runtime_lib_name("0.267.2")),
+            b"x",
+        )
+        .unwrap();
         let (v, _) = resolve_runtime_with(&m, &dirs, true).unwrap();
         assert_eq!(v, Version::new(0, 267, 2));
 

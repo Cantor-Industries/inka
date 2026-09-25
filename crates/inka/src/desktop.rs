@@ -1,12 +1,12 @@
 // inka desktop: package a web app into a desktop application that shares the
 // machine's inka runtime.
 //
-// Layout produced (Linux):
+// Layout produced (Linux; Windows uses `.exe`/`.dll` via `platform`):
 //
 //   <App>/
 //     <App>            laufey backend (window + system webview), renamed
-//     <App>.so         per-app shim (loads the shared libinka_runtime)
-//     app/             bundled app payload (main.js + assets)
+//     <App>.so         per-app shim, carrying the payload as the `inka` binary
+//                      section (loads the shared libinka_runtime)
 //     runtime-version  runtime tuple the shim should load (optional)
 //     <id>.desktop     desktop entry
 //   <App>.tar.gz
@@ -20,12 +20,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::help::{self, Mode};
+use crate::platform;
 use crate::ui;
 
 /// laufey backend release inka is pinned to (matches `laufey = 0.7.0`).
 pub(crate) const LAUFEY_VERSION: &str = "0.7.0";
-/// Linux target triple for laufey backend assets.
-pub(crate) const LAUFEY_TARGET: &str = "x86_64-unknown-linux-gnu";
 /// Marker written at the root of an app dir we generated, so a later package
 /// build may safely clear it (and nothing else).
 const APP_DIR_MARKER: &str = ".inka-desktop-app";
@@ -107,12 +106,13 @@ pub(crate) const LAUFEY_SUMS: &[(&str, &str)] = &[
 
 pub(crate) fn laufey_archive_name(backend: &str) -> String {
     let archive_backend = if backend == "raw" { "winit" } else { backend };
-    let ext = if LAUFEY_TARGET.contains("windows") {
+    let target = platform::laufey_target();
+    let ext = if target.contains("windows") {
         "zip"
     } else {
         "tar.gz"
     };
-    format!("laufey-{archive_backend}-{LAUFEY_TARGET}.{ext}")
+    format!("laufey-{archive_backend}-{target}.{ext}")
 }
 
 fn laufey_release_base() -> String {
@@ -120,15 +120,9 @@ fn laufey_release_base() -> String {
 }
 
 /// Inka's own laufey cache root (`$XDG_CACHE_HOME/inka/laufey`, else
-/// `~/.cache/inka/laufey`).
+/// `~/.cache/inka/laufey`; `%LOCALAPPDATA%\inka\laufey` on Windows).
 fn inka_laufey_cache() -> Option<PathBuf> {
-    if let Some(x) = env::var_os("XDG_CACHE_HOME") {
-        let p = PathBuf::from(x);
-        if p.is_absolute() {
-            return Some(p.join("inka/laufey"));
-        }
-    }
-    env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache/inka/laufey"))
+    platform::cache_root().map(|c| c.join("inka/laufey"))
 }
 
 fn usage() -> ! {
@@ -251,14 +245,15 @@ fn parse_args(args: &[String]) -> Args {
     a
 }
 
-/// The laufey backend executable name for a backend kind.
-fn backend_exe(backend: &str) -> &'static str {
-    match backend {
+/// The laufey backend executable name for a backend kind (`.exe` on Windows).
+fn backend_exe(backend: &str) -> String {
+    let base = match backend {
         "cef" => "laufey",
         "webview" => "laufey_webview",
         // `raw` ships upstream as `winit`.
         _ => "laufey_winit",
-    }
+    };
+    format!("{base}{}", platform::exe_suffix())
 }
 
 /// Where Deno/inka cache laufey backends: `$DENO_DIR` (else `~/.cache/deno`).
@@ -305,15 +300,18 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
 /// Download (once), checksum-verify, and unpack the pinned laufey backend into
 /// inka's cache, returning the backend executable path.
 fn download_laufey(backend: &str) -> Result<PathBuf, String> {
-    if LAUFEY_TARGET.contains("windows") {
+    if platform::laufey_target().contains("windows") {
         return Err("Windows backends are not supported yet".to_string());
     }
     let cache = inka_laufey_cache()
         .ok_or_else(|| "cannot determine a cache directory (set HOME)".to_string())?;
-    let dir = cache.join(LAUFEY_VERSION).join(backend).join(LAUFEY_TARGET);
+    let dir = cache
+        .join(LAUFEY_VERSION)
+        .join(backend)
+        .join(platform::laufey_target());
     let exe = backend_exe(backend);
     if dir.join(".downloaded").is_file() {
-        if let Some(p) = find_file(&dir, exe) {
+        if let Some(p) = find_file(&dir, &exe) {
             return Ok(p);
         }
     }
@@ -350,7 +348,7 @@ fn download_laufey(backend: &str) -> Result<PathBuf, String> {
     if !status.success() {
         return Err(format!("tar extraction failed for {archive}"));
     }
-    let found = find_file(&dir, exe)
+    let found = find_file(&dir, &exe)
         .ok_or_else(|| format!("'{exe}' not found in the {archive} archive"))?;
     let _ = fs::write(dir.join(".downloaded"), format!("v{LAUFEY_VERSION}\n"));
     Ok(found)
@@ -370,7 +368,7 @@ fn resolve_backend(backend: &str) -> PathBuf {
             dir.join(format!("result/{exe}")),
             dir.join(format!("target/release/{exe}")),
             dir.join(format!("target/debug/{exe}")),
-            dir.join(exe),
+            dir.join(&exe),
         ] {
             if cand.is_file() {
                 return cand;
@@ -381,8 +379,8 @@ fn resolve_backend(backend: &str) -> PathBuf {
         let cand = root
             .join(LAUFEY_VERSION)
             .join(backend)
-            .join(LAUFEY_TARGET)
-            .join(exe);
+            .join(platform::laufey_target())
+            .join(&exe);
         if cand.is_file() {
             return cand;
         }
@@ -410,7 +408,7 @@ fn resolve_shim() -> PathBuf {
     }
     if let Ok(exe) = env::current_exe() {
         if let Some(dir) = exe.parent() {
-            for name in ["libinka_desktop_shim.so", "inka-desktop-shim"] {
+            for name in [platform::shim_lib_name(), "inka-desktop-shim"] {
                 let cand = dir.join(name);
                 if cand.is_file() {
                     return cand;
@@ -1053,7 +1051,7 @@ pub fn cmd_desktop(args: &[String]) {
     let backend_path = resolve_backend(&backend);
     let shim = resolve_shim();
     let launcher = out.join(&app_name);
-    let runtime_so = out.join(format!("{app_name}.so"));
+    let runtime_so = out.join(format!("{app_name}{}", platform::runtime_lib_suffix()));
 
     // Clear a previous build (only one we generated), then stage the backend.
     // A CEF backend ships a whole directory (libcef.so + resources) whose files
@@ -1202,22 +1200,44 @@ fn collect_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(out)
 }
 
-/// Copy the shim and append `[archive][manifest][footer]`, producing the
-/// self-contained per-app `.so` the laufey backend loads.
+/// Embed `payload` as the `inka` binary section, returning the new image.
+///
+/// Uses Deno's `libsui` so the embedding is format-correct per target: an ELF
+/// `PT_NOTE` graft on Linux, a `.rsrc` resource on Windows. This is the same
+/// mechanism `libdenort` uses to carry its standalone payload, and it means the
+/// shim can read its data in-memory with no knowledge of its own path.
+#[cfg(target_os = "linux")]
+fn embed_payload(image: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    libsui::Elf::new(image)
+        .append(inka_format::SECTION_NAME, payload, &mut out)
+        .map_err(|e| format!("cannot embed payload section: {e}"))?;
+    Ok(out)
+}
+
+#[cfg(target_os = "windows")]
+fn embed_payload(image: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    libsui::PortableExecutable::from(image)
+        .map_err(|e| format!("cannot parse PE image: {e}"))?
+        .write_resource(inka_format::SECTION_NAME, payload.to_vec())
+        .map_err(|e| format!("cannot embed payload resource: {e}"))?
+        .build(&mut out)
+        .map_err(|e| format!("cannot write PE image: {e}"))?;
+    Ok(out)
+}
+
+/// Copy the shim and embed the app payload as the `inka` section, producing the
+/// self-contained per-app `.so`/`.dll` the laufey backend loads.
 fn pack_shim(
     shim: &Path,
     dest: &Path,
     files: &[(String, Vec<u8>)],
     manifest: &str,
 ) -> Result<(), String> {
-    let mut out = fs::read(shim).map_err(|e| format!("cannot read {}: {e}", shim.display()))?;
-    let archive = inka_format::encode_archive(files);
-    out.extend_from_slice(&archive);
-    out.extend_from_slice(manifest.as_bytes());
-    out.extend_from_slice(&inka_format::encode_footer(
-        archive.len() as u64,
-        manifest.len() as u64,
-    ));
+    let image = fs::read(shim).map_err(|e| format!("cannot read {}: {e}", shim.display()))?;
+    let payload = inka_format::encode_section_payload(files, manifest);
+    let out = embed_payload(&image, &payload)?;
     fs::write(dest, &out).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
     Ok(())
 }
@@ -1335,13 +1355,7 @@ fn desktop_entry(app_name: &str, id: &str) -> String {
 }
 
 fn set_exec(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o755));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
+    let _ = platform::set_exec(path);
 }
 
 fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
@@ -1510,6 +1524,34 @@ mod tests {
         let _ = fs::remove_dir_all(&d);
         fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn embedded_payload_section_roundtrips() {
+        // Embed into a small system ELF (falling back to the test binary), then
+        // assert the original image prefix is preserved and the payload is
+        // grafted verbatim. The runtime read path
+        // (`find_section_in_current_image`) is exercised by the desktop e2e
+        // battery once a runtime is present.
+        let image = ["/bin/true", "/usr/bin/true", "/bin/echo"]
+            .iter()
+            .find_map(|p| fs::read(p).ok())
+            .or_else(|| fs::read("/proc/self/exe").ok())
+            .expect("a small ELF to embed into");
+        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let manifest = "module=main.js\napp-name=Demo\n";
+        let payload = inka_format::encode_section_payload(&files, manifest);
+        let out = embed_payload(&image, &payload).expect("embed payload section");
+        assert_eq!(&out[..4], &image[..4], "ELF magic must be preserved");
+        assert!(out.len() > image.len(), "image must grow");
+        assert!(
+            out.windows(payload.len()).any(|w| w == payload),
+            "payload bytes must appear in the image"
+        );
+        let decoded = inka_format::read_section_payload(&payload).unwrap();
+        assert_eq!(decoded.manifest, manifest.as_bytes());
+        assert_eq!(inka_format::parse_archive(decoded.archive).unwrap(), files);
     }
 
     #[cfg(unix)]

@@ -187,7 +187,7 @@ pub(crate) fn build() -> &'static Help {
             ),
             (
                 "-o, --output <file>",
-                "output executable (default: source without its extension)",
+                "output executable (default: source without its extension; `.exe` on Windows)",
             ),
             (
                 "--runtime <spec>",

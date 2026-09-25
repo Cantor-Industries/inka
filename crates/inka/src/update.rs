@@ -20,7 +20,6 @@
 
 use std::env;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -29,8 +28,7 @@ use serde_json::Value;
 use crate::help::{self, Mode};
 use crate::ui;
 use crate::{
-    download_file, fetch_sidecar, fetch_text, parse_version, sha256_file, Version, FILENAME_PREFIX,
-    FILENAME_SUFFIX,
+    download_file, fetch_sidecar, fetch_text, parse_version, platform, sha256_file, Version,
 };
 
 pub(crate) const DEFAULT_CHANNEL: &str =
@@ -364,6 +362,16 @@ fn versions_channel_beta(v: &Value) -> bool {
     v.get("channel").and_then(Value::as_str) == Some("beta")
 }
 
+/// The per-target view of a `versions.json`: the `targets[<TARGET>]` object when
+/// the per-target schema is present, else the top-level object (legacy schema).
+/// This keeps old single-target releases readable while the release pipeline
+/// migrates to `targets`.
+fn target_view(v: &Value) -> &Value {
+    v.get("targets")
+        .and_then(|t| t.get(platform::laufey_target()))
+        .unwrap_or(v)
+}
+
 /// Toolchain self-update against an already-parsed `versions.json`.
 fn update_toolchain_from(
     v: &Value,
@@ -378,7 +386,7 @@ fn update_toolchain_from(
         return Ok(false);
     }
     let installed = installed_toolchain_version(&dir);
-    let Some(tc) = v.get("toolchain") else {
+    let Some(tc) = target_view(v).get("toolchain") else {
         return Ok(false);
     };
     let latest = tc.get("version").and_then(Value::as_str);
@@ -417,8 +425,9 @@ fn update_toolchain_from(
     };
 
     let tmp = TempDir::create("inka-toolchain-")?;
-    // Fixed staging name: the remote name is only used for the fetch URL.
-    let archive_path = tmp.0.join("toolchain.tar.gz");
+    // Fixed staging name: the remote name is only used for the fetch URL, and
+    // the format is chosen from its extension (`.zip` for Windows, else tar.gz).
+    let archive_path = tmp.0.join("toolchain-archive");
     download_file(base, archive, &archive_path)
         .map_err(|e| format!("failed to fetch {archive}: {e}"))?;
 
@@ -437,12 +446,7 @@ fn update_toolchain_from(
         _ => {}
     }
 
-    let mut cmd = Command::new("tar");
-    cmd.args(["-xzf"])
-        .arg(&archive_path)
-        .args(["--no-same-owner", "--no-same-permissions", "-C"])
-        .arg(&tmp.0);
-    run_ok(&mut cmd, "tar extract")?;
+    extract_toolchain(archive, &archive_path, &tmp.0)?;
     replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
@@ -450,19 +454,24 @@ fn update_toolchain_from(
     Ok(true)
 }
 /// Replace the toolchain binaries in `dir` from an extracted archive in
-/// `staging`. Binary replacement is an atomic rename over the running image
-/// (Linux keeps the old inode until this process exits).
+/// `staging`. On unix the rename over the running image is atomic and the old
+/// inode lives until this process exits. Windows cannot replace a mapped
+/// executable, so the live file is renamed aside first.
 fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
     let nonce = format!("{}-{}", std::process::id(), random_suffix());
+    // Best-effort: drop the previous run's renamed-aside files. A file that is
+    // still the mapped running image cannot be deleted here; it waits a run.
+    sweep_stale_old(dir);
     // Stage every binary first: if one is missing or unwritable, nothing is
     // replaced yet and the previous toolchain stays usable.
     let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new();
     // `inka`/`inka-launcher` are required; the desktop shim is optional so an
     // older archive (pre-desktop) still updates cleanly.
+    let inka_bin = format!("inka{}", platform::exe_suffix());
     let targets: [(&str, bool); 3] = [
-        ("inka", true),
-        ("inka-launcher", true),
-        ("libinka_desktop_shim.so", false),
+        (inka_bin.as_str(), true),
+        (platform::launcher_name(), true),
+        (platform::shim_lib_name(), false),
     ];
     for (f, required) in targets {
         let src = staging.join(f);
@@ -474,9 +483,7 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
             continue;
         }
         let new = dir.join(format!(".{f}.new{nonce}"));
-        if let Err(e) = fs::copy(&src, &new)
-            .and_then(|_| fs::set_permissions(&new, fs::Permissions::from_mode(0o755)))
-        {
+        if let Err(e) = fs::copy(&src, &new).and_then(|_| platform::set_exec(&new)) {
             let _ = fs::remove_file(&new);
             cleanup_staged(&staged);
             return Err(format!("cannot stage {f}: {e}"));
@@ -484,17 +491,111 @@ fn replace_toolchain(staging: &Path, dir: &Path) -> Result<(), String> {
         staged.push((new, dir.join(f)));
     }
     // Activate: rename each staged file over its target (fast; unlikely to fail
-    // once staging succeeded).
+    // once staging succeeded). If the target is the running executable — which
+    // Windows refuses to replace in place — move it aside first.
     for (new, dst) in &staged {
-        fs::rename(new, dst).map_err(|e| format!("cannot replace {}: {e}", dst.display()))?;
+        if let Err(e) = fs::rename(new, dst) {
+            if let Err(e2) = replace_via_aside(new, dst) {
+                return Err(format!(
+                    "cannot replace {}: {e}; rename-aside also failed: {e2}",
+                    dst.display()
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+/// Move `dst` aside and then move `new` into its place. Used when `dst` is a
+/// running executable on Windows (rename is allowed; overwrite is not). Restores
+/// the original if the swap-in fails, so the toolchain is never left missing.
+fn replace_via_aside(new: &Path, dst: &Path) -> std::io::Result<()> {
+    let nonce = format!("{}-{}", std::process::id(), random_suffix());
+    let name = dst
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let aside = dst.with_file_name(format!(".{name}.old{nonce}"));
+    fs::rename(dst, &aside)?;
+    match fs::rename(new, dst) {
+        Ok(()) => {
+            // May fail while the old image is still mapped; swept next run.
+            let _ = fs::remove_file(&aside);
+            Ok(())
+        }
+        Err(e) => {
+            let _ = fs::rename(&aside, dst);
+            Err(e)
+        }
+    }
+}
+
+/// Remove `.<name>.old<nonce>` swap-aside files left by a previous update.
+fn sweep_stale_old(dir: &Path) {
+    let Ok(rd) = fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let file_name = ent.file_name();
+        let Some(file_name) = file_name.to_str() else {
+            continue;
+        };
+        if file_name.starts_with('.') && file_name.contains(".old") {
+            let _ = fs::remove_file(ent.path());
+        }
+    }
 }
 
 fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
     for (new, _) in staged {
         let _ = fs::remove_file(new);
     }
+}
+
+/// Extract a fetched toolchain archive into `dest`. Windows toolchains ship as
+/// `.zip`; unix keeps `.tar.gz`, extracted with the system `tar` (as before).
+fn extract_toolchain(archive_name: &str, archive_path: &Path, dest: &Path) -> Result<(), String> {
+    if archive_name.to_ascii_lowercase().ends_with(".zip") {
+        extract_zip(archive_path, dest)
+    } else {
+        let mut cmd = Command::new("tar");
+        cmd.args(["-xzf"])
+            .arg(archive_path)
+            .args(["--no-same-owner", "--no-same-permissions", "-C"])
+            .arg(dest);
+        run_ok(&mut cmd, "tar extract")
+    }
+}
+
+/// Extract a `.zip` archive into `dest`, rejecting entries whose path escapes
+/// the destination (`enclosed_name` refuses absolute and `..` paths).
+fn extract_zip(archive_path: &Path, dest: &Path) -> Result<(), String> {
+    let file = fs::File::open(archive_path)
+        .map_err(|e| format!("cannot open {}: {e}", archive_path.display()))?;
+    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
+    for i in 0..zip.len() {
+        let mut entry = zip
+            .by_index(i)
+            .map_err(|e| format!("bad zip entry {i}: {e}"))?;
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(format!("zip entry '{}' has an unsafe path", entry.name()));
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out)
+                .map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let mut f =
+            fs::File::create(&out).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+        std::io::copy(&mut entry, &mut f)
+            .map_err(|e| format!("cannot extract {}: {e}", out.display()))?;
+    }
+    Ok(())
 }
 
 fn toolchain_warn(e: String) -> bool {
@@ -572,15 +673,17 @@ fn update_latest(
 
     let target = target_dir(home);
     // Prefer the runtime tuple version; fall back to `deno_runtime` for releases
-    // published before the tuple was decoupled from the crate pin.
-    let latest_runtime_s = v
+    // published before the tuple was decoupled from the crate pin. The
+    // per-target view lets one `versions.json` describe several hosts.
+    let view = target_view(&v);
+    let latest_runtime_s = view
         .get("runtime")
-        .or_else(|| v.get("deno_runtime"))
+        .or_else(|| view.get("deno_runtime"))
         .and_then(Value::as_str)
         .unwrap_or_else(|| fail("versions.json has no runtime"));
     let latest_runtime = parse_version(latest_runtime_s)
         .unwrap_or_else(|| fail(&format!("invalid runtime '{latest_runtime_s}'")));
-    let runtime_sha = v.get("runtime_sha256").and_then(Value::as_str);
+    let runtime_sha = view.get("runtime_sha256").and_then(Value::as_str);
 
     let search = match home {
         Some(_) => vec![target.clone()],
@@ -603,7 +706,7 @@ fn update_latest(
     if components.runtime {
         ui::section("Runtimes");
         if actions.runtime {
-            let name = format!("{FILENAME_PREFIX}{latest_runtime}{FILENAME_SUFFIX}");
+            let name = platform::runtime_lib_name(&latest_runtime.to_string());
             install_file(
                 base,
                 &name,
@@ -727,7 +830,7 @@ fn update_pinned(
     ensure_dir(&target);
 
     if components.runtime {
-        let name = format!("{FILENAME_PREFIX}{ver}{FILENAME_SUFFIX}");
+        let name = platform::runtime_lib_name(&ver.to_string());
         ui::section("Runtimes");
         ui::doing("runtime", format!("installing {ver} from {base}"));
         install_file(base, &name, &target, sha256, insecure).unwrap_or_else(|e| fail(&e));
@@ -762,9 +865,9 @@ fn reserve_temp(dir: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(tmp)
 }
 
-/// chmod 0755 and rename a fully-written temp file into place.
+/// chmod 0755 (no-op on Windows) and rename a fully-written temp file into place.
 fn install_from_path(tmp: &Path, target: &Path) -> Result<(), String> {
-    if let Err(e) = fs::set_permissions(tmp, fs::Permissions::from_mode(0o755)) {
+    if let Err(e) = platform::set_exec(tmp) {
         let _ = fs::remove_file(tmp);
         return Err(format!("cannot chmod {}: {e}", tmp.display()));
     }
@@ -863,6 +966,51 @@ mod tests {
     }
 
     #[test]
+    fn replace_via_aside_swaps_and_cleans() {
+        let dir = std::env::temp_dir().join(format!(
+            "inka-aside-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let dst = dir.join("inka");
+        fs::write(&dst, b"old").unwrap();
+        let new = dir.join(".inka.new");
+        fs::write(&new, b"new").unwrap();
+        replace_via_aside(&new, &dst).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), b"new");
+        assert!(!new.exists(), "staged file must be moved");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().contains(".old"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "asides must be cleaned: {leftovers:?}"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sweep_stale_old_removes_only_swap_asides() {
+        let dir = std::env::temp_dir().join(format!(
+            "inka-sweep-old-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join(".inka.old123-abc"), b"x").unwrap();
+        fs::write(dir.join("inka"), b"keep").unwrap();
+        fs::write(dir.join(".inka-desktop-app"), b"keep").unwrap();
+        sweep_stale_old(&dir);
+        assert!(!dir.join(".inka.old123-abc").exists());
+        assert!(dir.join("inka").exists());
+        assert!(dir.join(".inka-desktop-app").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn temp_dir_create_is_exclusive_and_cleans_up() {
         let p;
         {
@@ -946,5 +1094,60 @@ mod tests {
         assert!(!versions_channel_beta(
             &serde_json::json!({"release": "0.8.0"})
         ));
+    }
+
+    #[test]
+    fn target_view_prefers_target_map_then_top_level() {
+        // Legacy flat schema: the top-level object is the target view.
+        let legacy = serde_json::json!({"runtime": "0.267.2"});
+        assert_eq!(
+            target_view(&legacy).get("runtime").and_then(Value::as_str),
+            Some("0.267.2")
+        );
+
+        // Per-target schema: the compile-time target's entry wins.
+        let multi = serde_json::json!({
+            "runtime": "0.100.0",
+            "targets": {
+                "x86_64-unknown-linux-gnu": { "runtime": "0.267.2" },
+                "x86_64-pc-windows-msvc": { "runtime": "0.300.0" }
+            }
+        });
+        let expected = if cfg!(windows) { "0.300.0" } else { "0.267.2" };
+        assert_eq!(
+            target_view(&multi).get("runtime").and_then(Value::as_str),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn extract_zip_unpacks_flat_and_nested_entries() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "inka-zip-{}-{}",
+            std::process::id(),
+            random_suffix()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let zip_path = dir.join("toolchain.zip");
+        {
+            let f = fs::File::create(&zip_path).unwrap();
+            let mut w = zip::ZipWriter::new(f);
+            let opts = zip::write::SimpleFileOptions::default();
+            w.start_file("inka", opts).unwrap();
+            w.write_all(b"bin").unwrap();
+            w.start_file("nested/inka-launcher", opts).unwrap();
+            w.write_all(b"launcher").unwrap();
+            w.finish().unwrap();
+        }
+        let out = dir.join("out");
+        fs::create_dir_all(&out).unwrap();
+        extract_toolchain("toolchain.zip", &zip_path, &out).unwrap();
+        assert_eq!(fs::read(out.join("inka")).unwrap(), b"bin");
+        assert_eq!(
+            fs::read(out.join("nested/inka-launcher")).unwrap(),
+            b"launcher"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
