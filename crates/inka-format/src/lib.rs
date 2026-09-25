@@ -497,7 +497,7 @@ fn anchor_item(
         if let Some(exe) = exe_dir {
             let plain_relative = !s.is_empty()
                 && s != "*"
-                && !s.starts_with('/')
+                && std::path::Path::new(&s).is_relative()
                 && !s.contains("://")
                 && !s.contains('$');
             if plain_relative {
@@ -851,7 +851,11 @@ mod tests {
         let exe = Path::new("/opt/app");
         let dsl = "allow-read=./data,*,/abs,${EXE_DIR}/x";
         let out = expand_permissions(dsl, Some("exe"), Some(exe), None);
-        assert_eq!(out, "allow-read=/opt/app/./data,*,/abs,/opt/app/x");
+        // Compare paths, not a hardcoded separator string: `join` uses the
+        // platform separator (`\` on Windows).
+        let joined = exe.join("./data");
+        let anchored = joined.to_string_lossy();
+        assert_eq!(out, format!("allow-read={anchored},*,/abs,/opt/app/x"));
     }
 
     #[test]
