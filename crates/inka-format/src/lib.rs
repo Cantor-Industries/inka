@@ -115,17 +115,28 @@ fn parse_pre(tag: &str) -> Option<Pre> {
 
 // ---- archive + footer ------------------------------------------------------
 
-/// Validate one archive path: relative, no NUL, no `..` component.
+/// Validate one archive path: relative, no NUL, no `..` or root/prefix
+/// component. Component-based so a rooted path (`/abs`, `\abs`, `C:\abs`) is
+/// rejected on every platform (Windows `Path::is_absolute` returns false for
+/// `/abs`).
 pub fn validate_rel_path(path: &str) -> Result<(), String> {
-    if path.is_empty() || std::path::Path::new(path).is_absolute() {
+    use std::path::Component;
+
+    if path.is_empty() {
         return Err(format!("invalid archive path '{path}' (must be relative)"));
     }
     if path.contains('\0') {
         return Err("archive path contains a NUL byte".into());
     }
-    for comp in path.split('/') {
-        if comp == ".." {
-            return Err(format!("archive path '{path}' escapes the artifact tree"));
+    for comp in std::path::Path::new(path).components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => {
+                return Err(format!("invalid archive path '{path}' (must be relative)"));
+            }
+            Component::ParentDir => {
+                return Err(format!("archive path '{path}' escapes the artifact tree"));
+            }
+            _ => {}
         }
     }
     Ok(())

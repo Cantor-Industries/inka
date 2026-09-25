@@ -920,7 +920,7 @@ fn run_tree(
     if !root.is_dir() {
         return Err(format!("runtime directory not found: {dir}"));
     }
-    if entry.is_empty() || entry.contains("..") || Path::new(entry).is_absolute() {
+    if entry.is_empty() || entry.contains("..") || Path::new(entry).has_root() {
         return Err(format!("invalid entry path '{entry}'"));
     }
     // Canonicalize once: the module loader and node services confine every read
