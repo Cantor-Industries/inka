@@ -52,7 +52,10 @@ pub(crate) fn embed(_image: &[u8], _payload: &[u8]) -> Result<Vec<u8>, String> {
 
 /// Embed `icon` (PNG or ICO bytes) as a Windows PE icon resource, returning the
 /// new image. Only PE images carry icons; unix ships a co-located PNG instead.
-#[cfg(target_os = "windows")]
+///
+/// Compiled on every platform (libsui's PE support is pure Rust) so the Windows
+/// path is type-checked by the normal Linux build; only `windows_icon` calls it.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn set_icon(image: &[u8], icon: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = Vec::new();
     libsui::PortableExecutable::from(image)

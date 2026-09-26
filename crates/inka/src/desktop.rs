@@ -1300,18 +1300,20 @@ fn cef_runtime_row() -> &'static str {
 
 /// Apply the configured icon to the packaged app. Windows embeds it into the
 /// app exe (PE resources) and writes an `AppIcon.ico`; unix ships `AppIcon.png`.
+///
+/// Both branches are compiled on every platform (the PE path is pure Rust), so
+/// the Linux build type-checks the Windows-only path; the runtime picks one.
 fn apply_app_icon(icon: &IconArg, launcher: &Path, out: &Path) {
-    #[cfg(windows)]
-    windows_icon(icon, launcher, out);
-    #[cfg(not(windows))]
-    {
+    if cfg!(windows) {
+        windows_icon(icon, launcher, out);
+    } else {
         let _ = launcher;
         unix_icon(icon, out);
     }
 }
 
 /// unix: copy the single icon, or the largest entry of a set, as `AppIcon.png`.
-#[cfg(not(windows))]
+#[cfg_attr(windows, allow(dead_code))]
 fn unix_icon(icon: &IconArg, out: &Path) {
     let src = match icon {
         IconArg::Single(p) => p.clone(),
@@ -1329,8 +1331,8 @@ fn unix_icon(icon: &IconArg, out: &Path) {
 
 /// Windows: build/copy `AppIcon.ico` (from a set when given) and embed the icon
 /// into the app exe via libsui, which generates the multi-resolution PE icon
-/// resources itself.
-#[cfg(windows)]
+/// resources itself. Compiled on every platform (see `apply_app_icon`).
+#[cfg_attr(not(windows), allow(dead_code))]
 fn windows_icon(icon: &IconArg, launcher: &Path, out: &Path) {
     let ico_path = out.join("AppIcon.ico");
     let icon_bytes: Option<Vec<u8>> = match icon {
@@ -1424,7 +1426,11 @@ fn write_portable_archive(out: &Path) -> Result<(), String> {
 
 /// Zip the `src` directory (its own name becomes the top-level entry) into
 /// `dest`, using `/` separators. Used for the Windows portable artifact.
-#[cfg(windows)]
+///
+/// Compiled on every platform (and unit-tested) so Windows-only regressions are
+/// caught by the normal Linux build; only `write_portable_archive` calls it, and
+/// only on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
     use std::io::Write;
 
@@ -1449,7 +1455,7 @@ fn zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
                     .map_err(|e| format!("zip {rel}: {e}"))?;
                 walk(base, &p, zip, opts)?;
             } else if p.is_file() {
-                zip.start_file(rel, opts)
+                zip.start_file(&rel, opts)
                     .map_err(|e| format!("zip {rel}: {e}"))?;
                 let data = fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
                 zip.write_all(&data)
@@ -1832,7 +1838,6 @@ mod tests {
         assert_eq!(inka_format::parse_archive(decoded.archive).unwrap(), files);
     }
 
-    #[cfg(windows)]
     #[test]
     fn zip_dir_packages_the_app_tree() {
         use std::io::Read;
