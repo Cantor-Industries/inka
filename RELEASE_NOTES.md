@@ -9,14 +9,18 @@
 -->
 # inka {{REL}} — runtime tuple {{RUNTIME}}
 
-The runtime-invariants release. Resolution now hinges on a single shared
-`inka-format` crate and explicit, verifiable invariants: artifacts declare the
-engine capabilities they need (`requires=`), the launcher checks those against
-what the installed runtime advertises, and out-of-tree packages load only under
-an explicit read grant. `inka doctor` can inspect a built executable, permission
-grants can be made portable across machines, and network fetching is available
-opt-in while the default stays fully offline. The engine is rebased on **Deno
-2.9.7**; the runtime tuple moves to `{{RUNTIME}}`.
+The runtime-invariants and desktop release. Resolution now hinges on a single
+shared `inka-format` crate and explicit, verifiable invariants: artifacts declare
+the engine capabilities they need (`requires=`), the launcher checks those
+against what the installed runtime advertises, and out-of-tree packages load
+only under an explicit read grant. `inka doctor` can inspect a built executable,
+permission grants can be made portable across machines, and network fetching is
+available opt-in while the default stays fully offline. The engine is rebased on
+**Deno 2.9.7**; the runtime tuple moves to `{{RUNTIME}}`.
+
+This release also ships **native desktop apps** (`inka desktop`) that reuse one
+machine-wide engine instead of embedding a copy per app, and the first
+**Windows** (`x86_64-pc-windows-msvc`) release.
 
 ## Upgrade
 
@@ -73,13 +77,63 @@ Then keep the toolchain and runtime current with `inka update`.
   inka still resolves npm only from local `node_modules`, never Deno's global npm
   cache.
 
+## Desktop apps
+
+`inka desktop` packages a web app as a native desktop application that **shares
+the machine's inka runtime**: a prebuilt laufey window loads a small per-app
+shim, which unpacks your bundle and loads the shared, desktop-enabled engine, so
+an app is a few megabytes instead of embedding a ~150 MB engine. Linux (system
+WebKitGTK, and `--backend cef` with a shared Chromium runtime) is supported, and
+so is Windows (below); see
+[Desktop apps](https://github.com/Cantor-Industries/inka/blob/master/docs/desktop.md).
+
+- **Package** `<entry>` (an HTTP server: `export default { fetch }` or
+  `Deno.serve`) or a **framework project** (`inka desktop .`: Vite, Astro, Fresh,
+  Remix, React Router, SvelteKit, Nuxt, SolidStart, TanStack Start). Bundling
+  matches `inka build`; `--payload <dir>` packs an already-built directory.
+- **`deno.json` `desktop` config** with CLI overrides (`app.name`,
+  `app.identifier`, `app.icons`, `backend`, `output`, `release.baseUrl`,
+  `errorReporting.url`, `deepLinks`, `compress`).
+- **Dev workflow**: `--hmr` (in-runtime Vite, external dev server, or inka's V8
+  HMR) and a CDP DevTools multiplexer (`--inspect`/`--inspect-brk`/`--inspect-wait`).
+- **Auto-update & error reporting**: `Deno.autoUpdate` with a signed
+  `latest.json`, and uncaught JS errors + Rust panics POSTed to
+  `errorReporting.url`.
+- **Distribution**: a runnable app directory plus `<App>.tar.gz`/`<App>.zip`, a
+  script installer on Linux (`--installer`), a Windows `.msi` (below), deep-link
+  registration, and an optional self-extracting payload (`--compress`).
+
+## Windows (`x86_64-pc-windows-msvc`) preview
+
+Core `inka` and `inka desktop` now build and run on Windows:
+
+- **Install** with `install.ps1` (per-user under `%LOCALAPPDATA%\inka`), then
+  `inka run`/`build`/`doctor`/`update` (a built artifact's default output gains
+  `.exe`; the toolchain self-update uses a rename-aside swap on the running exe).
+- **`inka desktop` (webview)**: downloads the pinned laufey backend and produces
+  `<App>.exe` (the renamed backend, icon embedded) + `<App>.dll` (the shim) plus
+  a portable `<App>.zip`.
+- **`.msi` installer**: `--installer` or `-o App.msi` builds a per-machine
+  installer (pure Rust) with a Start Menu shortcut and the app icon.
+- The Windows runtime is published as `libinka_runtime-{{RUNTIME}}.dll` and is
+  now **desktop-enabled**; the pinned laufey backend is mirrored on the release.
+
 ## Under the hood
 
-- **New `inka-format` crate** — one dependency-free home for the `INKFOOT5`
-  footer/archive encode + parse, the zero-copy archive index, manifest
-  parse/render, `Version`, and `constraint_allows`, shared by `inka build`, the
-  launcher, and `inka doctor`. Removes the build/launcher copies that could
-  drift.
+- **New `inka-format` crate** — one dependency-free home for artifact
+  encode/parse (the embedded `inka` section, the zero-copy archive index, and the
+  legacy `INKFOOT5` reader), manifest parse/render, `Version`, and
+  `constraint_allows`, shared by `inka build`, the launcher, and `inka doctor`.
+  Removes the build/launcher copies that could drift.
+- **Artifact payload is an embedded `inka` section** (via `libsui`) instead of
+  an appended `INKFOOT5` trailer, keeping the image structurally valid so it can
+  be code-signed after building; older artifacts still run. See
+  [Signing a built artifact](https://github.com/Cantor-Industries/inka/blob/master/docs/build.md#signing-a-built-artifact).
+- **Hardened archive extraction** for toolchain/backend downloads: traversal and
+  zip-symlink refusal, setuid stripping, and atomic staging.
+- **Vendored from Deno** (MIT): the framework detection, the CDP DevTools
+  multiplexer, hardened archive extraction, icon-set `.ico` generation, the
+  Windows MSI builder, deep-link registration, and the self-extracting transform.
 - **Engine rebased on Deno 2.9.7**: `deno_runtime 0.267.0`, `deno_core 0.412.0`,
   `node_resolver 0.97.0`, `deno_resolver 0.90.0`; V8 `150.4.0`, TypeScript
   `6.0.3` unchanged. The Deno pin/seam audit and the full runtime contract
@@ -89,8 +143,15 @@ Then keep the toolchain and runtime current with `inka update`.
 
 ## Assets
 
-- `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher
-- `libinka_runtime-{{RUNTIME}}.so` — shared runtime tuple
-- `install.sh` + `versions.json` — bootstrap installer + version record
+- `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
+  desktop shim (`libinka_desktop_shim.so`)
+- `libinka_runtime-{{RUNTIME}}.so` — shared runtime tuple (desktop-enabled)
+- `inka-toolchain-{{REL}}-x86_64-pc-windows-msvc.zip` — Windows CLI + launcher +
+  desktop shim (`libinka_desktop_shim.dll`)
+- `libinka_runtime-{{RUNTIME}}.dll` — Windows shared runtime (desktop-enabled)
+- `laufey-cef-*.tar.gz` (Linux) and `laufey-webview-*.zip` (Windows) — pinned
+  backend mirrors
+- `install.sh` / `install.ps1` + `versions.json` — bootstrap installers + version
+  record
 
-`.sha256` sidecars are published for the toolchain and runtime.
+`.sha256` sidecars are published for the toolchains and runtimes.

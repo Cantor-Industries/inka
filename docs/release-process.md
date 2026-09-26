@@ -27,6 +27,22 @@ with no engine change ships the existing runtime tuple.
   `version.sh` enforces the shape and that `crates/inka/Cargo.toml` matches the
   base.
 
+## Release notes
+
+Two templates live at the repo root and are substituted by the release workflow
+(`{{REL}}`, `{{RUNTIME}}`, `{{TAG}}`, `{{CHANNEL}}`); everything through the
+closing `-->` in the leading comment is stripped before publishing.
+
+- `RELEASE_NOTES_BETA.md` — used for a `-beta.`/`-rc.` tag.
+- `RELEASE_NOTES.md` — used for a stable tag.
+
+**Notes are incremental: describe only what changed in *this* release.** Do not
+restate features from earlier releases (beta notes = the delta since the
+previous beta; stable notes = the delta since the previous stable). Repeat an
+older item only when it is genuinely needed for context, and prefer a link to
+the earlier release. Update the relevant file as part of "Cutting a beta"/tagging
+so the tagged commit carries the notes.
+
 ## Cutting a beta
 
 1. Bump `crates/inka/Cargo.toml` (and sibling crates) to the target base; if the
@@ -46,14 +62,16 @@ with no engine change ships the existing runtime tuple.
 ## Desktop
 
 - The release workflow builds the shared runtime with `-p inka-runtime --features
-  desktop` and the per-app shim with `-p inka-desktop-shim`; both the runtime
-  `.so` and the shim (`libinka_desktop_shim.so`, staged into the toolchain
-  archive) are required for `inka desktop` to work.
+  desktop` on **both** targets (Linux and `windows-latest`; the latter needs
+  `LIBCLANG_PATH`) and the per-app shim with `-p inka-desktop-shim`; both the
+  runtime library and the shim (staged into the toolchain archive) are required
+  for `inka desktop` to work. The Windows runtime `.dll` is desktop-enabled.
 - The workflow also mirrors the pinned laufey archive(s) as release assets
   (`scripts/ci/laufey-asset.sh <backend> <target>` reads the archive name and
-  SHA-256 from `desktop.rs`), and records them in `versions.json` under
-  `laufey.backends`. `inka desktop --installer` provisions the shared engine and
-  CEF runtime from these assets, so app installers never reach laufey's host.
+  SHA-256 from `desktop.rs`): `laufey-cef-*` on Linux, `laufey-webview-*` on
+  Windows. They are recorded in `versions.json` under `targets[<target>].laufey`.
+  `inka desktop --installer` provisions the shared engine and CEF runtime from
+  these assets, so app installers never reach laufey's host.
 - The toolchain is built with `INKA_BUILD_TAG=$GITHUB_REF_NAME` baked in, so a
   generated installer pins the exact release (not `releases/latest`); override
   at install time with `--engine-base`/`INKA_RELEASE_BASE`.
