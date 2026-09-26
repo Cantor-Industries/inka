@@ -19,6 +19,7 @@ mod desktop_devtools;
 mod embed;
 mod framework;
 mod help;
+mod ico;
 mod installer;
 mod payload;
 mod permissions;

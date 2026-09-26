@@ -136,13 +136,20 @@ fn fail(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+/// An app icon: a single image, or Deno-style `{ path, size }` set. A set lets
+/// Windows build a multi-resolution `.ico`.
+enum IconArg {
+    Single(PathBuf),
+    Set(Vec<(PathBuf, u32)>),
+}
+
 struct Args {
     entry: Option<PathBuf>,
     output: Option<PathBuf>,
     app_name: Option<String>,
     identifier: Option<String>,
     backend: Option<String>,
-    icon: Option<PathBuf>,
+    icon: Option<IconArg>,
     payload: Option<PathBuf>,
     no_bundle: bool,
     minify: bool,
@@ -201,7 +208,7 @@ fn parse_args(args: &[String]) -> Args {
             "--name" => a.app_name = Some(next(&mut it, arg)),
             "--identifier" => a.identifier = Some(next(&mut it, arg)),
             "--backend" => a.backend = Some(next(&mut it, arg)),
-            "--icon" => a.icon = Some(PathBuf::from(next(&mut it, arg))),
+            "--icon" => a.icon = Some(IconArg::Single(PathBuf::from(next(&mut it, arg)))),
             "--payload" => a.payload = Some(PathBuf::from(next(&mut it, arg))),
             "--external" => a.external.push(next(&mut it, arg)),
             "--no-bundle" => a.no_bundle = true,
@@ -509,12 +516,21 @@ fn apply_config_defaults(a: &mut Args, cfg: crate::config::DesktopConfig) {
         a.output = cfg_output.map(|o| base.join(o));
     }
     if a.icon.is_none() {
+        use crate::config::DesktopIcon;
         let cfg_icon = if cfg!(windows) {
             cfg.icon_windows
         } else {
             cfg.icon_linux
         };
-        a.icon = cfg_icon.map(|i| base.join(i));
+        a.icon = cfg_icon.map(|i| match i {
+            DesktopIcon::Single(p) => IconArg::Single(base.join(p)),
+            DesktopIcon::Set(entries) => IconArg::Set(
+                entries
+                    .into_iter()
+                    .map(|(p, s)| (base.join(p), s))
+                    .collect(),
+            ),
+        });
     }
     if a.app_version.is_none() {
         a.app_version = cfg.version;
@@ -1022,7 +1038,7 @@ pub fn cmd_desktop(args: &[String]) {
         if let Ok(Some(det)) = crate::framework::detect_framework(&entry) {
             if let Some(fav) = crate::framework::find_framework_favicon(&entry, &det) {
                 ui::info(format!("using {} favicon as the app icon", det.name));
-                a.icon = Some(fav);
+                a.icon = Some(IconArg::Single(fav));
             }
         }
     }
@@ -1125,18 +1141,7 @@ pub fn cmd_desktop(args: &[String]) {
     }
 
     if let Some(icon) = &a.icon {
-        if icon.is_file() {
-            // Windows embeds the icon into the app exe (PE resources); unix
-            // ships `AppIcon.png` next to the app.
-            #[cfg(windows)]
-            embed_app_icon(&launcher, icon);
-            #[cfg(not(windows))]
-            {
-                let _ = fs::copy(icon, out.join("AppIcon.png"));
-            }
-        } else {
-            ui::warn(format!("icon not found: {}", icon.display()));
-        }
+        apply_app_icon(icon, &launcher, &out);
     }
     // A `.desktop` entry is a Linux desktop-integration file; Windows uses the
     // exe's embedded icon and (later) an MSI shortcut.
@@ -1213,16 +1218,84 @@ fn cef_runtime_row() -> &'static str {
     "laufey + shared CEF (symlinked)"
 }
 
-/// Embed `icon` (PNG/ICO) into the PE at `exe` in place, warning on failure.
+/// Apply the configured icon to the packaged app. Windows embeds it into the
+/// app exe (PE resources) and writes an `AppIcon.ico`; unix ships `AppIcon.png`.
+fn apply_app_icon(icon: &IconArg, launcher: &Path, out: &Path) {
+    #[cfg(windows)]
+    windows_icon(icon, launcher, out);
+    #[cfg(not(windows))]
+    {
+        let _ = launcher;
+        unix_icon(icon, out);
+    }
+}
+
+/// unix: copy the single icon, or the largest entry of a set, as `AppIcon.png`.
+#[cfg(not(windows))]
+fn unix_icon(icon: &IconArg, out: &Path) {
+    let src = match icon {
+        IconArg::Single(p) => p.clone(),
+        IconArg::Set(entries) => match entries.iter().max_by_key(|(_, s)| *s) {
+            Some((p, _)) => p.clone(),
+            None => return,
+        },
+    };
+    if src.is_file() {
+        let _ = fs::copy(&src, out.join("AppIcon.png"));
+    } else {
+        ui::warn(format!("icon not found: {}", src.display()));
+    }
+}
+
+/// Windows: build/copy `AppIcon.ico` (from a set when given) and embed the icon
+/// into the app exe via libsui, which generates the multi-resolution PE icon
+/// resources itself.
 #[cfg(windows)]
-fn embed_app_icon(exe: &Path, icon: &Path) {
-    let result = fs::read(exe)
+fn windows_icon(icon: &IconArg, launcher: &Path, out: &Path) {
+    let ico_path = out.join("AppIcon.ico");
+    let icon_bytes: Option<Vec<u8>> = match icon {
+        IconArg::Set(entries) => {
+            let mut read: Vec<(PathBuf, u32)> = Vec::new();
+            for (path, size) in entries {
+                if path.is_file() {
+                    read.push((path.clone(), *size));
+                } else {
+                    ui::warn(format!("icon not found: {}", path.display()));
+                }
+            }
+            match crate::ico::convert_icon_set_to_ico(&read, &ico_path) {
+                Ok(()) => fs::read(&ico_path).ok(),
+                Err(e) => {
+                    ui::warn(format!("could not build {}: {e}", ico_path.display()));
+                    None
+                }
+            }
+        }
+        IconArg::Single(path) => {
+            if !path.is_file() {
+                ui::warn(format!("icon not found: {}", path.display()));
+                return;
+            }
+            if path
+                .extension()
+                .is_some_and(|e| e.eq_ignore_ascii_case("ico"))
+            {
+                let _ = fs::copy(path, &ico_path);
+            } else {
+                ui::warn(format!(
+                    "icon {} is not .ico; embedding it but not writing AppIcon.ico",
+                    path.display()
+                ));
+            }
+            fs::read(path).ok()
+        }
+    };
+
+    let Some(bytes) = icon_bytes else { return };
+    let result = fs::read(launcher)
         .map_err(|e| e.to_string())
-        .and_then(|image| {
-            let icon_bytes = fs::read(icon).map_err(|e| e.to_string())?;
-            crate::payload::set_icon(&image, &icon_bytes)
-        })
-        .and_then(|patched| fs::write(exe, patched).map_err(|e| e.to_string()));
+        .and_then(|image| crate::payload::set_icon(&image, &bytes))
+        .and_then(|patched| fs::write(launcher, patched).map_err(|e| e.to_string()));
     if let Err(e) = result {
         ui::warn(format!("could not embed the app icon: {e}"));
     }

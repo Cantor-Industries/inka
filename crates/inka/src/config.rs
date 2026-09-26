@@ -643,10 +643,10 @@ pub(crate) struct DesktopConfig {
     pub base_dir: std::path::PathBuf,
     pub app_name: Option<String>,
     pub identifier: Option<String>,
-    /// Linux icon path (relative to `base_dir`).
-    pub icon_linux: Option<String>,
-    /// Windows icon path (relative to `base_dir`).
-    pub icon_windows: Option<String>,
+    /// Linux icon (path(s) relative to `base_dir`).
+    pub icon_linux: Option<DesktopIcon>,
+    /// Windows icon (path(s) relative to `base_dir`).
+    pub icon_windows: Option<DesktopIcon>,
     pub backend: Option<String>,
     pub output_linux: Option<String>,
     /// Windows output directory (relative to `base_dir`).
@@ -693,29 +693,42 @@ fn desktop_string(
     }
 }
 
-/// Resolve a platform icon value: a single path string, or Deno's list of
-/// `{ path, size }` entries (the largest size wins, since inka ships one PNG).
-fn desktop_icon(value: Option<&Value>, label: &str, warns: &mut Vec<String>) -> Option<String> {
+/// A platform icon config: a single path, or Deno's list of `{ path, size }`
+/// entries. A set is preserved so Windows can build a multi-resolution `.ico`;
+/// Linux ships the largest entry.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum DesktopIcon {
+    Single(String),
+    Set(Vec<(String, u32)>),
+}
+
+/// Resolve a platform icon value: a single path string, or a list of
+/// `{ path, size }` entries.
+fn desktop_icon(
+    value: Option<&Value>,
+    label: &str,
+    warns: &mut Vec<String>,
+) -> Option<DesktopIcon> {
     match value {
         None => None,
-        Some(Value::String(s)) if !s.is_empty() => Some(s.clone()),
+        Some(Value::String(s)) if !s.is_empty() => Some(DesktopIcon::Single(s.clone())),
         Some(Value::Array(entries)) => {
-            let mut best: Option<(u64, String)> = None;
+            let mut set: Vec<(String, u32)> = Vec::new();
             for entry in entries {
                 let path = entry.get("path").and_then(Value::as_str);
                 let size = entry.get("size").and_then(Value::as_u64).unwrap_or(0);
                 if let Some(path) = path.filter(|p| !p.is_empty()) {
-                    if best.as_ref().is_none_or(|(s, _)| size > *s) {
-                        best = Some((size, path.to_string()));
-                    }
+                    set.push((path.to_string(), size.min(u32::MAX as u64) as u32));
                 }
             }
-            if best.is_none() {
+            if set.is_empty() {
                 warns.push(format!(
                     "{label} entries need a non-empty `path`; ignoring them"
                 ));
+                None
+            } else {
+                Some(DesktopIcon::Set(set))
             }
-            best.map(|(_, path)| path)
         }
         Some(_) => {
             warns.push(format!(
@@ -1801,8 +1814,14 @@ mod tests {
         assert!(warns.is_empty(), "{warns:?}");
         assert_eq!(cfg.app_name.as_deref(), Some("Acme Mail"));
         assert_eq!(cfg.identifier.as_deref(), Some("com.acme.mail"));
-        assert_eq!(cfg.icon_linux.as_deref(), Some("assets/icon.png"));
-        assert_eq!(cfg.icon_windows.as_deref(), Some("assets/icon.ico"));
+        assert_eq!(
+            cfg.icon_linux,
+            Some(DesktopIcon::Single("assets/icon.png".into()))
+        );
+        assert_eq!(
+            cfg.icon_windows,
+            Some(DesktopIcon::Single("assets/icon.ico".into()))
+        );
         assert_eq!(cfg.backend.as_deref(), Some("cef"));
         assert_eq!(cfg.output_linux.as_deref(), Some("dist/mail"));
         assert_eq!(cfg.output_windows.as_deref(), Some("dist/mail-win"));
@@ -1819,7 +1838,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_config_icon_array_picks_largest() {
+    fn desktop_config_icon_array_becomes_set() {
         let cwd = scratch_dir("desktop-icon-array");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
@@ -1831,7 +1850,13 @@ mod tests {
             ] } } } }"#,
         );
         let (cfg, warns) = desktop_config(&cwd);
-        assert_eq!(cfg.icon_linux.as_deref(), Some("icon-256.png"));
+        assert_eq!(
+            cfg.icon_linux,
+            Some(DesktopIcon::Set(vec![
+                ("icon-32.png".into(), 32),
+                ("icon-256.png".into(), 256),
+            ]))
+        );
         assert!(warns.is_empty(), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
@@ -1920,7 +1945,10 @@ mod tests {
         assert_eq!(cfg.output_linux, None);
         // Windows keys are parsed (and valid side by side with linux ones).
         assert_eq!(cfg.output_windows, None);
-        assert_eq!(cfg.icon_windows.as_deref(), Some("icon.ico"));
+        assert_eq!(
+            cfg.icon_windows,
+            Some(DesktopIcon::Single("icon.ico".into()))
+        );
         // Only the unimplemented macOS output warns; the windows icon is used,
         // so it does not.
         assert!(has_note(&warns, "desktop.output.macos"), "{warns:?}");

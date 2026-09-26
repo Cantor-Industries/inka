@@ -144,9 +144,13 @@ inka-specific fallback.
       "identifier": "com.acme.mail", // reverse-DNS; .desktop filename + WMClass
       "icons": {
         "linux": "assets/icon-256.png",
-        // or a size set (the largest size is used for Linux's single icon):
+        // or a size set (Linux uses the largest entry):
         // "linux": [{ "path": "assets/icon-32.png", "size": 32 },
         //           { "path": "assets/icon-256.png", "size": 256 }]
+        // Windows builds a multi-resolution AppIcon.ico from the set and
+        // embeds it into the app .exe:
+        // "windows": [{ "path": "assets/icon-32.png", "size": 32 },
+        //             { "path": "assets/icon-256.png", "size": 256 }]
       },
     },
     "backend": "webview", // webview (default) | cef | raw
@@ -161,17 +165,18 @@ inka-specific fallback.
 |---|---|---|
 | `desktop.app.name` | `--name` | application name (launcher filename + window title) |
 | `desktop.app.identifier` | `--identifier` | reverse-DNS id for the `.desktop` file and `StartupWMClass` |
-| `desktop.app.icons.linux` | `--icon` | Linux icon (single path, or `[{path,size}]`) |
+| `desktop.app.icons.linux` | `--icon` | Linux icon (single path, or `[{path,size}]`; largest is used) |
+| `desktop.app.icons.windows` | `--icon` | Windows icon (single `.ico`/image, or a `[{path,size}]` set baked into `AppIcon.ico` and the `.exe`) |
 | `desktop.backend` | `--backend` | `webview`, `cef`, or `raw` |
-| `desktop.output.linux` | `-o`/`--output` | output app directory |
+| `desktop.output.linux` | `-o`/`--output` | output app directory (Linux) |
+| `desktop.output.windows` | `-o`/`--output` | output app directory (Windows) |
 | `desktop.release.baseUrl` | `--release-base` | auto-update manifest host |
 | `desktop.errorReporting.url` | `--error-reporting` | uncaught-error endpoint |
 | top-level `version` | `--app-version` | version reported to `Deno.autoUpdate` |
 
-`output.macos`/`output.windows` and `icons.macos`/`icons.windows` are parsed for
-forward compatibility but unused on the Linux-only target. Malformed fields
-warn and are ignored; an invalid `identifier` or unknown `backend` is a hard
-error.
+The `linux`/`windows` platform keys are host-selected; setting both is normal.
+Only `macos` keys warn (macOS packaging is unimplemented). Malformed fields warn
+and are ignored; an invalid `identifier` or unknown `backend` is a hard error.
 
 ## Flags
 
@@ -182,7 +187,7 @@ inka desktop [entry] [options]
       --name <name>        application name
       --identifier <id>    reverse-DNS bundle id
       --backend <kind>     webview (default), cef, or raw
-      --icon <png>         Linux application icon
+      --icon <png>         application icon (embedded into the .exe on Windows)
       --payload <dir>      use a prebuilt payload directory instead of bundling
       --external <pkg>     leave a package unbundled (embedded from node_modules)
       --no-bundle          copy the entry verbatim as main.js
@@ -318,7 +323,8 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 
 The desktop runtime adapts Deno's `cli/rt_desktop` and vendored desktop JS
 (MIT, Copyright (c) the Deno authors). Hardened archive extraction
-(`crates/inka/src/archive.rs`) is vendored from Deno's `cli/tools/desktop.rs`
+(`crates/inka/src/archive.rs`) and icon-set `.ico` generation
+(`crates/inka/src/ico.rs`) are vendored from Deno's `cli/tools/desktop.rs`
 (also MIT, Copyright (c) the Deno authors). The window/renderer layer is
 [laufey](https://github.com/littledivy/laufey) (MIT, Copyright (c) Divy
 Srivastava), pinned at `0.7.0`.
