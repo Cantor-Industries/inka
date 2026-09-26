@@ -9,13 +9,21 @@ megabytes instead of the ~150 MB a per-app engine would cost.
 ~/.local/share/inka/runtime/libinka_runtime-<tuple>.so   # shared (desktop-enabled)
 ~/.local/share/cef/<ver>/<target>/                       # shared CEF runtime (--backend cef)
 <App>/                                                    # one packaged app
-  <App>            laufey backend (window + renderer), renamed
-  <App>.so         per-app shim + your bundled payload
+  <App>            laufey backend (window + renderer), renamed   (Linux)
+  <App>.so         per-app shim + your bundled payload           (Linux)
   runtime-version  the shared runtime tuple the shim loads
-  AppIcon.png      icon, if configured
-  <id>.desktop     Linux desktop entry
-  libcef.so, ...   symlinks into the shared CEF runtime (--backend cef)
+  AppIcon.png      icon, if configured                           (Linux)
+  <id>.desktop     Linux desktop entry                           (Linux)
+  libcef.so, ...   symlinks into the shared CEF runtime          (Linux, --backend cef)
 <App>.tar.gz
+
+# Windows (%LOCALAPPDATA%\inka\runtime\libinka_runtime-<tuple>.dll, etc.)
+<App>\
+  <App>.exe        laufey backend (window + renderer), renamed
+  <App>.dll        per-app shim + your bundled payload
+  runtime-version  the shared runtime tuple the shim loads
+  libcef.dll, ...  copied from the shared CEF runtime            (--backend cef)
+<App>.zip
 ```
 
 At launch the prebuilt **laufey backend** loads `<App>.so` (the **shim**), which
@@ -24,28 +32,33 @@ runtime, `dlopen`s it, and forwards the window/runtime ABI. The engine itself is
 never copied into your app.
 
 With `--backend cef` the Chromium runtime is shared per machine: the first CEF
-app populates `~/.local/share/cef/<laufey-version>/<target>/` (about
-360 MB) and every app symlinks those files next to its launcher. laufey links
-`libcef.so` with `RPATH=.:$ORIGIN` and CEF reads its
-`*.pak`/`icudtl.dat`/`locales/` resources from beside the launcher, so the
-symlinks keep the app directory at a few megabytes instead of ~360 MB. The
-launcher itself stays a real per-app file (laufey derives the runtime library
-name, `<App>.so`, from its own path). The shared dir is versioned by the pinned
-laufey release; if symlinks are unavailable on the filesystem, inka falls back
-to bundling a full copy.
+app populates the shared dir (about 360 MB) and every app links those files next
+to its launcher. On Linux the shared dir is
+`~/.local/share/cef/<laufey-version>/<target>/` and the files are symlinked; on
+Windows it is `%LOCALAPPDATA%\cef\<laufey-version>\<target>\` and the files are
+**copied** (symlinks are unreliable without developer mode). laufey links
+`libcef.so`/`libcef.dll` with `RPATH=.:$ORIGIN` and CEF reads its
+`*.pak`/`icudtl.dat`/`locales/` resources from beside the launcher. The launcher
+itself stays a real per-app file (laufey derives the runtime library name,
+`<App>.so`/`<App>.dll`, from its own path). The shared dir is versioned by the
+pinned laufey release; if symlinks are unavailable on the filesystem, inka falls
+back to bundling a full copy (always the case on Windows).
 
 Because the app is not self-contained, a runnable app dir (or its default
-`<App>.tar.gz`) copied to another machine needs the shared CEF runtime there too
-(as with the shared engine) — or set `INKA_CEF_HOME`. For distribution, prefer
-the portable `--installer` artifacts, which provision both at install time.
+`<App>.tar.gz`/`<App>.zip`) copied to another machine needs the shared CEF
+runtime there too (as with the shared engine) — or set `INKA_CEF_HOME`. On Linux
+the portable `--installer` artifacts provision both at install time; on Windows
+`--installer` is not supported yet (an MSI is planned), so ship the `.zip`.
 
 The runtime is a normal inka runtime with the `desktop` feature compiled in; the
 same `.so` still serves headless `inka run` and built artifacts.
 
 ## Requirements
 
-- **Linux `x86_64`** with a system WebKitGTK (the `webview` backend). macOS and
-  Windows are not implemented yet.
+- **Linux `x86_64`** with a system WebKitGTK (the `webview` backend), or
+  **Windows `x86_64`** with the Edge **WebView2** runtime (preinstalled on
+  Windows 11 and most Windows 10; otherwise the app prompts to install it).
+  macOS is not implemented yet.
 - The shared **desktop-enabled runtime** (`inka update` installs it; the release
   engine is built with `--features desktop`). Without it, set
   `INKA_DESKTOP_RUNTIME` at launch.
@@ -285,19 +298,21 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 
 ## Caveats & roadmap
 
-- **Linux only.** macOS/Windows bundling and backends are unimplemented.
-- The bundled payload is extracted to `~/.cache/inka/desktop/<hash>` and is not
-  pruned yet.
+- **Linux `x86_64` and Windows `x86_64`** (webview backend on both). macOS is
+  unimplemented. The Windows webview backend needs the WebView2 runtime.
+- The bundled payload is extracted to a per-user cache (`~/.cache/inka/desktop/
+  <hash>`) and is not pruned yet.
 - HMR (in-runtime Vite, external dev server, and inka's V8 HMR), DevTools
   multiplexing, and framework detection are implemented; `.AppImage`/`.deb`/
-  `.rpm` distribution and Next.js remain follow-ups. Distribution today is the
-  script installer (`--installer`) or the runnable directory plus `.tar.gz`.
-- The per-app `<App>.so` is only the shim + your payload — never the engine.
-- The `cef` backend relies on user namespaces for Chromium's sandbox (setuid
-  bits are stripped from the downloaded archive, as in Deno). Removing the
-  shared CEF runtime (`~/.local/share/cef/...`) breaks packaged CEF apps;
-  `inka doctor` reports its presence. macOS/Windows CEF packaging is
-  unimplemented.
+  `.rpm` and Windows MSI distribution and Next.js remain follow-ups.
+  Distribution today is the runnable directory plus `.tar.gz` (Linux, with the
+  script `--installer`) or `.zip` (Windows; `--installer` is not supported yet).
+- The per-app `<App>.so`/`<App>.dll` is only the shim + your payload — never the
+  engine.
+- The `cef` backend relies on user namespaces for Chromium's sandbox on Linux
+  (setuid bits are stripped from the downloaded archive, as in Deno). Removing
+  the shared CEF runtime breaks packaged CEF apps; `inka doctor` reports its
+  presence. macOS CEF packaging is unimplemented.
 
 ## Acknowledgments
 

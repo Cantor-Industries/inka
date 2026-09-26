@@ -342,7 +342,7 @@ pub(crate) fn desktop() -> &'static Help {
         options: &[
             (
                 "-o, --output <dir>",
-                "output app directory (default: deno.json desktop.output.linux, else the app name)",
+                "output app directory (default: deno.json desktop.output.{linux,windows}, else the app name)",
             ),
             (
                 "--name <name>",
@@ -358,7 +358,7 @@ pub(crate) fn desktop() -> &'static Help {
             ),
             (
                 "--icon <png>",
-                "application icon (default: deno.json desktop.app.icons.linux)",
+                "application icon (default: deno.json desktop.app.icons.{linux,windows}; embedded into the .exe on Windows)",
             ),
             (
                 "--payload <dir>",
@@ -399,7 +399,7 @@ pub(crate) fn desktop() -> &'static Help {
             ),
             (
                 "--installer",
-                "also emit <App>.tar.gz + <App>.install.sh (script installer)",
+                "also emit the script installer (Linux: <App>.tar.gz + <App>.install.sh; not yet supported on Windows)",
             ),
             (
                 "--engine-base <url>",

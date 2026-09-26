@@ -105,9 +105,8 @@ of the same base.
 
 `install.sh --help` lists everything.
 
-> Only Linux/`x86_64` is published today. On Windows, install **WSL2** with
-> Ubuntu and run the same command inside it. macOS is not published yet — build
-> from source (below).
+> Linux and Windows `x86_64` are published (`install.sh` / `install.ps1`).
+> macOS is not published yet — build from source (below).
 
 ## Verify
 
@@ -136,8 +135,11 @@ Desktop apps reuse the same runtime (the release engine is built with
 `--features desktop`) and the installed shim:
 
 ```sh
-inka desktop main.ts --name MyApp   # -> MyApp/ + MyApp.tar.gz
+inka desktop main.ts --name MyApp   # Linux -> MyApp/ + MyApp.tar.gz
 ./MyApp/MyApp
+
+# Windows -> MyApp\ (MyApp.exe + MyApp.dll) + MyApp.zip
+.\MyApp\MyApp.exe
 ```
 
 See [Desktop apps](desktop.md).

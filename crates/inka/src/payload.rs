@@ -49,3 +49,17 @@ pub(crate) fn embed(image: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
 pub(crate) fn embed(_image: &[u8], _payload: &[u8]) -> Result<Vec<u8>, String> {
     Err("inka artifacts are not supported on this platform".to_string())
 }
+
+/// Embed `icon` (PNG or ICO bytes) as a Windows PE icon resource, returning the
+/// new image. Only PE images carry icons; unix ships a co-located PNG instead.
+#[cfg(target_os = "windows")]
+pub(crate) fn set_icon(image: &[u8], icon: &[u8]) -> Result<Vec<u8>, String> {
+    let mut out = Vec::new();
+    libsui::PortableExecutable::from(image)
+        .map_err(|e| format!("cannot parse PE image: {e}"))?
+        .set_icon(icon)
+        .map_err(|e| format!("cannot embed icon: {e}"))?
+        .build(&mut out)
+        .map_err(|e| format!("cannot write PE image: {e}"))?;
+    Ok(out)
+}

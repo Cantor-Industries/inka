@@ -300,9 +300,6 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
 /// Download (once), checksum-verify, and unpack the pinned laufey backend into
 /// inka's cache, returning the backend executable path.
 fn download_laufey(backend: &str) -> Result<PathBuf, String> {
-    if platform::laufey_target().contains("windows") {
-        return Err("Windows backends are not supported yet".to_string());
-    }
     let cache = inka_laufey_cache()
         .ok_or_else(|| "cannot determine a cache directory (set HOME)".to_string())?;
     let dir = cache
@@ -337,17 +334,9 @@ fn download_laufey(backend: &str) -> Result<PathBuf, String> {
             "checksum mismatch for {archive}: expected {expected}, got {actual}"
         ));
     }
-    let status = Command::new("tar")
-        .arg("-xzf")
-        .arg(&tmp)
-        .args(["--no-same-owner", "--no-same-permissions", "-C"])
-        .arg(&dir)
-        .status()
-        .map_err(|e| format!("failed to run tar: {e}"))?;
+    let extract = crate::update::extract_toolchain(&archive, &tmp, &dir);
     let _ = fs::remove_file(&tmp);
-    if !status.success() {
-        return Err(format!("tar extraction failed for {archive}"));
-    }
+    extract?;
     let found = find_file(&dir, &exe)
         .ok_or_else(|| format!("'{exe}' not found in the {archive} archive"))?;
     let _ = fs::write(dir.join(".downloaded"), format!("v{LAUFEY_VERSION}\n"));
@@ -487,10 +476,20 @@ fn apply_config_defaults(a: &mut Args, cfg: crate::config::DesktopConfig) {
         a.backend = cfg.backend;
     }
     if a.output.is_none() {
-        a.output = cfg.output_linux.map(|o| base.join(o));
+        let cfg_output = if cfg!(windows) {
+            cfg.output_windows
+        } else {
+            cfg.output_linux
+        };
+        a.output = cfg_output.map(|o| base.join(o));
     }
     if a.icon.is_none() {
-        a.icon = cfg.icon_linux.map(|i| base.join(i));
+        let cfg_icon = if cfg!(windows) {
+            cfg.icon_windows
+        } else {
+            cfg.icon_linux
+        };
+        a.icon = cfg_icon.map(|i| base.join(i));
     }
     if a.app_version.is_none() {
         a.app_version = cfg.version;
@@ -1050,12 +1049,14 @@ pub fn cmd_desktop(args: &[String]) {
 
     let backend_path = resolve_backend(&backend);
     let shim = resolve_shim();
-    let launcher = out.join(&app_name);
+    // `<App>.exe` on Windows, `<App>` on unix: laufey derives the backend
+    // library name from its own stem (`<App>.dll` / `<App>.so`).
+    let launcher = out.join(format!("{app_name}{}", platform::exe_suffix()));
     let runtime_so = out.join(format!("{app_name}{}", platform::runtime_lib_suffix()));
 
     // Clear a previous build (only one we generated), then stage the backend.
-    // A CEF backend ships a whole directory (libcef.so + resources) whose files
-    // must sit next to the launcher: laufey's RPATH is `.:$ORIGIN`.
+    // A CEF backend ships a whole directory (libcef/.dll + resources) whose
+    // files must sit next to the launcher: laufey's RPATH is `.:$ORIGIN`.
     if let Err(e) = reserve_app_dir(&out) {
         fail(&e);
     }
@@ -1072,7 +1073,8 @@ pub fn cmd_desktop(args: &[String]) {
         fail(&e);
     }
     if launcher != staged_backend {
-        // Rename the backend to the app name so laufey auto-loads `<App>.so`.
+        // Rename the backend to the app name so laufey auto-loads the co-located
+        // `<App>.so`/`<App>.dll` shim.
         fs::rename(&staged_backend, &launcher).unwrap_or_else(|e| {
             fail(&format!(
                 "cannot rename backend to {}: {e}",
@@ -1083,10 +1085,10 @@ pub fn cmd_desktop(args: &[String]) {
     set_exec(&launcher);
     set_exec(&runtime_so);
 
-    // Runtime tuple marker: the shim loads `libinka_runtime-<tuple>.so` from the
-    // inka data dir. Explicit env wins; otherwise use the newest installed
-    // runtime (the release runtime is desktop-enabled). Without either, the app
-    // needs `$INKA_DESKTOP_RUNTIME` at launch.
+    // Runtime tuple marker: the shim loads `libinka_runtime-<tuple>.{so,dll}`
+    // from the inka data dir. Explicit env wins; otherwise use the newest
+    // installed runtime (the release runtime is desktop-enabled). Without
+    // either, the app needs `$INKA_DESKTOP_RUNTIME` at launch.
     let runtime_tuple = installed_runtime_tuple();
     match &runtime_tuple {
         Some(tuple) => {
@@ -1099,18 +1101,30 @@ pub fn cmd_desktop(args: &[String]) {
 
     if let Some(icon) = &a.icon {
         if icon.is_file() {
-            let _ = fs::copy(icon, out.join("AppIcon.png"));
+            // Windows embeds the icon into the app exe (PE resources); unix
+            // ships `AppIcon.png` next to the app.
+            #[cfg(windows)]
+            embed_app_icon(&launcher, icon);
+            #[cfg(not(windows))]
+            {
+                let _ = fs::copy(icon, out.join("AppIcon.png"));
+            }
         } else {
             ui::warn(format!("icon not found: {}", icon.display()));
         }
     }
+    // A `.desktop` entry is a Linux desktop-integration file; Windows uses the
+    // exe's embedded icon and (later) an MSI shortcut.
+    #[cfg(unix)]
     let _ = fs::write(
         out.join(format!("{id}.desktop")),
         desktop_entry(&app_name, &id),
     );
 
     // ---- artifacts ----
-    let installer_outputs = if a.installer {
+    // Linux `--installer` builds a POSIX `install.sh` + tarball. Windows ships
+    // the portable `.zip` only for now; an MSI installer is planned.
+    let installer_outputs = if a.installer && cfg!(unix) {
         let runtime = match runtime_tuple.as_deref() {
             Some(t) => t,
             None => fail(
@@ -1132,7 +1146,80 @@ pub fn cmd_desktop(args: &[String]) {
             Err(e) => fail(&e),
         }
     } else {
-        // Runnable app directory, tarred as-is (CEF via symlinks).
+        if a.installer {
+            ui::warn(
+                "--installer is not supported on Windows yet (an MSI is planned); \
+                 emitting the portable .zip",
+            );
+        }
+        // Runnable app directory, packaged as a portable archive: `.zip` on
+        // Windows, `.tar.gz` on unix (CEF via symlinks there).
+        if let Err(e) = write_portable_archive(&out) {
+            ui::warn(e);
+        }
+        None
+    };
+
+    ui::section("App");
+    ui::row("name", &app_name);
+    ui::row("launcher", launcher.display());
+    ui::row("runtime", runtime_so.display());
+    ui::row("payload", format!("{} file(s) embedded", files.len()));
+    ui::row("backend", backend_path.display());
+    if cef_bundled {
+        ui::row("runtime files", cef_runtime_row());
+    }
+    ui::row("id", &id);
+    if let Some(o) = &installer_outputs {
+        ui::row("installer", o.script.display());
+        ui::row("tarball", o.tarball.display());
+        ui::row("sha256", o.sha256.display());
+    }
+    ui::status_ok(format!("packaged {}", out.display()));
+}
+
+#[cfg(windows)]
+fn cef_runtime_row() -> &'static str {
+    "laufey + shared CEF (copied)"
+}
+
+#[cfg(not(windows))]
+fn cef_runtime_row() -> &'static str {
+    "laufey + shared CEF (symlinked)"
+}
+
+/// Embed `icon` (PNG/ICO) into the PE at `exe` in place, warning on failure.
+#[cfg(windows)]
+fn embed_app_icon(exe: &Path, icon: &Path) {
+    let result = fs::read(exe)
+        .map_err(|e| e.to_string())
+        .and_then(|image| {
+            let icon_bytes = fs::read(icon).map_err(|e| e.to_string())?;
+            crate::payload::set_icon(&image, &icon_bytes)
+        })
+        .and_then(|patched| fs::write(exe, patched).map_err(|e| e.to_string()));
+    if let Err(e) = result {
+        ui::warn(format!("could not embed the app icon: {e}"));
+    }
+}
+
+/// Package the runnable app dir as a portable archive: `<App>.zip` on Windows,
+/// `<App>.tar.gz` on unix. Best-effort: warns (does not fail) on error, since
+/// the app dir itself is still usable.
+fn write_portable_archive(out: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let zip_path = out.with_extension("zip");
+        zip_dir(out, &zip_path).map_err(|e| {
+            format!(
+                "could not write {}: {e}; app dir is still usable",
+                zip_path.display()
+            )
+        })?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
         let tarball = out.with_extension("tar.gz");
         let parent = match out.parent() {
             Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -1150,29 +1237,63 @@ pub fn cmd_desktop(args: &[String]) {
             .arg(&dir_name)
             .status();
         match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => ui::warn(format!("tar exited with {s}; app dir is still usable")),
-            Err(e) => ui::warn(format!("could not run tar: {e}")),
+            Ok(s) if s.success() => Ok(()),
+            Ok(s) => Err(format!("tar exited with {s}; app dir is still usable")),
+            Err(e) => Err(format!("could not run tar: {e}")),
         }
-        None
-    };
+    }
+}
 
-    ui::section("App");
-    ui::row("name", &app_name);
-    ui::row("launcher", launcher.display());
-    ui::row("runtime", runtime_so.display());
-    ui::row("payload", format!("{} file(s) embedded", files.len()));
-    ui::row("backend", backend_path.display());
-    if cef_bundled {
-        ui::row("runtime files", "laufey + shared CEF (symlinked)");
+/// Zip the `src` directory (its own name becomes the top-level entry) into
+/// `dest`, using `/` separators. Used for the Windows portable artifact.
+#[cfg(windows)]
+fn zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
+    use std::io::Write;
+
+    fn walk(
+        base: &Path,
+        dir: &Path,
+        zip: &mut zip::ZipWriter<fs::File>,
+        opts: zip::write::SimpleFileOptions,
+    ) -> Result<(), String> {
+        for ent in fs::read_dir(dir)
+            .map_err(|e| format!("cannot read {}: {e}", dir.display()))?
+            .flatten()
+        {
+            let p = ent.path();
+            let rel = p
+                .strip_prefix(base)
+                .map_err(|_| "path outside the archive root".to_string())?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if p.is_dir() {
+                zip.add_directory(format!("{rel}/"), opts)
+                    .map_err(|e| format!("zip {rel}: {e}"))?;
+                walk(base, &p, zip, opts)?;
+            } else if p.is_file() {
+                zip.start_file(rel, opts)
+                    .map_err(|e| format!("zip {rel}: {e}"))?;
+                let data = fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
+                zip.write_all(&data)
+                    .map_err(|e| format!("zip {rel}: {e}"))?;
+            }
+        }
+        Ok(())
     }
-    ui::row("id", &id);
-    if let Some(o) = &installer_outputs {
-        ui::row("installer", o.script.display());
-        ui::row("tarball", o.tarball.display());
-        ui::row("sha256", o.sha256.display());
-    }
-    ui::status_ok(format!("packaged {}", out.display()));
+
+    let parent = match src.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let file =
+        fs::File::create(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let opts = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    walk(parent, src, &mut zip, opts)?;
+    zip.finish()
+        .map_err(|e| format!("cannot finalize zip: {e}"))?;
+    Ok(())
 }
 
 /// Collect a staging directory into archive entries (relative paths, `/`
@@ -1321,6 +1442,7 @@ fn build_entry(_cwd: &Path, _entry: &Path, payload: &Path, a: &Args) -> Result<(
     }
 }
 
+#[cfg(unix)]
 fn desktop_entry(app_name: &str, id: &str) -> String {
     format!(
         "[Desktop Entry]\nType=Application\nName={app_name}\nExec={app_name}\nIcon=AppIcon\nStartupWMClass={id}\nCategories=Utility;\n"
@@ -1347,14 +1469,16 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
 
 /// Stage the laufey backend into the app dir and return `(staged path, is_cef)`.
 ///
-/// A CEF backend directory carries `libcef.so` plus Chromium resources
-/// (`*.pak`, `icudtl.dat`, `locales/`, …) that CEF resolves next to the
-/// launcher; laufey's RPATH is `.:$ORIGIN`, so they must be reachable from the
-/// app dir. Those files are shared per machine (see `crate::cef`) and symlinked
-/// in; if sharing is unavailable, fall back to a self-contained copy. Other
-/// backends link system libraries and ship only the binary — copy just that, so
-/// a dev override (`INKA_LAUFEY_BACKEND`/`LAUFEY_DEV_DIR`) never drags in a
-/// whole `target/release`.
+/// A CEF backend directory carries `libcef.so`/`libcef.dll` plus Chromium
+/// resources (`*.pak`, `icudtl.dat`, `locales/`, …) that CEF resolves next to
+/// the launcher; laufey's RPATH is `.:$ORIGIN`, so they must be reachable from
+/// the app dir. Those files are shared per machine (see `crate::cef`) and
+/// symlinked in on unix; if sharing is unavailable (always on Windows, or if
+/// linking fails), fall back to a self-contained copy. Other backends link
+/// system libraries and ship only the binary (`laufey_webview.exe` is
+/// self-contained) — copy just that, so a dev override
+/// (`INKA_LAUFEY_BACKEND`/`LAUFEY_DEV_DIR`) never drags in a whole
+/// `target/release`.
 fn stage_backend(backend_path: &Path, out: &Path) -> Result<(PathBuf, bool), String> {
     stage_backend_in(backend_path, out, None)
 }
@@ -1378,7 +1502,7 @@ fn stage_backend_in(
         .ok_or_else(|| format!("backend has no file name: {}", backend_path.display()))?
         .to_os_string();
     let dest = out.join(&exe_name);
-    let cef = dir.join("libcef.so").is_file();
+    let cef = dir.join(platform::cef_lib_name()).is_file();
     if !cef {
         fs::copy(backend_path, &dest)
             .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
@@ -1528,6 +1652,41 @@ mod tests {
         let decoded = inka_format::read_section_payload(&payload).unwrap();
         assert_eq!(decoded.manifest, manifest.as_bytes());
         assert_eq!(inka_format::parse_archive(decoded.archive).unwrap(), files);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn zip_dir_packages_the_app_tree() {
+        use std::io::Read;
+        let base = scratch("zipdir");
+        let app = base.join("MyApp");
+        fs::create_dir_all(app.join("locales")).unwrap();
+        fs::write(app.join("MyApp.exe"), b"exe").unwrap();
+        fs::write(app.join("MyApp.dll"), b"shim").unwrap();
+        fs::write(app.join("locales/en-US.pak"), b"pak").unwrap();
+        let dest = base.join("MyApp.zip");
+        zip_dir(&app, &dest).unwrap();
+
+        let f = fs::File::open(&dest).unwrap();
+        let mut zip = zip::ZipArchive::new(f).unwrap();
+        let mut names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "MyApp/MyApp.dll",
+                "MyApp/MyApp.exe",
+                "MyApp/locales/",
+                "MyApp/locales/en-US.pak",
+            ]
+        );
+        let mut exe = zip.by_name("MyApp/MyApp.exe").unwrap();
+        let mut buf = Vec::new();
+        exe.read_to_end(&mut buf).unwrap();
+        assert_eq!(buf, b"exe");
+        let _ = fs::remove_dir_all(&base);
     }
 
     #[cfg(unix)]

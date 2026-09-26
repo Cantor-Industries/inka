@@ -1,9 +1,9 @@
 // Shared, per-machine CEF runtime for `inka desktop --backend cef`.
 //
-// The laufey CEF backend links `libcef.so` with `RPATH=.:$ORIGIN` and reads its
-// Chromium resources from beside the executable, so those files must be
-// reachable from every app dir. Instead of copying ~360 MB per app, inka keeps
-// one versioned copy under the XDG data dir and symlinks it into each app:
+// The laufey CEF backend links `libcef.so`/`libcef.dll` (RPATH=.:$ORIGIN) and
+// reads its Chromium resources from beside the executable, so those files must
+// be reachable from every app dir. Instead of copying ~360 MB per app, inka
+// keeps one versioned copy under the data dir and links/copies it in:
 //
 //   ~/.local/share/cef/<laufey-version>/<target>/
 //
@@ -125,7 +125,7 @@ fn copy_cef_runtime(src: &Path, backend_exe: &OsStr, dest: &Path) -> Result<(), 
 fn shared_installed(shared: &Path) -> bool {
     let expected = format!("v{LAUFEY_VERSION} {}", platform::laufey_target());
     match fs::read_to_string(shared.join(INSTALLED_MARKER)) {
-        Ok(marker) if marker.trim() == expected => shared.join("libcef.so").is_file(),
+        Ok(marker) if marker.trim() == expected => shared.join(platform::cef_lib_name()).is_file(),
         _ => false,
     }
 }
@@ -155,9 +155,10 @@ pub(crate) fn ensure_shared_cef_at(
     }
 
     copy_cef_runtime(src, backend_exe, &tmp)?;
-    if !tmp.join("libcef.so").is_file() {
+    let cef_lib = platform::cef_lib_name();
+    if !tmp.join(cef_lib).is_file() {
         let _ = fs::remove_dir_all(&tmp);
-        return Err(format!("no libcef.so to share from {}", src.display()));
+        return Err(format!("no {cef_lib} to share from {}", src.display()));
     }
     // Replace any stale/partial install atomically.
     let _ = fs::remove_dir_all(shared);
@@ -250,7 +251,7 @@ mod tests {
     fn fake_backend(dir: &Path) {
         fs::create_dir_all(dir.join("locales")).unwrap();
         fs::write(dir.join("laufey"), b"exe").unwrap();
-        fs::write(dir.join("libcef.so"), b"cef").unwrap();
+        fs::write(dir.join(platform::cef_lib_name()), b"cef").unwrap();
         fs::write(dir.join("chrome-sandbox"), b"sandbox").unwrap();
         fs::write(dir.join("locales/en-US.pak"), b"pak").unwrap();
         fs::write(dir.join(".downloaded"), b"v\n").unwrap();
@@ -304,7 +305,7 @@ mod tests {
 
         ensure_shared_cef_at(&backend, &backend.join("laufey"), &shared).unwrap();
 
-        assert!(shared.join("libcef.so").is_file());
+        assert!(shared.join(platform::cef_lib_name()).is_file());
         assert!(shared.join("locales/en-US.pak").is_file());
         assert!(shared.join("chrome-sandbox").is_file());
         assert!(!shared.join("laufey").exists(), "launcher is not shared");

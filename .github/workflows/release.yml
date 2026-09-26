@@ -5,9 +5,10 @@
 #     shim) and the heavy runtime, stages a toolchain tarball + engine assets +
 #     versions.json, and smoke-tests the whole release through install.sh.
 #   - `build-windows` (GitHub-hosted `windows-latest`): builds the Windows
-#     toolchain + core runtime (no `desktop` feature), stages a toolchain `.zip`
-#     + runtime `.dll` + install.ps1, and merges `versions.json` into a
-#     per-target map. Uploads its assets as a workflow artifact.
+#     toolchain + desktop-enabled runtime, mirrors the pinned Windows laufey
+#     backend, stages a toolchain `.zip` + runtime `.dll` + install.ps1, and
+#     merges `versions.json` into a per-target map. Uploads its assets as a
+#     workflow artifact.
 #   - `publish` (self-hosted Linux, contents: write): downloads the Windows
 #     assets, then runs the release action for both platforms. Its `needs` make
 #     a Windows failure block the release.
@@ -16,9 +17,10 @@
 #   - Linux `runs-on: self-hosted`: CARGO_HOME/CARGO_TARGET_DIR on a big disk,
 #     network (npm/deno for the smoke test). Both Linux jobs share the filesystem
 #     and the `/tmp/inka-release-<run_id>` stage path.
-#   - Windows runs on GitHub-hosted `windows-latest` (MSVC, Rust, `pwsh` already
-#     present; the core runtime needs no libclang). Windows assets reach
-#     `publish` through `actions/upload-artifact`/`download-artifact`.
+#   - Windows runs on GitHub-hosted `windows-latest` (MSVC, Rust, `pwsh`, LLVM,
+#     and Git Bash already present; the desktop runtime needs libclang). Windows
+#     assets reach `publish` through
+#     `actions/upload-artifact`/`download-artifact`.
 
 name: release
 
@@ -207,10 +209,10 @@ jobs:
           if-no-files-found: error
           path: ${{ env.STAGE }}/versions.json
 
-  # Windows core toolchain + runtime, on GitHub-hosted `windows-latest`. Built
-  # without the `desktop` feature: the core CLI (`run`/`build`/`update`) does not
-  # need laufey, so no libclang/bindgen is required. The Windows desktop runtime
-  # comes in a later release.
+  # Windows toolchain + desktop-enabled runtime, on GitHub-hosted
+  # `windows-latest`. The shared runtime carries `--features desktop` (laufey's
+  # bindgen needs libclang, provided by the image), and the pinned laufey
+  # webview backend is mirrored so `inka desktop` can install offline.
   build-windows:
     needs: build
     runs-on: windows-latest
@@ -242,12 +244,13 @@ jobs:
         env:
           INKA_BUILD_VERSION: ${{ needs.build.outputs.rel }}
           INKA_BUILD_TAG: ${{ github.ref_name }}
+          LIBCLANG_PATH: C:\Program Files\LLVM\bin
         run: |
           $env:INKA_BUILD_COMMIT = $env:GITHUB_SHA.Substring(0, 7)
           cargo build --locked --release -p inka --features bundle
           cargo build --locked --release -p inka-launcher
           cargo build --locked --release -p inka-desktop-shim
-          cargo build --locked --release -p inka-runtime
+          cargo build --locked --release -p inka-runtime --features desktop
 
       - name: Stage assets
         run: |
@@ -274,6 +277,25 @@ jobs:
           $rtSha = (Get-FileHash -LiteralPath (Join-Path $stage $rtName) -Algorithm SHA256).Hash.ToLower()
           Set-Content -LiteralPath (Join-Path $stage "$rtName.sha256") -Value $rtSha
 
+          # Mirror the pinned Windows laufey backend so `inka desktop` installs
+          # offline and is checksum-verified against the inka trust anchor.
+          # `laufey-asset.sh` reads the anchor from desktop.rs; Git Bash ships on
+          # the image.
+          $lVersion = (Select-String -Path 'crates/inka/src/desktop.rs' `
+            -Pattern 'LAUFEY_VERSION: &str = "([0-9][0-9.]*)"').Matches[0].Groups[1].Value
+          $assetLine = [string](bash scripts/ci/laufey-asset.sh webview x86_64-pc-windows-msvc)
+          $assetParts = $assetLine.Trim() -split '\s+'
+          $webArchive = $assetParts[0]
+          $webSha = $assetParts[1]
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://github.com/littledivy/laufey/releases/download/v$lVersion/$webArchive" `
+            -OutFile (Join-Path $stage $webArchive)
+          $got = (Get-FileHash -LiteralPath (Join-Path $stage $webArchive) -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $webSha) {
+            throw "checksum mismatch for $webArchive (pinned $webSha, got $got)"
+          }
+          Set-Content -LiteralPath (Join-Path $stage "$webArchive.sha256") -Value $got
+
           # Merge the Linux record with a per-target map. Top-level keys stay
           # pointing at Linux so install.sh / older `inka update` keep working.
           $doc = Get-Content -LiteralPath (Join-Path $stage 'linux/versions.json') -Raw | ConvertFrom-Json
@@ -288,6 +310,13 @@ jobs:
             toolchain      = [ordered]@{ version = $rel; target = 'x86_64-pc-windows-msvc'; archive = $tc; sha256 = $tcSha }
             runtime        = $runtime
             runtime_sha256 = $rtSha
+            laufey         = [ordered]@{
+              version  = $lVersion
+              target   = 'x86_64-pc-windows-msvc'
+              backends = [ordered]@{
+                webview = [ordered]@{ archive = $webArchive; sha256 = $webSha }
+              }
+            }
           }
           $doc | Add-Member -NotePropertyName targets -NotePropertyValue $targets -Force
           $doc | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $stage 'versions.json')
@@ -305,6 +334,8 @@ jobs:
             ${{ runner.temp }}\inka-release-${{ github.run_id }}\inka-toolchain-*.zip.sha256
             ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll
             ${{ runner.temp }}\inka-release-${{ github.run_id }}\libinka_runtime-*.dll.sha256
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\laufey-*.zip
+            ${{ runner.temp }}\inka-release-${{ github.run_id }}\laufey-*.zip.sha256
             ${{ runner.temp }}\inka-release-${{ github.run_id }}\install.ps1
             ${{ runner.temp }}\inka-release-${{ github.run_id }}\versions.json
 
@@ -345,6 +376,8 @@ jobs:
             ${{ env.STAGE }}/libinka_runtime-${{ needs.build.outputs.runtime }}.dll.sha256
             ${{ env.STAGE }}/laufey-*.tar.gz
             ${{ env.STAGE }}/laufey-*.tar.gz.sha256
+            ${{ env.STAGE }}/laufey-*.zip
+            ${{ env.STAGE }}/laufey-*.zip.sha256
             ${{ env.STAGE }}/versions.json
             ${{ env.STAGE }}/install.sh
             ${{ env.STAGE }}/install.ps1

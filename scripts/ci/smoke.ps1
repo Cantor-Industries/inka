@@ -72,6 +72,28 @@ try {
     $out = & $artifact
     if ($out -notmatch 'smoke-artifact') { Fail "artifact output missing: $out" }
 
+    Info 'inka desktop packaging (laufey from the staged mirror)'
+    # Seed the laufey cache from the mirrored Windows archive so packaging does
+    # not reach laufey's host; `versions.json` carries the version/archive name.
+    $doc = Get-Content -LiteralPath (Join-Path $Stage 'versions.json') -Raw | ConvertFrom-Json
+    $winLaufey = $doc.targets.'x86_64-pc-windows-msvc'.laufey
+    $backendDir = Join-Path $scratch (Join-Path $winLaufey.version `
+        (Join-Path 'webview' 'x86_64-pc-windows-msvc'))
+    New-Item -ItemType Directory -Force -Path $backendDir | Out-Null
+    Expand-Archive -LiteralPath (Join-Path $Stage $winLaufey.backends.webview.archive) `
+        -DestinationPath $backendDir -Force
+    Set-Content -LiteralPath (Join-Path $backendDir '.downloaded') -Value "v$($winLaufey.version)"
+    $env:INKA_LAUFEY_CACHE = $scratch
+    $deskDist = Join-Path $apps 'smoke-desktop'
+    & $inka desktop simple.js --backend webview --name SmokeApp -o $deskDist
+    if ($LASTEXITCODE -ne 0) { Fail "desktop exited $LASTEXITCODE" }
+    foreach ($f in @('SmokeApp.exe', 'SmokeApp.dll', 'runtime-version')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $deskDist $f))) {
+            Fail "desktop packaging missing $f"
+        }
+    }
+    if (-not (Test-Path -LiteralPath "$deskDist.zip")) { Fail 'desktop packaging missing the .zip' }
+
     Info 'inka update is current (runtime)'
     $out = (& $inka update --from $Stage --no-toolchain) -join "`n"
     if ($out -notmatch 'is current' -and $out -notmatch 'up to date') {

@@ -552,9 +552,15 @@ fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
     }
 }
 
-/// Extract a fetched toolchain archive into `dest`. Windows toolchains ship as
-/// `.zip`; unix keeps `.tar.gz`, extracted with the system `tar` (as before).
-fn extract_toolchain(archive_name: &str, archive_path: &Path, dest: &Path) -> Result<(), String> {
+/// Extract a fetched archive into `dest`, dispatching on the file extension:
+/// `.zip` (Windows toolchains and laufey backends) via the `zip` crate,
+/// otherwise `tar.gz` via the system `tar`. Shared with `inka desktop`'s laufey
+/// download.
+pub(crate) fn extract_toolchain(
+    archive_name: &str,
+    archive_path: &Path,
+    dest: &Path,
+) -> Result<(), String> {
     if archive_name.to_ascii_lowercase().ends_with(".zip") {
         extract_zip(archive_path, dest)
     } else {

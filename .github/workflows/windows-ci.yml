@@ -99,5 +99,26 @@ jobs:
           }
           & "$bin/inka.exe" doctor
 
-      # Later: `inka desktop . --backend webview` packaging assertions, then
-      # upload the toolchain zip + runtime dll as workflow artifacts.
+      # `inka desktop` packaging (no GUI launch): the backend is downloaded and
+      # checksum-verified, the shim is embedded, and the portable `.zip` is
+      # produced. `resolve_shim` expects the released shim name next to inka.exe.
+      - name: Smoke (desktop packaging)
+        run: |
+          $bin = "target/release"
+          Copy-Item "$bin/inka_desktop_shim.dll" "$bin/libinka_desktop_shim.dll" -Force
+          New-Item -ItemType Directory -Force -Path deskapp | Out-Null
+          Set-Content -Path deskapp/index.js -Value 'console.log("desk");'
+          & "$bin/inka.exe" desktop deskapp/index.js --backend webview `
+            --name DeskApp -o desk-dist
+          foreach ($f in @("DeskApp.exe", "DeskApp.dll", "runtime-version")) {
+            if (-not (Test-Path (Join-Path "desk-dist" $f))) {
+              throw "desktop packaging missing $f"
+            }
+          }
+          if (-not (Test-Path "desk-dist.zip")) { throw "missing desk-dist.zip" }
+          if ((Get-Item "desk-dist/DeskApp.dll").Length -lt 1024) {
+            throw "shim looks too small"
+          }
+
+      # Later: upload the toolchain zip + runtime dll + laufey zip as workflow
+      # artifacts, and add a CEF packaging smoke.

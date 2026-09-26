@@ -645,8 +645,12 @@ pub(crate) struct DesktopConfig {
     pub identifier: Option<String>,
     /// Linux icon path (relative to `base_dir`).
     pub icon_linux: Option<String>,
+    /// Windows icon path (relative to `base_dir`).
+    pub icon_windows: Option<String>,
     pub backend: Option<String>,
     pub output_linux: Option<String>,
+    /// Windows output directory (relative to `base_dir`).
+    pub output_windows: Option<String>,
     pub release_base: Option<String>,
     pub error_reporting: Option<String>,
     /// Top-level `version`, used as the auto-update app version default.
@@ -772,9 +776,15 @@ pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
         "desktop.app.icons.linux",
         &mut warns,
     );
+    out.icon_windows = desktop_icon(
+        icons.and_then(|i| i.get("windows")),
+        "desktop.app.icons.windows",
+        &mut warns,
+    );
     out.backend = desktop_string(Some(block), "backend", "desktop.backend", &mut warns);
     let output = block.get("output");
     out.output_linux = desktop_string(output, "linux", "desktop.output.linux", &mut warns);
+    out.output_windows = desktop_string(output, "windows", "desktop.output.windows", &mut warns);
     out.release_base = desktop_string(
         block.get("release"),
         "baseUrl",
@@ -788,25 +798,26 @@ pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
         &mut warns,
     );
 
-    // mac/win fields are parsed for Deno parity but unused: only Linux
-    // packaging is implemented. Point that out rather than silently ignoring.
+    // macOS packaging is unimplemented, so flag macos-only keys rather than
+    // silently ignoring them. linux/windows keys are host-selected and normal
+    // to set side by side, so neither is warned about.
     if out.output_linux.is_none()
-        && (output.and_then(|o| o.get("macos")).is_some()
-            || output.and_then(|o| o.get("windows")).is_some())
+        && out.output_windows.is_none()
+        && output.and_then(|o| o.get("macos")).is_some()
     {
         warns.push(
-            "desktop.output.macos/windows are ignored (only Linux is implemented); \
-             set desktop.output.linux"
+            "desktop.output.macos is ignored (macOS packaging is not implemented); \
+             set desktop.output.linux or desktop.output.windows"
                 .to_string(),
         );
     }
     if out.icon_linux.is_none()
-        && (icons.and_then(|i| i.get("macos")).is_some()
-            || icons.and_then(|i| i.get("windows")).is_some())
+        && out.icon_windows.is_none()
+        && icons.and_then(|i| i.get("macos")).is_some()
     {
         warns.push(
-            "desktop.app.icons.macos/windows are ignored (only Linux is implemented); \
-             set desktop.app.icons.linux"
+            "desktop.app.icons.macos is ignored (macOS packaging is not implemented); \
+             set desktop.app.icons.linux or desktop.app.icons.windows"
                 .to_string(),
         );
     }
@@ -1777,10 +1788,10 @@ mod tests {
     "app": {
       "name": "Acme Mail",
       "identifier": "com.acme.mail",
-      "icons": { "linux": "assets/icon.png" }
+      "icons": { "linux": "assets/icon.png", "windows": "assets/icon.ico" }
     },
     "backend": "cef",
-    "output": { "linux": "dist/mail" },
+    "output": { "linux": "dist/mail", "windows": "dist/mail-win" },
     "release": { "baseUrl": "https://dl.acme.test/mail" },
     "errorReporting": { "url": "https://err.acme.test" }
   }
@@ -1791,8 +1802,10 @@ mod tests {
         assert_eq!(cfg.app_name.as_deref(), Some("Acme Mail"));
         assert_eq!(cfg.identifier.as_deref(), Some("com.acme.mail"));
         assert_eq!(cfg.icon_linux.as_deref(), Some("assets/icon.png"));
+        assert_eq!(cfg.icon_windows.as_deref(), Some("assets/icon.ico"));
         assert_eq!(cfg.backend.as_deref(), Some("cef"));
         assert_eq!(cfg.output_linux.as_deref(), Some("dist/mail"));
+        assert_eq!(cfg.output_windows.as_deref(), Some("dist/mail-win"));
         assert_eq!(
             cfg.release_base.as_deref(),
             Some("https://dl.acme.test/mail")
@@ -1892,7 +1905,7 @@ mod tests {
     }
 
     #[test]
-    fn desktop_config_warns_on_platform_only_fields() {
+    fn desktop_config_parses_windows_and_warns_on_macos() {
         let cwd = scratch_dir("desktop-platform-only");
         let _ = std::fs::remove_dir_all(&cwd);
         write(
@@ -1905,9 +1918,13 @@ mod tests {
         );
         let (cfg, warns) = desktop_config(&cwd);
         assert_eq!(cfg.output_linux, None);
-        assert_eq!(cfg.icon_linux, None);
+        // Windows keys are parsed (and valid side by side with linux ones).
+        assert_eq!(cfg.output_windows, None);
+        assert_eq!(cfg.icon_windows.as_deref(), Some("icon.ico"));
+        // Only the unimplemented macOS output warns; the windows icon is used,
+        // so it does not.
         assert!(has_note(&warns, "desktop.output.macos"), "{warns:?}");
-        assert!(has_note(&warns, "desktop.app.icons.macos"), "{warns:?}");
+        assert!(!has_note(&warns, "desktop.app.icons.macos"), "{warns:?}");
         let _ = std::fs::remove_dir_all(&cwd);
     }
 }
