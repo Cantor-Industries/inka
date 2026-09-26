@@ -568,7 +568,13 @@ pub(crate) fn create(app_dir: &Path, msi_path: &Path, spec: &Spec) -> Result<(),
             )
             .map_err(|e| format!("cannot create Icon table: {e}"))?;
     }
-    for table in ["InstallExecuteSequence", "InstallUISequence"] {
+    // `AdminExecuteSequence` drives `msiexec /a` (administrative install /
+    // extraction); without it `/a` runs no actions and extracts nothing.
+    for table in [
+        "InstallExecuteSequence",
+        "InstallUISequence",
+        "AdminExecuteSequence",
+    ] {
         package
             .create_table(
                 table,
@@ -752,6 +758,30 @@ pub(crate) fn create(app_dir: &Path, msi_path: &Path, spec: &Spec) -> Result<(),
             ),
         )
         .map_err(|e| format!("cannot insert InstallUISequence rows: {e}"))?;
+
+    // Administrative install (`msiexec /a`): the standard admin sequence, which
+    // stands alone and so re-includes the initialization actions. `InstallFiles`
+    // extracts the embedded cabinet into `TARGETDIR`.
+    let admin_seq: &[(&str, i32)] = &[
+        ("CostInitialize", 800),
+        ("FileCost", 900),
+        ("CostFinalize", 1000),
+        ("InstallValidate", 1400),
+        ("InstallInitialize", 1500),
+        ("InstallAdminPackage", 3900),
+        ("InstallFiles", 4000),
+        ("InstallFinalize", 6600),
+    ];
+    package
+        .insert_rows(
+            Insert::into("AdminExecuteSequence").rows(
+                admin_seq
+                    .iter()
+                    .map(|(a, s)| vec![Value::Str(a.to_string()), Value::Null, Value::Int(*s)])
+                    .collect(),
+            ),
+        )
+        .map_err(|e| format!("cannot insert AdminExecuteSequence rows: {e}"))?;
 
     // Embedded cabinet stream (Media.Cabinet = "#appcab").
     {
@@ -1121,8 +1151,27 @@ mod tests {
             "Shortcut",
             "Icon",
             "InstallExecuteSequence",
+            "AdminExecuteSequence",
         ] {
             assert!(pkg.has_table(table), "missing table {table}");
+        }
+        // `msiexec /a` needs `InstallFiles` in the standalone admin sequence.
+        let admin: Vec<String> = pkg
+            .select_rows(msi::Select::table("AdminExecuteSequence"))
+            .unwrap()
+            .map(|r| r[0].as_str().unwrap().to_string())
+            .collect();
+        for action in [
+            "CostInitialize",
+            "CostFinalize",
+            "InstallAdminPackage",
+            "InstallFiles",
+            "InstallFinalize",
+        ] {
+            assert!(
+                admin.iter().any(|a| a == action),
+                "admin missing {action}: {admin:?}"
+            );
         }
         let file_rows = pkg.select_rows(msi::Select::table("File")).unwrap().len();
         assert_eq!(file_rows, 5, "exe, dll, runtime-version, ico, locale");

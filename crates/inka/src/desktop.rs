@@ -1465,18 +1465,28 @@ fn zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
         Ok(())
     }
 
-    let parent = match src.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
+    // Resolve to an absolute path first: `read_dir` on a relative `src` yields
+    // relative child paths, which `strip_prefix` against a `"."`/empty base
+    // cannot match. Absolute paths make the base/entry relationship explicit.
+    let src_abs =
+        std::path::absolute(src).map_err(|e| format!("cannot resolve {}: {e}", src.display()))?;
+    let parent = src_abs
+        .parent()
+        .ok_or_else(|| format!("{} has no parent directory", src_abs.display()))?;
+
     let file =
         fs::File::create(dest).map_err(|e| format!("cannot create {}: {e}", dest.display()))?;
     let mut zip = zip::ZipWriter::new(file);
     let opts = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated);
-    walk(parent, src, &mut zip, opts)?;
-    zip.finish()
-        .map_err(|e| format!("cannot finalize zip: {e}"))?;
+    if let Err(e) = walk(parent, &src_abs, &mut zip, opts).and_then(|()| {
+        zip.finish()
+            .map_err(|e| format!("cannot finalize zip: {e}"))
+    }) {
+        // Never leave a partial/empty archive behind.
+        let _ = fs::remove_file(dest);
+        return Err(e);
+    }
     Ok(())
 }
 
@@ -1870,6 +1880,41 @@ mod tests {
         exe.read_to_end(&mut buf).unwrap();
         assert_eq!(buf, b"exe");
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn zip_dir_handles_a_relative_source() {
+        use std::io::Read;
+        // A relative `src` (as produced by `-o desk-dist`) must still use the
+        // source dir as the top-level entry.
+        let name = format!(
+            ".zipdir-rel-{}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        );
+        let app = PathBuf::from(&name);
+        let _ = fs::remove_dir_all(&app);
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("App.exe"), b"exe").unwrap();
+        let dest = PathBuf::from(format!("{name}.zip"));
+        let _ = fs::remove_file(&dest);
+
+        zip_dir(&app, &dest).unwrap();
+        {
+            let f = fs::File::open(&dest).unwrap();
+            let mut zip = zip::ZipArchive::new(f).unwrap();
+            let mut names: Vec<String> = (0..zip.len())
+                .map(|i| zip.by_index(i).unwrap().name().to_string())
+                .collect();
+            names.sort();
+            assert_eq!(names, vec![format!("{name}/App.exe")]);
+            let mut exe = zip.by_name(&format!("{name}/App.exe")).unwrap();
+            let mut buf = Vec::new();
+            exe.read_to_end(&mut buf).unwrap();
+            assert_eq!(buf, b"exe");
+        }
+        let _ = fs::remove_file(&dest);
+        let _ = fs::remove_dir_all(&app);
     }
 
     #[cfg(unix)]
