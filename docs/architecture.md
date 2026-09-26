@@ -19,21 +19,32 @@ they are delivered as a new tuple without changing the `deno_runtime` pin.
 
 ## The artifact layout
 
-`inka build` concatenates, in order:
+`inka build` takes the `inka-launcher` executable and embeds the app payload as
+the binary section named `inka`, using Deno's `libsui`:
 
 ```
-[ launcher bytes ]
-[ payload: a bundle plus optional embedded files, or a legacy archive/source ]
-[ manifest bytes ]
-[ footer: magic + payload length + manifest length ]
+[ launcher bytes, with an appended `inka` section ]
+  section payload: [ manifest length u64 LE | manifest | archive ]
+  archive entry:   [ path length u64 LE | data length u64 LE | path | data ]
 ```
 
-The footer is the last 24 bytes: an 8-byte magic plus two little-endian `u64`
-lengths. The only magic is `INKFOOT5` — a bundle plus optional embedded files;
-`inka build` emits it and the launcher accepts nothing else.
+`libsui` grafts the section in the format-correct way per target: an ELF
+`PT_NOTE` (name `SUI`) on Linux, an `RCDATA` resource named `inka` on Windows,
+and a `__SUI` Mach-O segment on macOS (or an in-file sentinel for Intel). The
+same mechanism carries `inka desktop`'s per-app payload in the shim.
 
-At run time the launcher reads its own executable, parses the trailer, and
-extracts the archive to a temp tree when needed.
+The writer lives in the `inka` CLI (`crate::payload::embed`); the reader is
+`inka_format::locate_section`, which parses the host image's bytes directly so
+the launcher and desktop shim need no `libsui` dependency. Because the host
+image is never re-scanned or structurally rewritten, an artifact can be
+Authenticode/`codesign`-signed after packaging.
+
+At run time the launcher reads its own executable, locates the `inka` section,
+and extracts the archive to a temp tree when needed.
+
+> For compatibility, the launcher also still reads the legacy `INKFOOT5` trailer
+> (`[magic][archive length][manifest length]`, the last 24 bytes), so artifacts
+> built by an older `inka` keep running. New builds always emit the section.
 
 ## The manifest
 

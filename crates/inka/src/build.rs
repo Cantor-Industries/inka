@@ -22,7 +22,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[cfg(feature = "bundle")]
-use inka_format::{encode_archive, encode_footer, FOOTER_LEN};
+use inka_format::encode_section_payload;
 use inka_format::{manifest_has_key, manifest_set_key};
 
 use crate::help::{self, Mode};
@@ -245,8 +245,8 @@ pub fn cmd_build(args: &[String]) {
     );
 }
 
-/// Bundle `entry_rel` and pack it (plus any embedded files) into an INKFOOT5
-/// artifact at `output`.
+/// Bundle `entry_rel` and pack it (plus any embedded files) into an executable
+/// artifact at `output`, with the payload in the embedded `inka` section.
 #[allow(clippy::too_many_arguments)]
 fn pack(
     cwd: &Path,
@@ -332,7 +332,6 @@ fn pack(
 
         let module = "main.js";
         let bundle_len = files[0].1.len();
-        let archive = encode_archive(&files);
         let mut manifest_payload = manifest_bytes;
         manifest_set_key(&mut manifest_payload, "module", module);
 
@@ -365,16 +364,13 @@ fn pack(
         let launcher_bytes = fs::read(&launcher)
             .unwrap_or_else(|e| err(&format!("cannot read launcher {}: {e}", launcher.display())));
 
-        let mut out = Vec::with_capacity(
-            launcher_bytes.len() + archive.len() + manifest_payload.len() + FOOTER_LEN,
-        );
-        out.extend_from_slice(&launcher_bytes);
-        out.extend_from_slice(&archive);
-        out.extend_from_slice(&manifest_payload);
-        out.extend_from_slice(&encode_footer(
-            archive.len() as u64,
-            manifest_payload.len() as u64,
-        ));
+        // Embed the payload as the `inka` section (the same mechanism the
+        // desktop shim uses), rather than appending an INKFOOT5 trailer. This
+        // keeps the host image structurally valid so it can be Authenticode /
+        // codesign-signed after packaging.
+        let payload = encode_section_payload(&files, &manifest_payload);
+        let out = crate::payload::embed(&launcher_bytes, &payload)
+            .unwrap_or_else(|e| err(&format!("cannot embed artifact payload: {e}")));
 
         write_executable(output, &out)
             .unwrap_or_else(|e| err(&format!("cannot write {}: {e}", output.display())));

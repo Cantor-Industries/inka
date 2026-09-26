@@ -19,6 +19,7 @@ mod embed;
 mod framework;
 mod help;
 mod installer;
+mod payload;
 mod permissions;
 mod run;
 mod ui;
@@ -628,9 +629,10 @@ fn cmd_doctor(args: &[String]) {
 /// Why an artifact could not be inspected.
 #[derive(Debug)]
 enum ArtifactError {
-    /// No `INKFOOT5` trailer (the file is not an inka executable).
+    /// No `inka` payload section and no legacy `INKFOOT5` trailer (the file is
+    /// not an inka executable).
     NotArtifact(String),
-    /// An inka trailer whose archive/manifest is malformed or unparseable.
+    /// An inka payload whose archive/manifest is malformed or unparseable.
     Malformed(String),
 }
 
@@ -639,11 +641,33 @@ struct ArtifactInfo {
     manifest: inka_format::Manifest,
     entries: Vec<(String, usize)>,
     size: usize,
+    /// `inka-section` for the current format, `INKFOOT5` for legacy artifacts.
+    format: &'static str,
 }
 
 /// Parse a full artifact image into its manifest and payload index (pure, so it
 /// is testable without touching the filesystem or exiting).
 fn parse_artifact(bytes: &[u8]) -> Result<ArtifactInfo, ArtifactError> {
+    // Current format: the payload embedded as the `inka` binary section.
+    if let Ok(section) = inka_format::locate_section(bytes) {
+        let payload =
+            inka_format::read_section_payload(section).map_err(ArtifactError::Malformed)?;
+        let manifest = parse_manifest(payload.manifest);
+        let entries = archive_index(payload.archive).map_err(ArtifactError::Malformed)?;
+        if let Some(bad) = &manifest.malformed {
+            return Err(ArtifactError::Malformed(format!(
+                "unparseable version constraint: {bad}"
+            )));
+        }
+        return Ok(ArtifactInfo {
+            manifest,
+            entries,
+            size: bytes.len(),
+            format: "inka-section",
+        });
+    }
+
+    // Legacy format: an appended INKFOOT5 trailer.
     let layout = read_layout(bytes).map_err(ArtifactError::NotArtifact)?;
     let manifest =
         parse_manifest(&bytes[layout.manifest_off..layout.manifest_off + layout.manifest_len]);
@@ -659,6 +683,7 @@ fn parse_artifact(bytes: &[u8]) -> Result<ArtifactInfo, ArtifactError> {
         manifest,
         entries,
         size: bytes.len(),
+        format: "INKFOOT5",
     })
 }
 
@@ -691,6 +716,7 @@ fn doctor_artifact(path: &Path, json: bool, effective: channel::Channel) {
         manifest,
         entries,
         size,
+        format,
     } = match parse_artifact(&bytes) {
         Ok(v) => v,
         Err(ArtifactError::NotArtifact(e)) => {
@@ -722,7 +748,7 @@ fn doctor_artifact(path: &Path, json: bool, effective: channel::Channel) {
         let doc = serde_json::json!({
             "path": path.display().to_string(),
             "size": size,
-            "format": "INKFOOT5",
+            "format": format,
             "module": manifest.module,
             "runtime": required_runtime(&manifest),
             "tested_against": manifest.tested.map(|v| v.to_string()),
@@ -752,7 +778,7 @@ fn doctor_artifact(path: &Path, json: bool, effective: channel::Channel) {
     ui::section("Artifact");
     ui::row("path", path.display());
     ui::row("size", ui::human_size(size as u64));
-    ui::row("format", "INKFOOT5");
+    ui::row("format", format);
     ui::row("module", &manifest.module);
     ui::row("runtime", required_runtime(&manifest));
     if let Some(t) = manifest.tested {
@@ -1072,7 +1098,7 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 mod tests {
     use super::*;
 
-    /// A minimal INKFOOT5 image: launcher stub + archive + manifest + footer.
+    /// A minimal legacy INKFOOT5 image: stub + archive + manifest + footer.
     fn artifact_image(manifest: &str, files: &[(&str, &[u8])]) -> Vec<u8> {
         let owned: Vec<(String, Vec<u8>)> = files
             .iter()
@@ -1105,6 +1131,22 @@ mod tests {
         assert_eq!(info.entries.len(), 2);
         assert_eq!(info.entries[1], ("node_modules/x/index.js".to_string(), 1));
         assert_eq!(info.size, image.len());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn parse_artifact_reads_embedded_section() {
+        // The current format: embed the payload into a real host image with the
+        // same writer `inka build` uses, then inspect it.
+        let base = fs::read(std::env::current_exe().unwrap()).unwrap();
+        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let payload = inka_format::encode_section_payload(&files, b"module=main.js\n");
+        let image = crate::payload::embed(&base, &payload).unwrap();
+
+        let info = parse_artifact(&image).unwrap();
+        assert_eq!(info.format, "inka-section");
+        assert_eq!(info.manifest.module, "main.js");
+        assert_eq!(info.entries, vec![("main.js".to_string(), 14)]);
     }
 
     #[test]

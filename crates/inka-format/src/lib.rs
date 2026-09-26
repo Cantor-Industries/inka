@@ -214,11 +214,11 @@ pub struct SectionPayload<'a> {
 /// Encode a desktop payload as `[manifest_len u64 LE][manifest][archive]`.
 /// Unlike the launcher's trailing artifact footer, this lives inside a binary
 /// section, so the image bytes before it are never modified or re-scanned.
-pub fn encode_section_payload(files: &[(String, Vec<u8>)], manifest: &str) -> Vec<u8> {
+pub fn encode_section_payload(files: &[(String, Vec<u8>)], manifest: &[u8]) -> Vec<u8> {
     let archive = encode_archive(files);
     let mut out = Vec::with_capacity(8 + manifest.len() + archive.len());
     out.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
-    out.extend_from_slice(manifest.as_bytes());
+    out.extend_from_slice(manifest);
     out.extend_from_slice(&archive);
     out
 }
@@ -240,6 +240,381 @@ pub fn read_section_payload(bytes: &[u8]) -> Result<SectionPayload<'_>, String> 
         manifest: &bytes[8..manifest_end],
         archive: &bytes[manifest_end..],
     })
+}
+
+// ---- locating an embedded section in a host image --------------------------
+
+/// Locate the raw `inka` payload that was embedded by libsui in a host image,
+/// working on arbitrary file bytes (not just the live process image). This is
+/// the read side of the launcher/`inka build` section format and of the desktop
+/// shim; `inka doctor <artifact>` also uses it. The writer lives in the `inka`
+/// CLI, which depends on libsui; keeping the reader here keeps the launcher and
+/// the shim's format crate dependency-free.
+///
+/// Supports the three libsui layouts: an ELF `PT_NOTE` (name `SUI`, type
+/// `0x53554901`), a PE `RCDATA` resource named `inka`, and a Mach-O `__SUI`
+/// segment (or the Intel sentinel trailer). Returns the encoded section payload
+/// for [`read_section_payload`].
+pub fn locate_section(image: &[u8]) -> Result<&[u8], String> {
+    if image.len() >= 4 && image[..4] == *b"\x7fELF" {
+        return locate_elf_note(image).ok_or_else(|| "no inka section in ELF image".to_string());
+    }
+    if image.len() >= 2 && image[..2] == *b"MZ" {
+        return locate_pe_resource(image).ok_or_else(|| "no inka section in PE image".to_string());
+    }
+    if image.len() >= 4 {
+        let magic = u32::from_le_bytes(image[..4].try_into().unwrap());
+        // MH_MAGIC_64 / MH_CIGAM_64.
+        if magic == 0xFEED_FACF || magic == 0xCFFA_EDFE {
+            return locate_macho_section(image)
+                .ok_or_else(|| "no inka section in Mach-O image".to_string());
+        }
+        // MH_MAGIC / MH_CIGAM (32-bit) or FAT magic: unsupported.
+        if magic == 0xFEED_FACE
+            || magic == 0xCEFA_EDFE
+            || magic == 0xCAFE_BABE
+            || magic == 0xBEBA_FECA
+        {
+            return Err("unsupported Mach-O image (expected a 64-bit thin binary)".to_string());
+        }
+    }
+    Err("unrecognized host image format".to_string())
+}
+
+/// Decode the section payload from a host image into a [`Trailer`], mirroring
+/// [`parse_trailer`] for the embedded-section format.
+pub fn parse_section_trailer(image: &[u8]) -> Result<Trailer<'_>, String> {
+    let section = locate_section(image)?;
+    let payload = read_section_payload(section)?;
+    let files = parse_archive(payload.archive)?;
+    Ok(Trailer {
+        files,
+        manifest: payload.manifest,
+    })
+}
+
+fn align_up(value: usize, align: usize) -> usize {
+    if align <= 1 {
+        value
+    } else {
+        (value + (align - 1)) & !(align - 1)
+    }
+}
+
+fn read_u16(b: &[u8], le: bool) -> u16 {
+    let a = [b[0], b[1]];
+    if le {
+        u16::from_le_bytes(a)
+    } else {
+        u16::from_be_bytes(a)
+    }
+}
+
+fn read_u32(b: &[u8], le: bool) -> u32 {
+    let a = [b[0], b[1], b[2], b[3]];
+    if le {
+        u32::from_le_bytes(a)
+    } else {
+        u32::from_be_bytes(a)
+    }
+}
+
+fn read_u64(b: &[u8], le: bool) -> u64 {
+    let mut a = [0u8; 8];
+    a.copy_from_slice(&b[..8]);
+    if le {
+        u64::from_le_bytes(a)
+    } else {
+        u64::from_be_bytes(a)
+    }
+}
+
+fn locate_elf_note(image: &[u8]) -> Option<&[u8]> {
+    if image.len() < 64 || image[4] != 2 {
+        // Only 64-bit ELF is supported (matching the libsui writer).
+        return None;
+    }
+    let le = match image[5] {
+        1 => true,
+        2 => false,
+        _ => return None,
+    };
+    let e_phoff = read_u64(&image[0x20..0x28], le) as usize;
+    let e_phentsize = read_u16(&image[0x36..0x38], le) as usize;
+    let e_phnum = read_u16(&image[0x38..0x3a], le) as usize;
+    if e_phoff == 0 || e_phentsize < 56 {
+        return None;
+    }
+    for i in 0..e_phnum {
+        let off = e_phoff.checked_add(i.checked_mul(e_phentsize)?)?;
+        if off.checked_add(56)? > image.len() {
+            return None;
+        }
+        let p = &image[off..off + 56];
+        if read_u32(&p[0..4], le) != 4 {
+            continue; // not PT_NOTE
+        }
+        let p_offset = read_u64(&p[8..16], le) as usize;
+        let p_filesz = read_u64(&p[32..40], le) as usize;
+        let p_align = read_u64(&p[48..56], le) as usize;
+        let end = p_offset.checked_add(p_filesz)?;
+        if end > image.len() {
+            continue;
+        }
+        if let Some(data) = find_in_elf_note_segment(&image[p_offset..end], p_align.max(4)) {
+            return Some(data);
+        }
+    }
+    None
+}
+
+/// Mirrors libsui's `find_in_note_segment`: note header fields are always
+/// little-endian, note/desc are padded to `align`.
+fn find_in_elf_note_segment(segment: &[u8], align: usize) -> Option<&[u8]> {
+    let mut pos = 0usize;
+    while pos + 12 <= segment.len() {
+        let namesz = u32::from_le_bytes(segment[pos..pos + 4].try_into().ok()?) as usize;
+        let descsz = u32::from_le_bytes(segment[pos + 4..pos + 8].try_into().ok()?) as usize;
+        let note_type = u32::from_le_bytes(segment[pos + 8..pos + 12].try_into().ok()?);
+        pos += 12;
+        if pos.checked_add(namesz)? > segment.len() {
+            break;
+        }
+        let mut note_name = &segment[pos..pos + namesz];
+        while let [rest @ .., 0] = note_name {
+            note_name = rest;
+        }
+        pos = align_up(pos + namesz, align);
+        if pos.checked_add(descsz)? > segment.len() {
+            break;
+        }
+        let desc = &segment[pos..pos + descsz];
+        pos = align_up(pos + descsz, align);
+        if note_name == b"SUI" && note_type == 0x5355_4901 {
+            if let Some(data) = parse_elf_note_desc(desc) {
+                return Some(data);
+            }
+        }
+    }
+    None
+}
+
+/// The SUI note description is `[name_len u16 LE][section name][data]`.
+fn parse_elf_note_desc(desc: &[u8]) -> Option<&[u8]> {
+    if desc.len() < 2 {
+        return None;
+    }
+    let name_len = u16::from_le_bytes(desc[0..2].try_into().ok()?) as usize;
+    if desc.len() < 2 + name_len {
+        return None;
+    }
+    if &desc[2..2 + name_len] != SECTION_NAME.as_bytes() {
+        return None;
+    }
+    Some(&desc[2 + name_len..])
+}
+
+// PE constants. `RT_RCDATA` is resource type 10; the resource is written with
+// the section name uppercased and language ID 0 by libsui.
+const PE_RT_RCDATA: u32 = 10;
+
+fn locate_pe_resource(image: &[u8]) -> Option<&[u8]> {
+    if image.len() < 0x40 {
+        return None;
+    }
+    let e_lfanew = u32::from_le_bytes(image[0x3c..0x40].try_into().ok()?) as usize;
+    if image.get(e_lfanew..e_lfanew + 4)? != b"PE\0\0" {
+        return None;
+    }
+    let coff = e_lfanew + 4;
+    if coff + 20 > image.len() {
+        return None;
+    }
+    let num_sections = u16::from_le_bytes(image[coff + 2..coff + 4].try_into().ok()?) as usize;
+    let size_opt = u16::from_le_bytes(image[coff + 16..coff + 18].try_into().ok()?) as usize;
+    let opt = coff + 20;
+    let magic = u16::from_le_bytes(image.get(opt..opt + 2)?.try_into().ok()?);
+    let dd_off = match magic {
+        0x20b => opt + 112, // PE32+
+        0x10b => opt + 96,  // PE32
+        _ => return None,
+    };
+    // Data directory entry 2 (resource table): VirtualAddress + Size.
+    let res_rva =
+        u32::from_le_bytes(image.get(dd_off + 16..dd_off + 20)?.try_into().ok()?) as usize;
+    if res_rva == 0 {
+        return None;
+    }
+
+    // Section table for RVA -> file-offset translation.
+    let sec_off = opt.checked_add(size_opt)?;
+    let mut sections: Vec<(usize, usize, usize, usize)> = Vec::with_capacity(num_sections);
+    for i in 0..num_sections {
+        let o = sec_off.checked_add(i.checked_mul(40)?)?;
+        if o + 40 > image.len() {
+            return None;
+        }
+        let vsize = u32::from_le_bytes(image[o + 8..o + 12].try_into().ok()?) as usize;
+        let va = u32::from_le_bytes(image[o + 12..o + 16].try_into().ok()?) as usize;
+        let raw_size = u32::from_le_bytes(image[o + 16..o + 20].try_into().ok()?) as usize;
+        let raw = u32::from_le_bytes(image[o + 20..o + 24].try_into().ok()?) as usize;
+        sections.push((va, vsize, raw_size, raw));
+    }
+    let rva_to_off = |rva: usize| -> Option<usize> {
+        sections.iter().find_map(|&(va, vsize, raw_size, raw)| {
+            if rva >= va && rva - va < vsize.max(raw_size) {
+                Some(raw + (rva - va))
+            } else {
+                None
+            }
+        })
+    };
+
+    let res_base = rva_to_off(res_rva)?;
+    let type_off = pe_res_entry(image, res_base, 0, Some(PE_RT_RCDATA), None)?.0;
+    let name_off = pe_res_entry(image, res_base, type_off, None, Some(SECTION_NAME))?.0;
+    let (data_off, is_dir) = pe_res_entry(image, res_base, name_off, Some(0), None)?;
+    if is_dir {
+        return None;
+    }
+    let de = res_base.checked_add(data_off)?;
+    let data_rva = u32::from_le_bytes(image.get(de..de + 4)?.try_into().ok()?) as usize;
+    let data_size = u32::from_le_bytes(image.get(de + 4..de + 8)?.try_into().ok()?) as usize;
+    let file_off = rva_to_off(data_rva)?;
+    image.get(file_off..file_off.checked_add(data_size)?)
+}
+
+/// Find a child entry of the resource directory at `dir_off` (relative to the
+/// resource base) by numeric ID or (case-insensitive) string name. Returns the
+/// entry's offset field and whether it points at a subdirectory.
+fn pe_res_entry(
+    image: &[u8],
+    res_base: usize,
+    dir_off: usize,
+    want_id: Option<u32>,
+    want_name: Option<&str>,
+) -> Option<(usize, bool)> {
+    let d = res_base.checked_add(dir_off)?;
+    let named = u16::from_le_bytes(image.get(d + 12..d + 14)?.try_into().ok()?) as usize;
+    let ids = u16::from_le_bytes(image.get(d + 14..d + 16)?.try_into().ok()?) as usize;
+    let entries = d + 16;
+    for i in 0..(named + ids) {
+        let e = entries.checked_add(i.checked_mul(8)?)?;
+        let name_field = u32::from_le_bytes(image.get(e..e + 4)?.try_into().ok()?);
+        let off_field = u32::from_le_bytes(image.get(e + 4..e + 8)?.try_into().ok()?);
+        let is_dir = off_field & 0x8000_0000 != 0;
+        let off = (off_field & 0x7fff_ffff) as usize;
+        let matched = if name_field & 0x8000_0000 != 0 {
+            match want_name {
+                Some(w) => pe_res_name_eq(image, res_base + (name_field & 0x7fff_ffff) as usize, w),
+                None => false,
+            }
+        } else {
+            want_id == Some(name_field)
+        };
+        if matched {
+            return Some((off, is_dir));
+        }
+    }
+    None
+}
+
+/// Compare a UTF-16 `IMAGE_RESOURCE_DIR_STRING_U` against an ASCII name.
+fn pe_res_name_eq(image: &[u8], so: usize, want: &str) -> bool {
+    let Some(len_b) = image.get(so..so + 2) else {
+        return false;
+    };
+    let len = u16::from_le_bytes(len_b.try_into().unwrap()) as usize;
+    let mut s = String::with_capacity(len);
+    for i in 0..len {
+        let Some(cb) = image.get(so + 2 + i * 2..so + 4 + i * 2) else {
+            return false;
+        };
+        let c = u16::from_le_bytes(cb.try_into().unwrap());
+        if c > 0x7f {
+            return false;
+        }
+        s.push(c as u8 as char);
+    }
+    s.eq_ignore_ascii_case(want)
+}
+
+// Mach-O: libsui writes a `__SUI` segment holding the payload as a section for
+// arm64, and an in-file sentinel trailer for Intel.
+const MACHO_SEGNAME: &[u8] = b"__SUI";
+const SUI_SENTINEL: &[u8] = b"<~sui-data~>";
+const SUI_SENTINEL_MAGIC: [u8; 4] = [0xEF, 0xBE, 0xAD, 0xDE];
+
+fn locate_macho_section(image: &[u8]) -> Option<&[u8]> {
+    if image.len() < 32 {
+        return None;
+    }
+    let magic = u32::from_le_bytes(image[..4].try_into().ok()?);
+    let cputype = u32::from_le_bytes(image[4..8].try_into().ok()?);
+    const CPU_TYPE_ARM_64: u32 = 0x0100_000C;
+    if magic != 0xFEED_FACF || cputype != CPU_TYPE_ARM_64 {
+        // Intel (or big-endian) Mach-O: locate the appended sentinel.
+        return locate_macho_sentinel(image);
+    }
+    let ncmds = u32::from_le_bytes(image[16..20].try_into().ok()?) as usize;
+    let sizeofcmds = u32::from_le_bytes(image[20..24].try_into().ok()?) as usize;
+    let end = 32usize.checked_add(sizeofcmds)?;
+    if end > image.len() {
+        return None;
+    }
+    let mut off = 32usize;
+    for _ in 0..ncmds {
+        if off + 8 > end {
+            break;
+        }
+        let cmd = u32::from_le_bytes(image[off..off + 4].try_into().ok()?);
+        let cmdsize = u32::from_le_bytes(image[off + 4..off + 8].try_into().ok()?) as usize;
+        if cmdsize < 8 || off.checked_add(cmdsize)? > end {
+            break;
+        }
+        if cmd == 0x19 && cmdsize >= 72 {
+            // LC_SEGMENT_64.
+            let segname = &image[off + 8..off + 24];
+            let nsects = u32::from_le_bytes(image[off + 64..off + 68].try_into().ok()?) as usize;
+            let mut so = off + 72;
+            for _ in 0..nsects {
+                if so + 80 > off + cmdsize {
+                    break;
+                }
+                let sectname = &image[so..so + 16];
+                if segname.starts_with(MACHO_SEGNAME)
+                    && sectname.starts_with(SECTION_NAME.as_bytes())
+                {
+                    let size =
+                        u64::from_le_bytes(image[so + 40..so + 48].try_into().ok()?) as usize;
+                    let fileoff =
+                        u32::from_le_bytes(image[so + 48..so + 52].try_into().ok()?) as usize;
+                    return image.get(fileoff..fileoff.checked_add(size)?);
+                }
+                so += 80;
+            }
+        }
+        off += cmdsize;
+    }
+    // No `__SUI` segment; fall back to the Intel sentinel trailer.
+    locate_macho_sentinel(image)
+}
+
+/// The Intel Mach-O writer appends `<~sui-data~>` + magic + `len u64 LE` + data.
+fn locate_macho_sentinel(image: &[u8]) -> Option<&[u8]> {
+    let mut i = 0usize;
+    while i + SUI_SENTINEL.len() + 4 + 8 <= image.len() {
+        if &image[i..i + SUI_SENTINEL.len()] == SUI_SENTINEL
+            && image[i + SUI_SENTINEL.len()..i + SUI_SENTINEL.len() + 4] == SUI_SENTINEL_MAGIC
+        {
+            let len_off = i + SUI_SENTINEL.len() + 4;
+            let len = u64::from_le_bytes(image[len_off..len_off + 8].try_into().ok()?) as usize;
+            let start = len_off + 8;
+            return image.get(start..start.checked_add(len)?);
+        }
+        i += 1;
+    }
+    None
 }
 
 /// The 24-byte footer: `MAGIC` + archive length + manifest length (LE `u64`).
@@ -639,7 +1014,7 @@ mod tests {
             ("assets/a.txt".to_string(), b"a".to_vec()),
         ];
         let manifest = "module=main.js\napp-name=Demo\n";
-        let payload = encode_section_payload(&files, manifest);
+        let payload = encode_section_payload(&files, manifest.as_bytes());
         let got = read_section_payload(&payload).unwrap();
         assert_eq!(got.manifest, manifest.as_bytes());
         assert_eq!(parse_archive(got.archive).unwrap(), files);
@@ -874,5 +1249,98 @@ mod tests {
             None,
         );
         assert_eq!(out, "allow-net=example.com\nallow-env=*");
+    }
+
+    #[test]
+    fn locate_section_rejects_non_artifacts() {
+        assert!(locate_section(b"not an executable at all").is_err());
+        // A plausible but section-less ELF.
+        let mut elf = vec![0u8; 64];
+        elf[..4].copy_from_slice(b"\x7fELF");
+        elf[4] = 2;
+        elf[5] = 1;
+        assert!(locate_section(&elf).is_err());
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[test]
+    fn locate_section_roundtrips_native_embed() {
+        // Embed with the same libsui writer the CLI uses, then read it back.
+        let image = std::fs::read(std::env::current_exe().unwrap()).unwrap();
+        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let payload = encode_section_payload(&files, b"module=main.js\napp=Demo\n");
+
+        let out: Vec<u8> = {
+            #[cfg(target_os = "linux")]
+            {
+                let mut out = Vec::new();
+                libsui::Elf::new(&image)
+                    .append(SECTION_NAME, &payload, &mut out)
+                    .unwrap();
+                out
+            }
+            #[cfg(target_os = "windows")]
+            {
+                let mut out = Vec::new();
+                libsui::PortableExecutable::from(&image)
+                    .unwrap()
+                    .write_resource(SECTION_NAME, payload.clone())
+                    .unwrap()
+                    .build(&mut out)
+                    .unwrap();
+                out
+            }
+        };
+
+        assert_eq!(locate_section(&out).unwrap(), payload.as_slice());
+        let t = parse_section_trailer(&out).unwrap();
+        assert_eq!(t.files, files);
+        assert_eq!(t.manifest, b"module=main.js\napp=Demo\n");
+    }
+
+    #[test]
+    fn locate_section_reads_macho_intel_sentinel() {
+        let payload = encode_section_payload(
+            &[("main.js".to_string(), b"x".to_vec())],
+            b"module=main.js\n",
+        );
+        // A 64-bit x86_64 Mach-O (not arm64) takes the sentinel path.
+        let mut image = vec![0u8; 32];
+        image[0..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
+        image[4..8].copy_from_slice(&0x0100_0007u32.to_le_bytes()); // CPU_TYPE_X86_64
+        image.extend_from_slice(SUI_SENTINEL);
+        image.extend_from_slice(&SUI_SENTINEL_MAGIC);
+        image.extend_from_slice(&(payload.len() as u64).to_le_bytes());
+        image.extend_from_slice(&payload);
+        assert_eq!(locate_section(&image).unwrap(), payload.as_slice());
+    }
+
+    #[test]
+    fn locate_section_reads_macho_arm64_segment() {
+        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let payload = encode_section_payload(&files, b"module=main.js\n");
+        let data_off = 32 + 152; // header + one LC_SEGMENT_64 (72 + 80)
+        let mut image = vec![0u8; 32];
+        image[0..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
+        image[4..8].copy_from_slice(&0x0100_000Cu32.to_le_bytes()); // CPU_TYPE_ARM_64
+        image[16..20].copy_from_slice(&1u32.to_le_bytes()); // ncmds
+        image[20..24].copy_from_slice(&152u32.to_le_bytes()); // sizeofcmds
+        let mut cmd = [0u8; 152];
+        cmd[0..4].copy_from_slice(&0x19u32.to_le_bytes()); // LC_SEGMENT_64
+        cmd[4..8].copy_from_slice(&152u32.to_le_bytes());
+        cmd[8..8 + MACHO_SEGNAME.len()].copy_from_slice(MACHO_SEGNAME);
+        cmd[64..68].copy_from_slice(&1u32.to_le_bytes()); // nsects
+        let s = &mut cmd[72..152];
+        s[..SECTION_NAME.len()].copy_from_slice(SECTION_NAME.as_bytes());
+        s[16..16 + MACHO_SEGNAME.len()].copy_from_slice(MACHO_SEGNAME);
+        s[40..48].copy_from_slice(&(payload.len() as u64).to_le_bytes()); // size
+        s[48..52].copy_from_slice(&(data_off as u32).to_le_bytes()); // offset
+        image.extend_from_slice(&cmd);
+        image.extend_from_slice(&payload);
+
+        assert_eq!(locate_section(&image).unwrap(), payload.as_slice());
+        let t = parse_section_trailer(&image).unwrap();
+        assert_eq!(t.files, files);
+        assert_eq!(t.manifest, b"module=main.js\n");
     }
 }

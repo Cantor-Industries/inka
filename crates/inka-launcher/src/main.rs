@@ -4,7 +4,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use inka_format::{
-    constraint_allows, parse_manifest, parse_trailer, parse_version, Manifest, Version,
+    constraint_allows, parse_manifest, parse_section_trailer, parse_trailer, parse_version,
+    Manifest, Version,
 };
 
 /// Per-tree marker recording the pid that created it, so a later run can reap
@@ -632,22 +633,28 @@ fn main() {
     let me = env::current_exe().expect("cannot locate the launcher executable");
     let bytes = fs::read(&me).expect("read own executable");
 
-    let trailer = match parse_trailer(&bytes) {
-        Ok(x) => x,
-        Err(e) => {
-            // Only the standalone launcher (no trailer) answers --version/-V.
-            // An artifact has a valid trailer, so its args (including
-            // `--version`) pass through to the program instead.
-            if matches!(
-                args.first().map(String::as_str),
-                Some("--version") | Some("-V")
-            ) {
-                println!("inka-launcher {}", release_version());
-                std::process::exit(0);
+    // Prefer the embedded `inka` section (the current format); fall back to the
+    // legacy INKFOOT5 trailer so artifacts built by an older `inka` still run.
+    let trailer = match parse_section_trailer(&bytes) {
+        Ok(t) => t,
+        Err(section_err) => match parse_trailer(&bytes) {
+            Ok(t) => t,
+            Err(_) => {
+                // The standalone launcher (no payload) answers --version/-V;
+                // an artifact passes its args through instead.
+                if matches!(
+                    args.first().map(String::as_str),
+                    Some("--version") | Some("-V")
+                ) {
+                    println!("inka-launcher {}", release_version());
+                    std::process::exit(0);
+                }
+                error(format!(
+                    "cannot read an inka payload from this executable: {section_err}"
+                ));
+                std::process::exit(2);
             }
-            error(&e);
-            std::process::exit(2);
-        }
+        },
     };
 
     // Reap trees from crashed runs before staging ours.

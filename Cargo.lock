@@ -4654,6 +4654,7 @@ dependencies = [
 name = "inka-format"
 version = "0.8.1"
 dependencies = [
+ "libsui",
  "windows-sys 0.61.2",
 ]
 

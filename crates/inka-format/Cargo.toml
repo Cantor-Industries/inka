@@ -7,6 +7,12 @@ publish = false
 
 [dependencies]
 
+[dev-dependencies]
+# Round-trip coverage for `locate_section` against the real libsui writer that
+# `inka build` / `inka desktop` use. Test-only, so the launcher keeps a
+# dependency-free reader.
+libsui = "0.16"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

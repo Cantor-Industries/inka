@@ -79,8 +79,10 @@ installed TypeScript version works, with no version-specific lib list. It adds
 ~20 MB only when `typescript` is imported at run time; type-only usage is
 transpiled away and unaffected.
 
-The result is an `INKFOOT5` artifact: a bundle plus any embedded files, so it
-needs no `node_modules` or Deno cache at run time.
+The result is a single executable with the bundle (and any embedded files)
+stored in its `inka` binary section, so it needs no `node_modules` or Deno cache
+at run time. (`libsui` embeds the section in the format-correct way per target;
+see `docs/architecture.md`.)
 
 ## The embedded manifest
 
@@ -174,6 +176,30 @@ embedded into the artifact automatically when the bundle imports it (see
 [What gets bundled](#what-gets-bundled)). This carries the `lib.*.d.ts` files
 the compiler needs, and it works with whatever `typescript` version is installed
 in your workspace.
+
+## Signing a built artifact
+
+The artifact's payload is stored in the executable's `inka` binary section
+(`libsui`), so the host image is a structurally valid executable — no bytes are
+appended after the last section. That means you can sign the output with the
+platform tooling **after** `inka build`:
+
+```sh
+# Windows (Authenticode); sign the artifact, not the launcher stub
+signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /a app.exe
+
+# macOS: sign, then notarize and staple
+codesign --force --options runtime --sign "Developer ID Application: ..." app
+xcrun notarytool submit app --keychain-profile <profile> --wait
+xcrun stapler staple app
+```
+
+Sign the **output** of `inka build` (and, for `inka desktop`, the app's
+`<App>.exe` and `<App>.dll`), never the plain `inka-launcher` stub. A future
+`inka build --sign <command>` convenience hook is a tracked follow-up; until
+then, sign as a post-build/CI step. macOS artifacts require
+`libsui`'s `write_section` path, which is only exercised once macOS packaging
+lands.
 
 ## See also
 

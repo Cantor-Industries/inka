@@ -1200,33 +1200,6 @@ fn collect_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
     Ok(out)
 }
 
-/// Embed `payload` as the `inka` binary section, returning the new image.
-///
-/// Uses Deno's `libsui` so the embedding is format-correct per target: an ELF
-/// `PT_NOTE` graft on Linux, a `.rsrc` resource on Windows. This is the same
-/// mechanism `libdenort` uses to carry its standalone payload, and it means the
-/// shim can read its data in-memory with no knowledge of its own path.
-#[cfg(target_os = "linux")]
-fn embed_payload(image: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    libsui::Elf::new(image)
-        .append(inka_format::SECTION_NAME, payload, &mut out)
-        .map_err(|e| format!("cannot embed payload section: {e}"))?;
-    Ok(out)
-}
-
-#[cfg(target_os = "windows")]
-fn embed_payload(image: &[u8], payload: &[u8]) -> Result<Vec<u8>, String> {
-    let mut out = Vec::new();
-    libsui::PortableExecutable::from(image)
-        .map_err(|e| format!("cannot parse PE image: {e}"))?
-        .write_resource(inka_format::SECTION_NAME, payload.to_vec())
-        .map_err(|e| format!("cannot embed payload resource: {e}"))?
-        .build(&mut out)
-        .map_err(|e| format!("cannot write PE image: {e}"))?;
-    Ok(out)
-}
-
 /// Copy the shim and embed the app payload as the `inka` section, producing the
 /// self-contained per-app `.so`/`.dll` the laufey backend loads.
 fn pack_shim(
@@ -1236,8 +1209,8 @@ fn pack_shim(
     manifest: &str,
 ) -> Result<(), String> {
     let image = fs::read(shim).map_err(|e| format!("cannot read {}: {e}", shim.display()))?;
-    let payload = inka_format::encode_section_payload(files, manifest);
-    let out = embed_payload(&image, &payload)?;
+    let payload = inka_format::encode_section_payload(files, manifest.as_bytes());
+    let out = crate::payload::embed(&image, &payload)?;
     fs::write(dest, &out).map_err(|e| format!("cannot write {}: {e}", dest.display()))?;
     Ok(())
 }
@@ -1531,9 +1504,8 @@ mod tests {
     fn embedded_payload_section_roundtrips() {
         // Embed into a small system ELF (falling back to the test binary), then
         // assert the original image prefix is preserved and the payload is
-        // grafted verbatim. The runtime read path
-        // (`find_section_in_current_image`) is exercised by the desktop e2e
-        // battery once a runtime is present.
+        // grafted verbatim. The runtime read path (`locate_section`) is
+        // exercised by the desktop e2e battery once a runtime is present.
         let image = ["/bin/true", "/usr/bin/true", "/bin/echo"]
             .iter()
             .find_map(|p| fs::read(p).ok())
@@ -1541,8 +1513,12 @@ mod tests {
             .expect("a small ELF to embed into");
         let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
         let manifest = "module=main.js\napp-name=Demo\n";
-        let payload = inka_format::encode_section_payload(&files, manifest);
-        let out = embed_payload(&image, &payload).expect("embed payload section");
+        let payload = inka_format::encode_section_payload(&files, manifest.as_bytes());
+        let out = crate::payload::embed(&image, &payload).expect("embed payload section");
+        assert_eq!(
+            inka_format::locate_section(&out).expect("locate embedded section"),
+            payload.as_slice()
+        );
         assert_eq!(&out[..4], &image[..4], "ELF magic must be preserved");
         assert!(out.len() > image.len(), "image must grow");
         assert!(
