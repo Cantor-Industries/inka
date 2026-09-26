@@ -109,7 +109,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path deskapp | Out-Null
           Set-Content -Path deskapp/index.js -Value 'console.log("desk");'
           & "$bin/inka.exe" desktop deskapp/index.js --backend webview `
-            --name DeskApp -o desk-dist
+            --name DeskApp --installer -o desk-dist
           foreach ($f in @("DeskApp.exe", "DeskApp.dll", "runtime-version")) {
             if (-not (Test-Path (Join-Path "desk-dist" $f))) {
               throw "desktop packaging missing $f"
@@ -119,6 +119,21 @@ jobs:
           if ((Get-Item "desk-dist/DeskApp.dll").Length -lt 1024) {
             throw "shim looks too small"
           }
+
+          # Validate the .msi with a real msiexec administrative install: this
+          # is the only check that exercises the string-pool table ordering
+          # (msiexec rejects an unsorted database with error 2219).
+          if (-not (Test-Path "desk-dist.msi")) { throw "missing desk-dist.msi" }
+          $admin = Join-Path $env:RUNNER_TEMP "msi-admin"
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $admin
+          $p = Start-Process -Wait -PassThru -NoNewWindow msiexec.exe -ArgumentList `
+            "/a", "$PWD\desk-dist.msi", "/qn", "TARGETDIR=$admin"
+          if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) {
+            throw "msiexec /a failed: $($p.ExitCode)"
+          }
+          $exe = Get-ChildItem -Path $admin -Recurse -Filter "DeskApp.exe" |
+            Select-Object -First 1
+          if (-not $exe) { throw "msi administrative install produced no DeskApp.exe" }
 
       # Later: upload the toolchain zip + runtime dll + laufey zip as workflow
       # artifacts, and add a CEF packaging smoke.

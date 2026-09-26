@@ -26,6 +26,7 @@ mod permissions;
 mod run;
 mod ui;
 mod update;
+mod windows_msi;
 
 use std::env;
 use std::fs;

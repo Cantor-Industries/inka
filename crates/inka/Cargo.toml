@@ -26,6 +26,12 @@ libsui = "0.16"
 zip = { version = "8", default-features = false, features = ["deflate"] }
 flate2 = "1"
 tar = "0.4"
+# Windows MSI authoring (pure Rust, cross-compiles from any host).
+msi = "0.10"
+cab = "0.6"
+# Direct `cfb` access to re-sort MSI tables by string-pool id (msi 0.10 uses
+# cfb 0.14); required for real msiexec to accept the database.
+cfb = "0.14"
 deno_terminal = { version = "=0.2.3", features = ["colors"] }
 inka-bundler = { path = "../inka-bundler", optional = true }
 inka-format = { path = "../inka-format" }
@@ -39,7 +45,7 @@ fastwebsockets = { version = "^0.8.1", features = ["upgrade", "unstable-split"] 
 log = "0.4"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
 url = "2"
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "v5"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -342,7 +342,7 @@ pub(crate) fn desktop() -> &'static Help {
         options: &[
             (
                 "-o, --output <dir>",
-                "output app directory (default: deno.json desktop.output.{linux,windows}, else the app name)",
+                "output app directory, or `App.msi` on Windows to also build an installer (default: deno.json desktop.output.{linux,windows}, else the app name)",
             ),
             (
                 "--name <name>",
@@ -399,7 +399,7 @@ pub(crate) fn desktop() -> &'static Help {
             ),
             (
                 "--installer",
-                "also emit the script installer (Linux: <App>.tar.gz + <App>.install.sh; not yet supported on Windows)",
+                "also emit an installer (Linux: <App>.tar.gz + <App>.install.sh; Windows: <App>.msi)",
             ),
             (
                 "--engine-base <url>",

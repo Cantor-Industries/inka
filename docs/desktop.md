@@ -24,6 +24,7 @@ megabytes instead of the ~150 MB a per-app engine would cost.
   runtime-version  the shared runtime tuple the shim loads
   libcef.dll, ...  copied from the shared CEF runtime            (--backend cef)
 <App>.zip
+<App>.msi          Windows installer (--installer, or -o App.msi)
 ```
 
 At launch the prebuilt **laufey backend** loads `<App>.so` (the **shim**), which
@@ -309,9 +310,9 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
   <hash>`) and is not pruned yet.
 - HMR (in-runtime Vite, external dev server, and inka's V8 HMR), DevTools
   multiplexing, and framework detection are implemented; `.AppImage`/`.deb`/
-  `.rpm` and Windows MSI distribution and Next.js remain follow-ups.
-  Distribution today is the runnable directory plus `.tar.gz` (Linux, with the
-  script `--installer`) or `.zip` (Windows; `--installer` is not supported yet).
+  `.rpm` distribution and Next.js remain follow-ups. Distribution today is the
+  runnable directory plus `.tar.gz` (Linux, with the script `--installer`) or
+  `.zip`/`.msi` (Windows; `--installer` or `-o App.msi` builds the MSI).
 - The per-app `<App>.so`/`<App>.dll` is only the shim + your payload — never the
   engine.
 - The `cef` backend relies on user namespaces for Chromium's sandbox on Linux
@@ -323,8 +324,9 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 
 The desktop runtime adapts Deno's `cli/rt_desktop` and vendored desktop JS
 (MIT, Copyright (c) the Deno authors). Hardened archive extraction
-(`crates/inka/src/archive.rs`) and icon-set `.ico` generation
-(`crates/inka/src/ico.rs`) are vendored from Deno's `cli/tools/desktop.rs`
-(also MIT, Copyright (c) the Deno authors). The window/renderer layer is
+(`crates/inka/src/archive.rs`), icon-set `.ico` generation
+(`crates/inka/src/ico.rs`), and the MSI builder (`crates/inka/src/windows_msi.rs`)
+are vendored from Deno's `cli/tools/desktop.rs` (also MIT, Copyright (c) the
+Deno authors). The window/renderer layer is
 [laufey](https://github.com/littledivy/laufey) (MIT, Copyright (c) Divy
 Srivastava), pinned at `0.7.0`.

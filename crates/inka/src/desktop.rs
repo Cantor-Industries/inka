@@ -1006,7 +1006,24 @@ pub fn cmd_desktop(args: &[String]) {
         }
     });
     let app_name = sanitize_name(&app_name);
-    let out = a.output.clone().unwrap_or_else(|| PathBuf::from(&app_name));
+    let mut out = a.output.clone().unwrap_or_else(|| PathBuf::from(&app_name));
+
+    // `-o App.msi` (like Deno): the MSI is the final artifact; the intermediate
+    // app dir drops the extension. MSI packaging requires a Windows target.
+    let mut msi_output: Option<PathBuf> = None;
+    if out
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("msi"))
+    {
+        if !cfg!(windows) {
+            fail("building a .msi requires a Windows target (x86_64-pc-windows-msvc)");
+        }
+        msi_output = Some(out.clone());
+        out.set_extension("");
+        if out.as_os_str().is_empty() {
+            out = PathBuf::from(&app_name);
+        }
+    }
 
     let backend = a.backend.clone().unwrap_or_else(|| "webview".to_string());
     if !known_backend(&backend) {
@@ -1152,8 +1169,9 @@ pub fn cmd_desktop(args: &[String]) {
     );
 
     // ---- artifacts ----
-    // Linux `--installer` builds a POSIX `install.sh` + tarball. Windows ships
-    // the portable `.zip` only for now; an MSI installer is planned.
+    // Linux `--installer` builds a POSIX `install.sh` + tarball. Everything else
+    // also emits the portable archive (`.zip` on Windows, `.tar.gz` on unix);
+    // Windows additionally builds an `.msi` for `--installer` or `-o *.msi`.
     let installer_outputs = if a.installer && cfg!(unix) {
         let runtime = match runtime_tuple.as_deref() {
             Some(t) => t,
@@ -1176,19 +1194,31 @@ pub fn cmd_desktop(args: &[String]) {
             Err(e) => fail(&e),
         }
     } else {
-        if a.installer {
-            ui::warn(
-                "--installer is not supported on Windows yet (an MSI is planned); \
-                 emitting the portable .zip",
-            );
-        }
-        // Runnable app directory, packaged as a portable archive: `.zip` on
-        // Windows, `.tar.gz` on unix (CEF via symlinks there).
         if let Err(e) = write_portable_archive(&out) {
             ui::warn(e);
         }
         None
     };
+
+    // Windows MSI: from `-o App.msi` or `--installer`.
+    if cfg!(windows) {
+        if let Some(msi_path) = msi_output
+            .clone()
+            .or_else(|| a.installer.then(|| out.with_extension("msi")))
+        {
+            let icon = out.join("AppIcon.ico");
+            let spec = crate::windows_msi::Spec {
+                identifier: Some(&id),
+                version: a.app_version.as_deref(),
+                manufacturer: &app_name,
+                icon: icon.is_file().then_some(icon.as_path()),
+            };
+            match crate::windows_msi::create(&out, &msi_path, &spec) {
+                Ok(()) => ui::row("msi", msi_path.display()),
+                Err(e) => ui::warn(format!("could not build {}: {e}", msi_path.display())),
+            }
+        }
+    }
 
     ui::section("App");
     ui::row("name", &app_name);

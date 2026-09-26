@@ -85,7 +85,7 @@ try {
     Set-Content -LiteralPath (Join-Path $backendDir '.downloaded') -Value "v$($winLaufey.version)"
     $env:INKA_LAUFEY_CACHE = $scratch
     $deskDist = Join-Path $apps 'smoke-desktop'
-    & $inka desktop simple.js --backend webview --name SmokeApp -o $deskDist
+    & $inka desktop simple.js --backend webview --name SmokeApp --installer -o $deskDist
     if ($LASTEXITCODE -ne 0) { Fail "desktop exited $LASTEXITCODE" }
     foreach ($f in @('SmokeApp.exe', 'SmokeApp.dll', 'runtime-version')) {
         if (-not (Test-Path -LiteralPath (Join-Path $deskDist $f))) {
@@ -93,6 +93,16 @@ try {
         }
     }
     if (-not (Test-Path -LiteralPath "$deskDist.zip")) { Fail 'desktop packaging missing the .zip' }
+    # Validate the .msi with a real msiexec administrative install (exercises
+    # the string-pool table ordering that msiexec enforces as error 2219).
+    if (-not (Test-Path -LiteralPath "$deskDist.msi")) { Fail 'desktop packaging missing the .msi' }
+    $admin = Join-Path $scratch 'msi-admin'
+    $p = Start-Process -Wait -PassThru -NoNewWindow msiexec.exe -ArgumentList `
+        '/a', "$deskDist.msi", '/qn', "TARGETDIR=$admin"
+    if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { Fail "msiexec /a failed: $($p.ExitCode)" }
+    if (-not (Get-ChildItem -Path $admin -Recurse -Filter 'SmokeApp.exe' -ErrorAction SilentlyContinue)) {
+        Fail 'msi administrative install produced no SmokeApp.exe'
+    }
 
     Info 'inka update is current (runtime)'
     $out = (& $inka update --from $Stage --no-toolchain) -join "`n"
