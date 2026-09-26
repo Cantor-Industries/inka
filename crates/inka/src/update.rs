@@ -21,7 +21,6 @@
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use serde_json::Value;
 
@@ -446,7 +445,7 @@ fn update_toolchain_from(
         _ => {}
     }
 
-    extract_toolchain(archive, &archive_path, &tmp.0)?;
+    crate::archive::extract(archive, &archive_path, &tmp.0)?;
     replace_toolchain(&tmp.0, &dir)?;
     fs::write(dir.join("VERSION"), format!("{latest}\n"))
         .map_err(|e| format!("cannot write {}: {e}", dir.join("VERSION").display()))?;
@@ -550,58 +549,6 @@ fn cleanup_staged(staged: &[(PathBuf, PathBuf)]) {
     for (new, _) in staged {
         let _ = fs::remove_file(new);
     }
-}
-
-/// Extract a fetched archive into `dest`, dispatching on the file extension:
-/// `.zip` (Windows toolchains and laufey backends) via the `zip` crate,
-/// otherwise `tar.gz` via the system `tar`. Shared with `inka desktop`'s laufey
-/// download.
-pub(crate) fn extract_toolchain(
-    archive_name: &str,
-    archive_path: &Path,
-    dest: &Path,
-) -> Result<(), String> {
-    if archive_name.to_ascii_lowercase().ends_with(".zip") {
-        extract_zip(archive_path, dest)
-    } else {
-        let mut cmd = Command::new("tar");
-        cmd.args(["-xzf"])
-            .arg(archive_path)
-            .args(["--no-same-owner", "--no-same-permissions", "-C"])
-            .arg(dest);
-        run_ok(&mut cmd, "tar extract")
-    }
-}
-
-/// Extract a `.zip` archive into `dest`, rejecting entries whose path escapes
-/// the destination (`enclosed_name` refuses absolute and `..` paths).
-fn extract_zip(archive_path: &Path, dest: &Path) -> Result<(), String> {
-    let file = fs::File::open(archive_path)
-        .map_err(|e| format!("cannot open {}: {e}", archive_path.display()))?;
-    let mut zip = zip::ZipArchive::new(file).map_err(|e| format!("invalid zip archive: {e}"))?;
-    for i in 0..zip.len() {
-        let mut entry = zip
-            .by_index(i)
-            .map_err(|e| format!("bad zip entry {i}: {e}"))?;
-        let Some(rel) = entry.enclosed_name() else {
-            return Err(format!("zip entry '{}' has an unsafe path", entry.name()));
-        };
-        let out = dest.join(rel);
-        if entry.is_dir() {
-            fs::create_dir_all(&out)
-                .map_err(|e| format!("cannot create {}: {e}", out.display()))?;
-            continue;
-        }
-        if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        }
-        let mut f =
-            fs::File::create(&out).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
-        std::io::copy(&mut entry, &mut f)
-            .map_err(|e| format!("cannot extract {}: {e}", out.display()))?;
-    }
-    Ok(())
 }
 
 fn toolchain_warn(e: String) -> bool {
@@ -842,17 +789,6 @@ fn update_pinned(
         install_file(base, &name, &target, sha256, insecure).unwrap_or_else(|e| fail(&e));
         ui::status_ok(format!("installed inka_runtime {ver}"));
     }
-}
-
-/// Run a child process to completion, mapping a spawn/exit failure to a message.
-fn run_ok(cmd: &mut Command, what: &str) -> Result<(), String> {
-    let status = cmd
-        .status()
-        .map_err(|e| format!("failed to spawn {what}: {e}"))?;
-    if !status.success() {
-        return Err(format!("{what} exited with {status}"));
-    }
-    Ok(())
 }
 
 /// Reserve an exclusive temp path next to `target` (so an install is an atomic
@@ -1124,36 +1060,5 @@ mod tests {
             target_view(&multi).get("runtime").and_then(Value::as_str),
             Some(expected)
         );
-    }
-
-    #[test]
-    fn extract_zip_unpacks_flat_and_nested_entries() {
-        use std::io::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "inka-zip-{}-{}",
-            std::process::id(),
-            random_suffix()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let zip_path = dir.join("toolchain.zip");
-        {
-            let f = fs::File::create(&zip_path).unwrap();
-            let mut w = zip::ZipWriter::new(f);
-            let opts = zip::write::SimpleFileOptions::default();
-            w.start_file("inka", opts).unwrap();
-            w.write_all(b"bin").unwrap();
-            w.start_file("nested/inka-launcher", opts).unwrap();
-            w.write_all(b"launcher").unwrap();
-            w.finish().unwrap();
-        }
-        let out = dir.join("out");
-        fs::create_dir_all(&out).unwrap();
-        extract_toolchain("toolchain.zip", &zip_path, &out).unwrap();
-        assert_eq!(fs::read(out.join("inka")).unwrap(), b"bin");
-        assert_eq!(
-            fs::read(out.join("nested/inka-launcher")).unwrap(),
-            b"launcher"
-        );
-        let _ = fs::remove_dir_all(&dir);
     }
 }

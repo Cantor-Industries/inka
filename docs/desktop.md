@@ -317,6 +317,8 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 ## Acknowledgments
 
 The desktop runtime adapts Deno's `cli/rt_desktop` and vendored desktop JS
-(MIT, Copyright (c) the Deno authors). The window/renderer layer is
+(MIT, Copyright (c) the Deno authors). Hardened archive extraction
+(`crates/inka/src/archive.rs`) is vendored from Deno's `cli/tools/desktop.rs`
+(also MIT, Copyright (c) the Deno authors). The window/renderer layer is
 [laufey](https://github.com/littledivy/laufey) (MIT, Copyright (c) Divy
 Srivastava), pinned at `0.7.0`.

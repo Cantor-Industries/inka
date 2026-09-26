@@ -9,6 +9,7 @@
 //   inka doctor
 //   inka help [command]
 
+mod archive;
 mod build;
 mod cef;
 mod channel;

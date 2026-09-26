@@ -21,8 +21,11 @@ sha2 = "0.10"
 libloading = "0.8"
 # Embed the per-app desktop payload as a binary section (Deno's libsui).
 libsui = "0.16"
-# Extract the Windows toolchain `.zip` (unix keeps `.tar.gz` via `tar`).
+# Hardened, dependency-only extraction of downloaded archives: `.zip` via the
+# `zip` crate, `.tar.gz` via `flate2` + `tar` (no shelling out to `tar`).
 zip = { version = "8", default-features = false, features = ["deflate"] }
+flate2 = "1"
+tar = "0.4"
 deno_terminal = { version = "=0.2.3", features = ["colors"] }
 inka-bundler = { path = "../inka-bundler", optional = true }
 inka-format = { path = "../inka-format" }

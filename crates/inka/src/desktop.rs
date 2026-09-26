@@ -299,13 +299,17 @@ fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
 
 /// Download (once), checksum-verify, and unpack the pinned laufey backend into
 /// inka's cache, returning the backend executable path.
+///
+/// Extraction is hardened (`crate::archive`) and staged in a sibling directory
+/// that is atomically renamed into place, so a crash or a concurrent build
+/// never sees a half-populated cache. The `.downloaded` marker is written
+/// inside the staging dir so it is published with the payload.
 fn download_laufey(backend: &str) -> Result<PathBuf, String> {
     let cache = inka_laufey_cache()
         .ok_or_else(|| "cannot determine a cache directory (set HOME)".to_string())?;
-    let dir = cache
-        .join(LAUFEY_VERSION)
-        .join(backend)
-        .join(platform::laufey_target());
+    let parent = cache.join(LAUFEY_VERSION).join(backend);
+    let target = platform::laufey_target();
+    let dir = parent.join(target);
     let exe = backend_exe(backend);
     if dir.join(".downloaded").is_file() {
         if let Some(p) = find_file(&dir, &exe) {
@@ -318,8 +322,8 @@ fn download_laufey(backend: &str) -> Result<PathBuf, String> {
         .find(|(n, _)| *n == archive)
         .map(|(_, h)| *h)
         .ok_or_else(|| format!("no pinned checksum for {archive}"))?;
-    fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let tmp = dir.join(format!(".{archive}.tmp{}", std::process::id()));
+    fs::create_dir_all(&parent).map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+    let tmp = parent.join(format!(".{archive}.tmp{}", std::process::id()));
     ui::info(format!(
         "downloading laufey '{backend}' backend ({archive})"
     ));
@@ -334,13 +338,34 @@ fn download_laufey(backend: &str) -> Result<PathBuf, String> {
             "checksum mismatch for {archive}: expected {expected}, got {actual}"
         ));
     }
-    let extract = crate::update::extract_toolchain(&archive, &tmp, &dir);
+
+    let staging = parent.join(format!(
+        "{target}.staging-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = fs::remove_dir_all(&staging);
+    let publish = (|| {
+        crate::archive::extract(&archive, &tmp, &staging)?;
+        if find_file(&staging, &exe).is_none() {
+            return Err(format!("'{exe}' not found in the {archive} archive"));
+        }
+        fs::write(staging.join(".downloaded"), format!("v{LAUFEY_VERSION}\n"))
+            .map_err(|e| format!("cannot write {}: {e}", staging.display()))?;
+        if dir.exists() {
+            let _ = fs::remove_dir_all(&dir);
+        }
+        fs::rename(&staging, &dir).map_err(|e| format!("cannot publish {}: {e}", dir.display()))
+    })();
     let _ = fs::remove_file(&tmp);
-    extract?;
-    let found = find_file(&dir, &exe)
-        .ok_or_else(|| format!("'{exe}' not found in the {archive} archive"))?;
-    let _ = fs::write(dir.join(".downloaded"), format!("v{LAUFEY_VERSION}\n"));
-    Ok(found)
+    if let Err(e) = publish {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(e);
+    }
+    find_file(&dir, &exe).ok_or_else(|| format!("'{exe}' not found in the {archive} archive"))
 }
 
 fn resolve_backend(backend: &str) -> PathBuf {
