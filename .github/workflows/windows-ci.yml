@@ -109,13 +109,16 @@ jobs:
           New-Item -ItemType Directory -Force -Path deskapp | Out-Null
           Set-Content -Path deskapp/index.js -Value 'console.log("desk");'
           & "$bin/inka.exe" desktop deskapp/index.js --backend webview `
-            --name DeskApp --installer -o desk-dist
+            --name DeskApp --installer --deep-link deskapptest -o desk-dist
           foreach ($f in @("DeskApp.exe", "DeskApp.dll", "runtime-version")) {
             if (-not (Test-Path (Join-Path "desk-dist" $f))) {
               throw "desktop packaging missing $f"
             }
           }
           if (-not (Test-Path "desk-dist.zip")) { throw "missing desk-dist.zip" }
+          if (-not (Test-Path "desk-dist/register-deep-links.bat")) {
+            throw "missing deep-link registration script"
+          }
           if ((Get-Item "desk-dist/DeskApp.dll").Length -lt 1024) {
             throw "shim looks too small"
           }
@@ -134,6 +137,25 @@ jobs:
           $exe = Get-ChildItem -Path $admin -Recurse -Filter "DeskApp.exe" |
             Select-Object -First 1
           if (-not $exe) { throw "msi administrative install produced no DeskApp.exe" }
+
+      # Self-extracting variant: a thin dir (launcher + gzip payload) instead of
+      # the full tree. Structure only; no GUI launch.
+      - name: Smoke (self-extracting packaging)
+        run: |
+          $bin = "target/release"
+          & "$bin/inka.exe" desktop deskapp/index.js --backend webview `
+            --name DeskSmall --compress -o desk-small
+          if (-not (Test-Path "desk-small/payload.tar.gz")) { throw "missing payload.tar.gz" }
+          if (-not (Test-Path "desk-small/DeskSmall.bat")) { throw "missing <App>.bat launcher" }
+          if (Test-Path "desk-small/DeskSmall.exe") { throw "tree was not replaced by the payload" }
+          $bat = Get-Content "desk-small/DeskSmall.bat" -Raw
+          if ($bat -notmatch "DeskSmall.exe" -or $bat -notmatch "tar -xf") {
+            throw "launcher does not extract and run the app"
+          }
+          $listing = (tar -tzf "desk-small/payload.tar.gz") -join "`n"
+          if ($listing -notmatch "DeskSmall/DeskSmall.exe") {
+            throw "payload does not contain DeskSmall/DeskSmall.exe"
+          }
 
       # Later: upload the toolchain zip + runtime dll + laufey zip as workflow
       # artifacts, and add a CEF packaging smoke.

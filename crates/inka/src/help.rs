@@ -398,6 +398,14 @@ pub(crate) fn desktop() -> &'static Help {
                 "POST uncaught errors here (default: deno.json desktop.errorReporting.url)",
             ),
             (
+                "--deep-link <scheme>",
+                "register a URL scheme with the OS (repeatable; Windows writes register-deep-links.bat, Linux updates the .desktop entry)",
+            ),
+            (
+                "--compress[=gzip]",
+                "ship a self-extracting app dir: a thin launcher plus a gzip-compressed payload unpacked on first run",
+            ),
+            (
                 "--installer",
                 "also emit an installer (Linux: <App>.tar.gz + <App>.install.sh; Windows: <App>.msi)",
             ),

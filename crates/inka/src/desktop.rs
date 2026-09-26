@@ -165,6 +165,8 @@ struct Args {
     installer: bool,
     engine_base: Option<String>,
     dev_command: Option<String>,
+    deep_links: Vec<String>,
+    compress: Option<String>,
 }
 
 fn parse_args(args: &[String]) -> Args {
@@ -190,6 +192,8 @@ fn parse_args(args: &[String]) -> Args {
         installer: false,
         engine_base: None,
         dev_command: None,
+        deep_links: Vec::new(),
+        compress: None,
     };
     let mut it = args.iter();
     while let Some(arg) = it.next() {
@@ -233,6 +237,14 @@ fn parse_args(args: &[String]) -> Args {
             "--installer" => a.installer = true,
             "--engine-base" => a.engine_base = Some(next(&mut it, arg)),
             "--dev-command" => a.dev_command = Some(next(&mut it, arg)),
+            "--deep-link" => a.deep_links.push(next(&mut it, arg)),
+            "--compress" => a.compress = Some("gzip".to_string()),
+            other if other.starts_with("--deep-link=") => {
+                a.deep_links.push(other["--deep-link=".len()..].to_string());
+            }
+            other if other.starts_with("--compress=") => {
+                a.compress = Some(other["--compress=".len()..].to_string());
+            }
             other if other.starts_with("--external=") => {
                 a.external.push(other["--external=".len()..].to_string());
             }
@@ -540,6 +552,12 @@ fn apply_config_defaults(a: &mut Args, cfg: crate::config::DesktopConfig) {
     }
     if a.error_reporting.is_none() {
         a.error_reporting = cfg.error_reporting;
+    }
+    if a.deep_links.is_empty() && !cfg.deep_links.is_empty() {
+        a.deep_links = cfg.deep_links;
+    }
+    if a.compress.is_none() {
+        a.compress = cfg.compress;
     }
 }
 
@@ -988,6 +1006,17 @@ pub fn cmd_desktop(args: &[String]) {
     }
     apply_config_defaults(&mut a, cfg);
 
+    // Fail fast on bad deep-link schemes or an unknown compress format, before
+    // any packaging work.
+    if let Err(e) = crate::deep_links::validate_schemes(&a.deep_links) {
+        fail(&e);
+    }
+    if let Some(format) = &a.compress {
+        if let Err(e) = crate::selfextract::validate_format(format) {
+            fail(&e);
+        }
+    }
+
     // No entry: package the current directory (`inka desktop` == `inka desktop .`).
     let entry = a.entry.clone().unwrap_or_else(|| PathBuf::from("."));
     let app_name = a.app_name.clone().unwrap_or_else(|| {
@@ -1167,6 +1196,27 @@ pub fn cmd_desktop(args: &[String]) {
         out.join(format!("{id}.desktop")),
         desktop_entry(&app_name, &id),
     );
+
+    // Deep-link registration writes into the bundle (`.bat` on Windows,
+    // `.desktop` MimeType/`%u` on Linux) before any self-extract transform, so
+    // it ships inside the payload.
+    if !a.deep_links.is_empty() {
+        if let Err(e) = crate::deep_links::register(&out, &a.deep_links) {
+            ui::warn(format!("could not register deep links: {e}"));
+        }
+    }
+
+    // Optional self-extracting transform: replace the app dir with a thin dir
+    // plus a compressed payload before the archive/MSI wrap it.
+    if let Some(format) = &a.compress {
+        if let Err(e) =
+            crate::selfextract::make_self_extracting(&out, &app_name, &id, cfg!(windows))
+        {
+            fail(&format!("could not make the app self-extracting: {e}"));
+        } else {
+            ui::row("payload format", format);
+        }
+    }
 
     // ---- artifacts ----
     // Linux `--installer` builds a POSIX `install.sh` + tarball. Everything else

@@ -85,9 +85,10 @@ try {
     Set-Content -LiteralPath (Join-Path $backendDir '.downloaded') -Value "v$($winLaufey.version)"
     $env:INKA_LAUFEY_CACHE = $scratch
     $deskDist = Join-Path $apps 'smoke-desktop'
-    & $inka desktop simple.js --backend webview --name SmokeApp --installer -o $deskDist
+    & $inka desktop simple.js --backend webview --name SmokeApp --installer `
+        --deep-link smoketest -o $deskDist
     if ($LASTEXITCODE -ne 0) { Fail "desktop exited $LASTEXITCODE" }
-    foreach ($f in @('SmokeApp.exe', 'SmokeApp.dll', 'runtime-version')) {
+    foreach ($f in @('SmokeApp.exe', 'SmokeApp.dll', 'runtime-version', 'register-deep-links.bat')) {
         if (-not (Test-Path -LiteralPath (Join-Path $deskDist $f))) {
             Fail "desktop packaging missing $f"
         }
@@ -102,6 +103,21 @@ try {
     if ($p.ExitCode -ne 0 -and $p.ExitCode -ne 3010) { Fail "msiexec /a failed: $($p.ExitCode)" }
     if (-not (Get-ChildItem -Path $admin -Recurse -Filter 'SmokeApp.exe' -ErrorAction SilentlyContinue)) {
         Fail 'msi administrative install produced no SmokeApp.exe'
+    }
+
+    Info 'inka desktop self-extracting packaging'
+    $smallDist = Join-Path $apps 'smoke-small'
+    & $inka desktop simple.js --backend webview --name SmokeSmall --compress -o $smallDist
+    if ($LASTEXITCODE -ne 0) { Fail "desktop --compress exited $LASTEXITCODE" }
+    if (-not (Test-Path -LiteralPath (Join-Path $smallDist 'payload.tar.gz'))) {
+        Fail 'self-extracting packaging missing payload.tar.gz'
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $smallDist 'SmokeSmall.bat'))) {
+        Fail 'self-extracting packaging missing SmokeSmall.bat'
+    }
+    $listing = (tar -tzf (Join-Path $smallDist 'payload.tar.gz')) -join "`n"
+    if ($listing -notmatch 'SmokeSmall/SmokeSmall.exe') {
+        Fail 'self-extracting payload does not contain the app'
     }
 
     Info 'inka update is current (runtime)'

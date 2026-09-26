@@ -153,9 +153,13 @@ inka-specific fallback.
         // "windows": [{ "path": "assets/icon-32.png", "size": 32 },
         //             { "path": "assets/icon-256.png", "size": 256 }]
       },
+      // Register URL schemes with the OS (repeatable --deep-link):
+      "deepLinks": ["acme", "acme-mail"],
     },
     "backend": "webview", // webview (default) | cef | raw
     "output": { "linux": "dist/AcmeMail" },
+    // Ship a self-extracting dir (thin launcher + gzip payload): true or "gzip".
+    "compress": "gzip",
     "release": { "baseUrl": "https://dl.acme.test/mail" },
     "errorReporting": { "url": "https://errors.acme.test" },
   },
@@ -171,6 +175,8 @@ inka-specific fallback.
 | `desktop.backend` | `--backend` | `webview`, `cef`, or `raw` |
 | `desktop.output.linux` | `-o`/`--output` | output app directory (Linux) |
 | `desktop.output.windows` | `-o`/`--output` | output app directory (Windows) |
+| `desktop.app.deepLinks` | `--deep-link` | URL schemes to register with the OS |
+| `desktop.compress` | `--compress` | self-extracting payload format (`gzip`) |
 | `desktop.release.baseUrl` | `--release-base` | auto-update manifest host |
 | `desktop.errorReporting.url` | `--error-reporting` | uncaught-error endpoint |
 | top-level `version` | `--app-version` | version reported to `Deno.autoUpdate` |
@@ -197,13 +203,43 @@ inka desktop [entry] [options]
       --app-version <ver>  version for Deno.autoUpdate
       --release-base <url> auto-update manifest host
       --error-reporting <url>  POST uncaught errors here
-      --installer          also emit <App>.tar.gz + <App>.install.sh
+      --deep-link <scheme> register a URL scheme (repeatable)
+      --compress[=gzip]    ship a self-extracting app dir (thin launcher + payload)
+      --installer          also emit an installer (Linux .tar.gz+.install.sh; Windows .msi)
       --engine-base <url>  inka release base for the installer's engine/CEF
 ```
 
 The entry is bundled with the same resolver as `inka build` (import maps,
 `npm:`/`jsr:`, `node_modules`). Use `--payload <dir>` to package an already-built
 directory.
+
+## Deep links
+
+`--deep-link <scheme>` (or `desktop.app.deepLinks`) validates the scheme per RFC
+3986 (reserved schemes are rejected) and registers it with the OS:
+
+- **Windows** writes `register-deep-links.bat` beside the app; running it once
+  adds `HKCU\Software\Classes\<scheme>` keys pointing back at `<App>.exe`.
+- **Linux** adds `x-scheme-handler/<scheme>;` to the `.desktop` `MimeType` and
+  ensures `Exec=… %u`.
+
+Delivering an opened URL into the *running* app is a separate concern (not yet
+implemented).
+
+## Self-extracting payload
+
+`--compress[=gzip]` (or `desktop.compress`) replaces the app directory with a
+thin one:
+
+```
+<App>/                    (or <App>.bat on Windows)
+payload.tar.gz            gzip tar of the real app tree
+```
+
+The launcher extracts to a per-user cache (`%LOCALAPPDATA%\<id>\<hash>` /
+`${XDG_DATA_HOME:-$HOME/.local/share}/<id>/<hash>`) on first run and then execs
+the real app. The `.zip`/`.msi`/`.tar.gz` artifacts then wrap the *compact* dir.
+Extraction uses the OS `tar` (bsdtar on Windows 10 1803+, which handles gzip).
 
 ## Distribution: the script installer
 
@@ -325,8 +361,10 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 The desktop runtime adapts Deno's `cli/rt_desktop` and vendored desktop JS
 (MIT, Copyright (c) the Deno authors). Hardened archive extraction
 (`crates/inka/src/archive.rs`), icon-set `.ico` generation
-(`crates/inka/src/ico.rs`), and the MSI builder (`crates/inka/src/windows_msi.rs`)
-are vendored from Deno's `cli/tools/desktop.rs` (also MIT, Copyright (c) the
-Deno authors). The window/renderer layer is
+(`crates/inka/src/ico.rs`), the MSI builder (`crates/inka/src/windows_msi.rs`),
+deep-link registration (`crates/inka/src/deep_links.rs`), and the
+self-extracting transform (`crates/inka/src/selfextract.rs`) are vendored from
+Deno's `cli/tools/desktop.rs` (also MIT, Copyright (c) the Deno authors). The
+window/renderer layer is
 [laufey](https://github.com/littledivy/laufey) (MIT, Copyright (c) Divy
 Srivastava), pinned at `0.7.0`.

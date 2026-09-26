@@ -653,6 +653,10 @@ pub(crate) struct DesktopConfig {
     pub output_windows: Option<String>,
     pub release_base: Option<String>,
     pub error_reporting: Option<String>,
+    /// Deep-link URL schemes to register (`desktop.app.deepLinks`).
+    pub deep_links: Vec<String>,
+    /// Self-extracting payload format (`desktop.compress`); `gzip` today.
+    pub compress: Option<String>,
     /// Top-level `version`, used as the auto-update app version default.
     pub version: Option<String>,
 }
@@ -739,6 +743,25 @@ fn desktop_icon(
     }
 }
 
+/// Resolve a list-of-strings config value (e.g. `desktop.app.deepLinks`),
+/// dropping empty entries.
+fn desktop_string_list(value: Option<&Value>, label: &str, warns: &mut Vec<String>) -> Vec<String> {
+    match value {
+        None => Vec::new(),
+        Some(Value::Array(entries)) => entries
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .collect(),
+        Some(_) => {
+            warns.push(format!("{label} must be an array of strings; ignoring it"));
+            Vec::new()
+        }
+    }
+}
+
 /// The `desktop` config object: `deno.json`'s top-level `desktop` when present,
 /// else `package.json`'s `inka.desktop`.
 fn desktop_block(cfg: &ConfigFiles) -> Option<&Value> {
@@ -810,6 +833,12 @@ pub(crate) fn desktop_config(cwd: &Path) -> (DesktopConfig, Vec<String>) {
         "desktop.errorReporting.url",
         &mut warns,
     );
+    out.deep_links = desktop_string_list(
+        app.and_then(|a| a.get("deepLinks")),
+        "desktop.app.deepLinks",
+        &mut warns,
+    );
+    out.compress = desktop_string(Some(block), "compress", "desktop.compress", &mut warns);
 
     // macOS packaging is unimplemented, so flag macos-only keys rather than
     // silently ignoring them. linux/windows keys are host-selected and normal
