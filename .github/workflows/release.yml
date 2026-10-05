@@ -277,24 +277,29 @@ jobs:
           $rtSha = (Get-FileHash -LiteralPath (Join-Path $stage $rtName) -Algorithm SHA256).Hash.ToLower()
           Set-Content -LiteralPath (Join-Path $stage "$rtName.sha256") -Value $rtSha
 
-          # Mirror the pinned Windows laufey backend so `inka desktop` installs
-          # offline and is checksum-verified against the inka trust anchor.
+          # Mirror the pinned Windows laufey backends (webview + CEF) so
+          # `inka desktop` installs offline and is checksum-verified against the
+          # inka trust anchor.
           # `laufey-asset.sh` reads the anchor from desktop.rs; Git Bash ships on
           # the image.
           $lVersion = (Select-String -Path 'crates/inka/src/desktop.rs' `
             -Pattern 'LAUFEY_VERSION: &str = "([0-9][0-9.]*)"').Matches[0].Groups[1].Value
-          $assetLine = [string](bash scripts/ci/laufey-asset.sh webview x86_64-pc-windows-msvc)
-          $assetParts = $assetLine.Trim() -split '\s+'
-          $webArchive = $assetParts[0]
-          $webSha = $assetParts[1]
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://github.com/littledivy/laufey/releases/download/v$lVersion/$webArchive" `
-            -OutFile (Join-Path $stage $webArchive)
-          $got = (Get-FileHash -LiteralPath (Join-Path $stage $webArchive) -Algorithm SHA256).Hash.ToLower()
-          if ($got -ne $webSha) {
-            throw "checksum mismatch for $webArchive (pinned $webSha, got $got)"
+          $backends = [ordered]@{}
+          foreach ($be in @('webview', 'cef')) {
+            $assetLine = [string](bash scripts/ci/laufey-asset.sh $be x86_64-pc-windows-msvc)
+            $assetParts = $assetLine.Trim() -split '\s+'
+            $archive = $assetParts[0]
+            $sha = $assetParts[1]
+            Invoke-WebRequest -UseBasicParsing `
+              -Uri "https://github.com/littledivy/laufey/releases/download/v$lVersion/$archive" `
+              -OutFile (Join-Path $stage $archive)
+            $got = (Get-FileHash -LiteralPath (Join-Path $stage $archive) -Algorithm SHA256).Hash.ToLower()
+            if ($got -ne $sha) {
+              throw "checksum mismatch for $archive (pinned $sha, got $got)"
+            }
+            Set-Content -LiteralPath (Join-Path $stage "$archive.sha256") -Value $got
+            $backends[$be] = [ordered]@{ archive = $archive; sha256 = $got }
           }
-          Set-Content -LiteralPath (Join-Path $stage "$webArchive.sha256") -Value $got
 
           # Merge the Linux record with a per-target map. Top-level keys stay
           # pointing at Linux so install.sh / older `inka update` keep working.
@@ -313,9 +318,7 @@ jobs:
             laufey         = [ordered]@{
               version  = $lVersion
               target   = 'x86_64-pc-windows-msvc'
-              backends = [ordered]@{
-                webview = [ordered]@{ archive = $webArchive; sha256 = $webSha }
-              }
+              backends = $backends
             }
           }
           $doc | Add-Member -NotePropertyName targets -NotePropertyValue $targets -Force

@@ -138,6 +138,39 @@ jobs:
             Select-Object -First 1
           if (-not $exe) { throw "msi administrative install produced no DeskApp.exe" }
 
+      # CEF backend: the pinned laufey CEF zip is large but exercises the shared
+      # runtime path — the shared dir is populated and its files are hardlinked
+      # into the app dir (no symlink privileges on Windows), plus the full CEF
+      # resource layout. No GUI launch.
+      - name: Smoke (CEF packaging)
+        run: |
+          $bin = "target/release"
+          # Keep both the shared dir and the app output under RUNNER_TEMP so they
+          # land on the same volume and hard links can be created (the default
+          # %LOCALAPPDATA% may be on a different volume).
+          $cefHome = Join-Path $env:RUNNER_TEMP "cef-shared"
+          $env:INKA_CEF_HOME = $cefHome
+          $cefDist = Join-Path $env:RUNNER_TEMP "cef-dist"
+          & "$bin/inka.exe" desktop deskapp/index.js --backend cef `
+            --name CefApp -o $cefDist
+          if ($LASTEXITCODE -ne 0) { throw "desktop --backend cef exited $LASTEXITCODE" }
+          foreach ($f in @("CefApp.exe", "CefApp.dll", "libcef.dll", "runtime-version")) {
+            if (-not (Test-Path (Join-Path $cefDist $f))) {
+              throw "CEF packaging missing $f"
+            }
+          }
+          if (-not (Get-ChildItem -Path (Join-Path $cefDist "locales") -Filter "*.pak" -ErrorAction SilentlyContinue)) {
+            throw "CEF packaging missing locales/*.pak"
+          }
+          if (-not (Test-Path "$cefDist.zip")) { throw "missing cef-dist.zip" }
+          if (-not (Test-Path (Join-Path $cefHome "libcef.dll"))) {
+            throw "shared CEF dir was not populated"
+          }
+          $lt = (Get-Item (Join-Path $cefDist "libcef.dll")).LinkType
+          if ($lt -ne "HardLink") {
+            throw "expected libcef.dll to be hardlinked, got LinkType='$lt'"
+          }
+
       # Self-extracting variant: a thin dir (launcher + gzip payload) instead of
       # the full tree. Structure only; no GUI launch.
       - name: Smoke (self-extracting packaging)
@@ -157,5 +190,5 @@ jobs:
             throw "payload does not contain DeskSmall/DeskSmall.exe"
           }
 
-      # Later: upload the toolchain zip + runtime dll + laufey zip as workflow
-      # artifacts, and add a CEF packaging smoke.
+      # Later: upload the toolchain zip + runtime dll + laufey zips as workflow
+      # artifacts.

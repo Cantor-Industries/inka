@@ -1053,7 +1053,8 @@ fn doctor_machine(effective: channel::Channel) {
     }
 
     // Shared CEF runtime: installed lazily by `inka desktop --backend cef` and
-    // shared per machine (symlinked in on unix, copied on Windows).
+    // shared per machine (symlinked in on unix, hardlinked in on Windows; copied
+    // as a fallback when linking is unavailable).
     let cef_dir = cef::shared_cef_dir();
     if cef_dir.join(platform::cef_lib_name()).is_file() {
         ui::ok("shared cef", cef_dir.display().to_string());

@@ -197,13 +197,43 @@ fn remove_any(path: &Path) {
     }
 }
 
-/// Symlink the shared CEF runtime into `out`, so laufey's `.:$ORIGIN` RPATH and
-/// CEF's resource lookup find it beside the launcher. `chrome-sandbox` is
-/// copied for real: Chromium security-checks that helper and may reject a link.
+/// How a shared CEF runtime entry was placed into an app dir.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkMode {
+    /// A per-entry symlink (unix).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Symlink,
+    /// A per-file hard link (Windows; shares the file data, needs no privilege).
+    #[cfg_attr(unix, allow(dead_code))]
+    Hardlink,
+    /// A real copy (the sandbox helper, or when linking is unavailable).
+    Copy,
+}
+
+impl LinkMode {
+    /// Human-readable label for status output.
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            LinkMode::Symlink => "symlinked",
+            LinkMode::Hardlink => "hardlinked",
+            LinkMode::Copy => "copied",
+        }
+    }
+}
+
+/// Link the shared CEF runtime into `out`, so laufey's `.:$ORIGIN` RPATH and
+/// CEF's resource lookup find it beside the launcher. On unix each entry is a
+/// symlink; on Windows each file is a **hard link** (directories are recreated
+/// and their contents hardlinked) because Windows symlinks require admin rights
+/// or Developer Mode. `chrome-sandbox` is always copied for real: Chromium
+/// security-checks that helper and may reject a link.
 ///
-/// Returns `Err` (with any partially-created links left in place) so the caller
-/// can fall back to a self-contained copy.
-pub(crate) fn link_into_app(shared: &Path, out: &Path) -> Result<(), String> {
+/// Returns the [`LinkMode`] used for the bulk runtime, or `Err` (with any
+/// partially-created entries left in place) when an entry cannot be linked, so
+/// the caller can fall back to a self-contained copy.
+pub(crate) fn link_into_app(shared: &Path, out: &Path) -> Result<LinkMode, String> {
+    fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
+    let mut mode = LinkMode::Copy;
     for ent in fs::read_dir(shared)
         .map_err(|e| format!("cannot read {}: {e}", shared.display()))?
         .flatten()
@@ -218,17 +248,58 @@ pub(crate) fn link_into_app(shared: &Path, out: &Path) -> Result<(), String> {
         let from = shared.join(&name);
         let to = out.join(&name);
         remove_any(&to);
-        if name_str == "chrome-sandbox" {
-            copy_entry(&from, &to)?;
-            continue;
+        let entry_mode = link_entry(&from, &to)?;
+        if entry_mode != LinkMode::Copy {
+            mode = entry_mode;
         }
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&from, &to)
-            .map_err(|e| format!("cannot link {} -> {}: {e}", to.display(), from.display()))?;
-        #[cfg(not(unix))]
-        return Err("sharing the CEF runtime requires symlinks".to_string());
     }
-    Ok(())
+    Ok(mode)
+}
+
+/// Link (or copy) one entry, recursing into directories. Files are hardlinked
+/// on Windows and symlinked on unix; the Chromium sandbox helper is copied.
+fn link_entry(from: &Path, to: &Path) -> Result<LinkMode, String> {
+    let md =
+        fs::symlink_metadata(from).map_err(|e| format!("cannot stat {}: {e}", from.display()))?;
+    if md.is_dir() {
+        fs::create_dir_all(to).map_err(|e| format!("cannot create {}: {e}", to.display()))?;
+        let mut mode = LinkMode::Copy;
+        for ent in fs::read_dir(from)
+            .map_err(|e| format!("cannot read {}: {e}", from.display()))?
+            .flatten()
+        {
+            let name = ent.file_name();
+            let entry_mode = link_entry(&from.join(&name), &to.join(&name))?;
+            if entry_mode != LinkMode::Copy {
+                mode = entry_mode;
+            }
+        }
+        return Ok(mode);
+    }
+    // Chromium validates the sandbox helper binary and can reject a link, so
+    // always ship a real copy (a unix-only artifact, absent on Windows).
+    if from.file_name() == Some(OsStr::new("chrome-sandbox")) {
+        remove_any(to);
+        copy_entry(from, to)?;
+        return Ok(LinkMode::Copy);
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(from, to)
+            .map_err(|e| format!("cannot link {} -> {}: {e}", to.display(), from.display()))?;
+        Ok(LinkMode::Symlink)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::hard_link(from, to).map_err(|e| {
+            format!(
+                "cannot hard-link {} -> {}: {e}",
+                to.display(),
+                from.display()
+            )
+        })?;
+        Ok(LinkMode::Hardlink)
+    }
 }
 
 #[cfg(test)]
@@ -330,7 +401,8 @@ mod tests {
         ensure_shared_cef_at(&backend, &backend.join("laufey"), &shared).unwrap();
         fs::create_dir_all(&out).unwrap();
 
-        link_into_app(&shared, &out).unwrap();
+        let mode = link_into_app(&shared, &out).unwrap();
+        assert_eq!(mode, LinkMode::Symlink);
 
         let link = fs::symlink_metadata(out.join("libcef.so")).unwrap();
         assert!(link.file_type().is_symlink(), "libcef.so must be a symlink");
@@ -346,6 +418,51 @@ mod tests {
                 .is_symlink(),
             "chrome-sandbox must be a real copy"
         );
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // On Windows the runtime is hardlinked, not symlinked (symlinks need admin
+    // rights or Developer Mode); exercise whichever the host supports.
+    #[test]
+    fn link_into_app_shares_runtime_with_the_platform_link_kind() {
+        let base = scratch("hardlink");
+        let backend = base.join("backend");
+        let shared = base.join("shared/cef");
+        let out = base.join("app");
+        fake_backend(&backend);
+        ensure_shared_cef_at(&backend, &backend.join("laufey"), &shared).unwrap();
+
+        let mode = link_into_app(&shared, &out).unwrap();
+
+        #[cfg(unix)]
+        assert_eq!(mode, LinkMode::Symlink);
+        #[cfg(windows)]
+        assert_eq!(mode, LinkMode::Hardlink);
+        assert_eq!(
+            mode.label(),
+            if cfg!(windows) {
+                "hardlinked"
+            } else {
+                "symlinked"
+            }
+        );
+
+        // The runtime file exists, is not a symlink, and shares its data with
+        // the shared install (a hard link has link count > 1).
+        assert!(fs::metadata(out.join(platform::cef_lib_name())).is_ok());
+        assert!(
+            fs::read(out.join("locales/en-US.pak")).unwrap() == b"pak",
+            "nested resource files must be linked too"
+        );
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            let nlink = fs::metadata(out.join(platform::cef_lib_name()))
+                .unwrap()
+                .number_of_links()
+                .unwrap_or(0);
+            assert!(nlink >= 2, "libcef.dll must be a hard link (nlink={nlink})");
+        }
         let _ = fs::remove_dir_all(&base);
     }
 

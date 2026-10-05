@@ -1148,7 +1148,7 @@ pub fn cmd_desktop(args: &[String]) {
         fail(&e);
     }
     let _ = fs::write(out.join(APP_DIR_MARKER), b"");
-    let (staged_backend, cef_bundled) = match stage_backend(&backend_path, &out) {
+    let (staged_backend, cef_mode) = match stage_backend(&backend_path, &out) {
         Ok(v) => v,
         Err(e) => fail(&e),
     };
@@ -1276,8 +1276,8 @@ pub fn cmd_desktop(args: &[String]) {
     ui::row("runtime", runtime_so.display());
     ui::row("payload", format!("{} file(s) embedded", files.len()));
     ui::row("backend", backend_path.display());
-    if cef_bundled {
-        ui::row("runtime files", cef_runtime_row());
+    if let Some(mode) = cef_mode {
+        ui::row("runtime files", cef_runtime_row(mode));
     }
     ui::row("id", &id);
     if let Some(o) = &installer_outputs {
@@ -1288,14 +1288,8 @@ pub fn cmd_desktop(args: &[String]) {
     ui::status_ok(format!("packaged {}", out.display()));
 }
 
-#[cfg(windows)]
-fn cef_runtime_row() -> &'static str {
-    "laufey + shared CEF (copied)"
-}
-
-#[cfg(not(windows))]
-fn cef_runtime_row() -> &'static str {
-    "laufey + shared CEF (symlinked)"
+fn cef_runtime_row(mode: crate::cef::LinkMode) -> String {
+    format!("laufey + shared CEF ({})", mode.label())
 }
 
 /// Apply the configured icon to the packaged app. Windows embeds it into the
@@ -1666,14 +1660,16 @@ fn copy_dir(src: &Path, dest: &Path) -> Result<(), String> {
 /// A CEF backend directory carries `libcef.so`/`libcef.dll` plus Chromium
 /// resources (`*.pak`, `icudtl.dat`, `locales/`, …) that CEF resolves next to
 /// the launcher; laufey's RPATH is `.:$ORIGIN`, so they must be reachable from
-/// the app dir. Those files are shared per machine (see `crate::cef`) and
-/// symlinked in on unix; if sharing is unavailable (always on Windows, or if
-/// linking fails), fall back to a self-contained copy. Other backends link
-/// system libraries and ship only the binary (`laufey_webview.exe` is
-/// self-contained) — copy just that, so a dev override
-/// (`INKA_LAUFEY_BACKEND`/`LAUFEY_DEV_DIR`) never drags in a whole
-/// `target/release`.
-fn stage_backend(backend_path: &Path, out: &Path) -> Result<(PathBuf, bool), String> {
+/// the app dir. Those files are shared per machine (see `crate::cef`): symlinked
+/// in on unix, hardlinked in on Windows, and copied if linking is unavailable
+/// (cross-volume, non-NTFS, or a failed link). Other backends link system
+/// libraries and ship only the binary (`laufey_webview.exe` is self-contained) —
+/// copy just that, so a dev override (`INKA_LAUFEY_BACKEND`/`LAUFEY_DEV_DIR`)
+/// never drags in a whole `target/release`.
+fn stage_backend(
+    backend_path: &Path,
+    out: &Path,
+) -> Result<(PathBuf, Option<crate::cef::LinkMode>), String> {
     stage_backend_in(backend_path, out, None)
 }
 
@@ -1683,7 +1679,7 @@ fn stage_backend_in(
     backend_path: &Path,
     out: &Path,
     shared_override: Option<&Path>,
-) -> Result<(PathBuf, bool), String> {
+) -> Result<(PathBuf, Option<crate::cef::LinkMode>), String> {
     fs::create_dir_all(out).map_err(|e| format!("cannot create {}: {e}", out.display()))?;
     let dir = backend_path.parent().ok_or_else(|| {
         format!(
@@ -1700,22 +1696,23 @@ fn stage_backend_in(
     if !cef {
         fs::copy(backend_path, &dest)
             .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
-        return Ok((dest, false));
+        return Ok((dest, None));
     }
 
-    // Prefer the shared runtime: symlink it in so each app is a few MB.
+    // Prefer the shared runtime: link it in so each app is a few MB instead of
+    // ~360 MB. Symlinks on unix; hard links on Windows (no admin needed).
     let shared = match shared_override {
         Some(s) => crate::cef::ensure_shared_cef_at(dir, backend_path, s).map(|()| s.to_path_buf()),
         None => crate::cef::ensure_shared_cef(dir, backend_path),
     };
     let linked = shared.and_then(|shared| {
-        crate::cef::link_into_app(&shared, out)?;
+        let mode = crate::cef::link_into_app(&shared, out)?;
         fs::copy(backend_path, &dest)
             .map_err(|e| format!("cannot place backend {}: {e}", backend_path.display()))?;
-        Ok(shared)
+        Ok(mode)
     });
     match linked {
-        Ok(_) => Ok((dest, true)),
+        Ok(mode) => Ok((dest, Some(mode))),
         Err(e) => {
             ui::warn(format!(
                 "could not use the shared CEF runtime ({e}); copying it into the app"
@@ -1735,7 +1732,7 @@ fn stage_backend_in(
                 let _ = fs::remove_dir_all(out.join(format!(".{stem}")));
                 let _ = fs::remove_file(out.join(format!(".{stem}.cache")));
             }
-            Ok((dest, true))
+            Ok((dest, Some(crate::cef::LinkMode::Copy)))
         }
     }
 }
@@ -1775,7 +1772,8 @@ fn reserve_app_dir(out: &Path) -> Result<(), String> {
 
 /// Refuse app-derived paths that would clobber a staged backend file. The app
 /// dir starts as a copy of the backend dir, and `fs::copy`/`fs::rename` replace
-/// silently, so an app named e.g. `libcef` would overwrite `libcef.so`.
+/// silently, so an app named e.g. `libcef` would overwrite `libcef.so`/`.dll`
+/// (or `d3dcompiler_47`/`laufey_helper` would collide with their files).
 fn check_target_collisions(
     launcher: &Path,
     runtime_so: &Path,
@@ -1934,7 +1932,11 @@ mod tests {
         let (staged, cef) =
             stage_backend_in(&backend_dir.join("laufey"), &out, Some(&shared)).unwrap();
 
-        assert!(cef, "a libcef.so sibling marks the CEF backend");
+        assert_eq!(
+            cef,
+            Some(crate::cef::LinkMode::Symlink),
+            "a libcef.so sibling marks the CEF backend"
+        );
         assert_eq!(staged, out.join("laufey"));
         // The launcher stays a real per-app file (laufey derives `<exe>.so`).
         assert!(!fs::symlink_metadata(out.join("laufey"))
@@ -1967,7 +1969,7 @@ mod tests {
 
         let (staged, cef) = stage_backend(&backend_dir.join("laufey_webview"), &out).unwrap();
 
-        assert!(!cef);
+        assert_eq!(cef, None);
         assert_eq!(staged, out.join("laufey_webview"));
         assert!(out.join("laufey_webview").is_file());
         assert!(

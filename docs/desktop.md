@@ -22,7 +22,7 @@ megabytes instead of the ~150 MB a per-app engine would cost.
   <App>.exe        laufey backend (window + renderer), renamed
   <App>.dll        per-app shim + your bundled payload
   runtime-version  the shared runtime tuple the shim loads
-  libcef.dll, ...  copied from the shared CEF runtime            (--backend cef)
+  libcef.dll, ...  hardlinks into the shared CEF runtime          (--backend cef)
 <App>.zip
 <App>.msi          Windows installer (--installer, or -o App.msi)
 ```
@@ -35,21 +35,27 @@ never copied into your app.
 With `--backend cef` the Chromium runtime is shared per machine: the first CEF
 app populates the shared dir (about 360 MB) and every app links those files next
 to its launcher. On Linux the shared dir is
-`~/.local/share/cef/<laufey-version>/<target>/` and the files are symlinked; on
-Windows it is `%LOCALAPPDATA%\cef\<laufey-version>\<target>\` and the files are
-**copied** (symlinks are unreliable without developer mode). laufey links
+`~/.local/share/cef/<laufey-version>/<target>/` and the files are **symlinked**;
+on Windows it is `%LOCALAPPDATA%\cef\<laufey-version>\<target>\` and the files
+are **hardlinked** (a single physical install, no admin rights needed — Windows
+symlinks would require Developer Mode). If the filesystem can't link (for
+example the app dir is on a different volume, or a non-NTFS filesystem), inka
+falls back to copying the runtime into the app. laufey links
 `libcef.so`/`libcef.dll` with `RPATH=.:$ORIGIN` and CEF reads its
 `*.pak`/`icudtl.dat`/`locales/` resources from beside the launcher. The launcher
 itself stays a real per-app file (laufey derives the runtime library name,
 `<App>.so`/`<App>.dll`, from its own path). The shared dir is versioned by the
-pinned laufey release; if symlinks are unavailable on the filesystem, inka falls
-back to bundling a full copy (always the case on Windows).
+pinned laufey release.
 
 Because the app is not self-contained, a runnable app dir (or its default
 `<App>.tar.gz`/`<App>.zip`) copied to another machine needs the shared CEF
 runtime there too (as with the shared engine) — or set `INKA_CEF_HOME`. On Linux
 the portable `--installer` artifacts provision both at install time; on Windows
-`--installer` is not supported yet (an MSI is planned), so ship the `.zip`.
+the `.msi` / `.zip` install the app, and the shared engine is provisioned by
+`inka update`. Note that an archive (`.zip`/`.msi`) stores real file data, so
+shipping an app to another machine materializes a private copy of the CEF files;
+the hardlink sharing benefits apps built on the same machine (or a machine-wide
+install).
 
 The runtime is a normal inka runtime with the `desktop` feature compiled in; the
 same `.so` still serves headless `inka run` and built artifacts.
@@ -65,8 +71,9 @@ same `.so` still serves headless `inka run` and built artifacts.
   `INKA_DESKTOP_RUNTIME` at launch.
 - The **laufey backend** for your platform is downloaded on first use and
   checksum-verified against pinned SHA-256s (laufey `0.7.0`). The `cef` backend
-  installs a shared Chromium runtime once and symlinks it into each app (see
-  below); `webview` uses the system WebKitGTK.
+  installs a shared Chromium runtime once and links it into each app (symlinks
+  on Linux, hard links on Windows; see below); `webview` uses the system
+  WebKitGTK (Linux) or WebView2 (Windows).
 - For framework mode (`inka desktop`, which defaults to the current directory),
   a **Vite** project.
 
@@ -335,7 +342,7 @@ build time and cannot be retargeted from app code. Only `https://` (or a local
 | `INKA_LAUFEY_BACKEND` | use a specific laufey backend binary |
 | `LAUFEY_DEV_DIR` | a laufey source checkout to source the backend from |
 | `INKA_LAUFEY_CACHE` | override the laufey backend cache root |
-| `INKA_CEF_HOME` | override the shared CEF runtime dir (default `~/.local/share/cef/<ver>/<target>`) |
+| `INKA_CEF_HOME` | override the shared CEF runtime dir (default `<data-dir>/cef/<ver>/<target>`: `~/.local/share/cef/...` on Linux, `%LOCALAPPDATA%\cef\...` on Windows) |
 | `INKA_RELEASE_BASE` | inka release base the installer provisions the engine/CEF from |
 
 ## Caveats & roadmap

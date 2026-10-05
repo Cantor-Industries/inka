@@ -105,6 +105,40 @@ try {
         Fail 'msi administrative install produced no SmokeApp.exe'
     }
 
+    Info 'inka desktop CEF packaging (shared runtime, hardlinked)'
+    # Seed the cached CEF backend from the staged mirror too.
+    $cefBackendDir = Join-Path $scratch (Join-Path $winLaufey.version `
+        (Join-Path 'cef' 'x86_64-pc-windows-msvc'))
+    New-Item -ItemType Directory -Force -Path $cefBackendDir | Out-Null
+    Expand-Archive -LiteralPath (Join-Path $Stage $winLaufey.backends.cef.archive) `
+        -DestinationPath $cefBackendDir -Force
+    Set-Content -LiteralPath (Join-Path $cefBackendDir '.downloaded') -Value "v$($winLaufey.version)"
+    # Force the shared dir onto the same volume as the app output so hard links
+    # can be created (the default %LOCALAPPDATA% may be on another volume).
+    $env:INKA_CEF_HOME = Join-Path $scratch 'cef-shared'
+    $cefDist = Join-Path $apps 'smoke-cef'
+    & $inka desktop simple.js --backend cef --name CefApp -o $cefDist
+    if ($LASTEXITCODE -ne 0) { Fail "desktop --backend cef exited $LASTEXITCODE" }
+    foreach ($f in @('CefApp.exe', 'CefApp.dll', 'libcef.dll', 'runtime-version')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $cefDist $f))) {
+            Fail "CEF packaging missing $f"
+        }
+    }
+    if (-not (Get-ChildItem -Path (Join-Path $cefDist 'locales') -Filter '*.pak' `
+            -ErrorAction SilentlyContinue)) {
+        Fail 'CEF packaging missing locales/*.pak'
+    }
+    if (-not (Test-Path -LiteralPath "$cefDist.zip")) { Fail 'CEF packaging missing the .zip' }
+    # Sharing: the shared dir is populated and the app's libcef.dll is a hard
+    # link into it (no admin/symlink privileges needed on NTFS).
+    if (-not (Test-Path -LiteralPath (Join-Path $env:INKA_CEF_HOME 'libcef.dll'))) {
+        Fail 'shared CEF dir was not populated'
+    }
+    $linkType = (Get-Item -LiteralPath (Join-Path $cefDist 'libcef.dll')).LinkType
+    if ($linkType -ne 'HardLink') {
+        Fail "expected libcef.dll to be hardlinked, got LinkType='$linkType'"
+    }
+
     Info 'inka desktop self-extracting packaging'
     $smallDist = Join-Path $apps 'smoke-small'
     & $inka desktop simple.js --backend webview --name SmokeSmall --compress -o $smallDist
