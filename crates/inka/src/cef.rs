@@ -447,22 +447,20 @@ mod tests {
             }
         );
 
-        // The runtime file exists, is not a symlink, and shares its data with
-        // the shared install (a hard link has link count > 1).
+        // The runtime file exists and nested resource files are linked too.
         assert!(fs::metadata(out.join(platform::cef_lib_name())).is_ok());
         assert!(
             fs::read(out.join("locales/en-US.pak")).unwrap() == b"pak",
             "nested resource files must be linked too"
         );
-        #[cfg(windows)]
-        {
-            use std::os::windows::fs::MetadataExt;
-            let nlink = fs::metadata(out.join(platform::cef_lib_name()))
-                .unwrap()
-                .number_of_links()
-                .unwrap_or(0);
-            assert!(nlink >= 2, "libcef.dll must be a hard link (nlink={nlink})");
-        }
+        // A link (symlink or hard link) shares storage, so a write through the
+        // app path must be visible in the shared install — proving it is not a
+        // copy. (Hardlink-ness is also checked end-to-end by the Windows smoke.)
+        fs::write(out.join("locales/en-US.pak"), b"linked").unwrap();
+        assert_eq!(
+            fs::read(shared.join("locales/en-US.pak")).unwrap(),
+            b"linked"
+        );
         let _ = fs::remove_dir_all(&base);
     }
 
