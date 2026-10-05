@@ -113,10 +113,15 @@ Core `inka` and `inka desktop` now build and run on Windows:
 - **`inka desktop` (webview)**: downloads the pinned laufey backend and produces
   `<App>.exe` (the renamed backend, icon embedded) + `<App>.dll` (the shim) plus
   a portable `<App>.zip`.
+- **`inka desktop` (CEF)**: `--backend cef` shares one Chromium runtime per
+  machine under `%LOCALAPPDATA%\cef\<laufey-version>\<target>\`, **hardlinked**
+  into each app directory (copy fallback when linking is unavailable), so CEF
+  apps share disk without needing Developer Mode.
 - **`.msi` installer**: `--installer` or `-o App.msi` builds a per-machine
   installer (pure Rust) with a Start Menu shortcut and the app icon.
 - The Windows runtime is published as `libinka_runtime-{{RUNTIME}}.dll` and is
-  now **desktop-enabled**; the pinned laufey backend is mirrored on the release.
+  now **desktop-enabled**; the pinned laufey backends (`webview` and `cef`) are
+  mirrored on the release.
 
 ## Under the hood
 
@@ -149,8 +154,8 @@ Core `inka` and `inka desktop` now build and run on Windows:
 - `inka-toolchain-{{REL}}-x86_64-pc-windows-msvc.zip` — Windows CLI + launcher +
   desktop shim (`libinka_desktop_shim.dll`)
 - `libinka_runtime-{{RUNTIME}}.dll` — Windows shared runtime (desktop-enabled)
-- `laufey-cef-*.tar.gz` (Linux) and `laufey-webview-*.zip` (Windows) — pinned
-  backend mirrors
+- `laufey-cef-*.tar.gz` (Linux) / `laufey-cef-*.zip` (Windows) and
+  `laufey-webview-*.zip` (Windows) — pinned backend mirrors
 - `install.sh` / `install.ps1` + `versions.json` — bootstrap installers + version
   record
 
