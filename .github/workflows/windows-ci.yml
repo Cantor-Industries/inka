@@ -70,6 +70,22 @@ jobs:
           cargo build --locked --release -p inka-runtime --features desktop
           cargo build --locked --release -p inka --features bundle -p inka-launcher -p inka-desktop-shim
 
+      # `+crt-static` (see `.cargo/config.toml`) must make the binaries
+      # self-contained. Fail if a dependency reintroduces the dynamic CRT, which
+      # would also bring back `LNK4098`.
+      - name: Verify static CRT
+        run: |
+          $llvmObjdump = Join-Path $env:ProgramFiles 'LLVM\bin\llvm-objdump.exe'
+          foreach ($rel in @('target/release/inka.exe', 'target/release/inka_runtime.dll')) {
+            if (Test-Path -LiteralPath $llvmObjdump) {
+              $imports = & $llvmObjdump -p $rel
+            } else {
+              $imports = & dumpbin /dependents $rel
+            }
+            $bad = $imports | Select-String -Pattern 'VCRUNTIME|MSVCP'
+            if ($bad) { throw "$rel links the dynamic CRT: $bad" }
+          }
+
       # Rename the cdylib outputs to the released names and expose the runtime
       # to the launcher, mirroring the Linux release staging.
       - name: Stage runtime

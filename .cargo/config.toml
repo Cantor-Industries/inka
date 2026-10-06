@@ -1,0 +1,11 @@
+# Build configuration.
+#
+# Windows: use the static CRT (`/MT`) so the toolchain, the per-app shim, and the
+# shared runtime match `rusty_v8`'s prebuilt archive and link no
+# `vcruntime140.dll` / `msvcp140.dll`. This resolves the `LNK4098` mismatch and
+# makes the released binaries self-contained. Rust defaults to the dynamic CRT
+# (`/MD`) on `x86_64-pc-windows-msvc`; `+crt-static` flips it and the `cc`/`cmake`
+# C dependencies follow via `CARGO_CFG_TARGET_FEATURE`. See
+# `windows-porting.md` (CRT alignment).
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

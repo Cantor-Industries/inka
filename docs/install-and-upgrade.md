@@ -59,6 +59,42 @@ curl --proto '=https' --tlsv1.2 -fsSL \
   https://github.com/Cantor-Industries/inka/releases/download/v0.4.0/install.sh | sh
 ```
 
+## Install (Windows)
+
+On Windows `x86_64` (`x86_64-pc-windows-msvc`), install natively with PowerShell:
+
+```powershell
+irm https://github.com/Cantor-Industries/inka/releases/latest/download/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+It mirrors `install.sh`:
+
+1. downloads the **toolchain** zip (CLI + launcher + the per-app desktop shim),
+   verifies its `sha256`, and installs it under `%LOCALAPPDATA%\inka\bin`;
+2. adds that directory to your **user** `PATH` (`-NoModifyPath` to skip);
+3. runs `inka update` to provision the shared **runtime** under
+   `%LOCALAPPDATA%\inka`.
+
+To pin the script and its assets, fetch it from the tag rather than `latest`.
+
+| Option | Effect |
+|---|---|
+| `-Version <tag>` | pin the release (assets fetched from that tag) |
+| `-Beta` | install the newest beta release (toolchain + runtime) |
+| `-From <dir-or-url>` | release base override (mirror / local staging) |
+| `-Prefix <dir>` | install prefix (default `%LOCALAPPDATA%\inka`) |
+| `-NoModifyPath` | do not edit the user `PATH` |
+| `-NoRuntime` | skip the runtime `.dll` |
+| `-Force` | reinstall the toolchain even if current |
+| `-Uninstall` | remove the toolchain (and runtime) |
+
+The Windows toolchain, launcher, and shared runtime are built with the **static
+C runtime**, so no Visual C++ Redistributable is required. `inka desktop`'s
+`webview` backend uses the system **WebView2** runtime (preinstalled on Windows
+11 and most Windows 10); the `cef` backend ships its own Chromium runtime
+instead. PowerShell 5.1 (Windows 10) and PowerShell 7+ are both supported.
+
 ## Beta releases
 
 Beta builds are published as GitHub **prereleases**, so the default channel

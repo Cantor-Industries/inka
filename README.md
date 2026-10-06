@@ -5,7 +5,7 @@
 - **Tiny artifacts** — a bundled module + a ~380 KB launcher, not a ~100 MB engine in every binary.
 - **Shared runtime** — the engine is installed once per user; inka executables load it at run time.
 - **Offline builds** — `inka build` resolves and bundles imports (import maps, `npm:`, `jsr:`, `node_modules`) into one self-contained module.
-- **Desktop apps** — `inka desktop` packages a web app that reuses the same shared runtime, so it stays small instead of embedding a per-app engine (Linux/webview today).
+- **Desktop apps** — `inka desktop` packages a web app that reuses the same shared runtime, so it stays small instead of embedding a per-app engine (Linux and Windows).
 
 The engine is built on [Deno](https://deno.com) — see the [Deno acknowledgment](#acknowledgments--deno).
 
@@ -20,9 +20,20 @@ curl --proto '=https' --tlsv1.2 -fsSL \
 
 It installs the toolchain per-user (`~/.local/lib/inka`, shimmed at
 `~/.local/bin/inka`) and provisions the shared engine (runtime) via
-`inka update`. On Windows, install **WSL2** with Ubuntu and
-run the same command inside it. macOS isn't published yet — **build from
+`inka update`. macOS isn't published yet — **build from
 source** (below).
+
+On Windows `x86_64`, install natively with `install.ps1` (per-user under
+`%LOCALAPPDATA%\inka`, added to your user `PATH`):
+
+```powershell
+irm https://github.com/Cantor-Industries/inka/releases/latest/download/install.ps1 -OutFile install.ps1
+.\install.ps1
+```
+
+`install.ps1` mirrors `install.sh` (`-Version`, `-Beta`, `-From`, `-Prefix`,
+`-Uninstall`). The Windows toolchain, launcher, and shared runtime are
+self-contained (static CRT), so no Visual C++ Redistributable is required.
 
 Then confirm everything is ready:
 
