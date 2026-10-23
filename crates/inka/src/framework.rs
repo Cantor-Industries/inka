@@ -1,4 +1,4 @@
-// Framework detection for `inka desktop .`, vendored from Deno 2.9.7
+// Framework detection for `inka desktop .`, vendored from Deno 2.9.8
 // `cli/tools/framework.rs` (MIT, Copyright (c) the Deno authors).
 //
 // Detects web frameworks (Fresh, Astro, Remix, React Router, SvelteKit, Nuxt,

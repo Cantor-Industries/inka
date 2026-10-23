@@ -25,14 +25,14 @@ desktop-e2e = ["desktop"]
 [dependencies]
 async-trait = "=0.1.73"
 deno_ast = { version = "=0.53.3", features = ["cjs"] }
-deno_cache_dir = "=0.51.0"
-deno_config = "=0.109.0"
-deno_core = "=0.412.0"
+deno_cache_dir = "=0.52.0"
+deno_config = "=0.110.0"
+deno_core = "=0.413.0"
 deno_error = "=0.7.1"
-deno_graph = "=0.111.0"
+deno_graph = "=0.111.1"
 deno_media_type = { version = "=0.4.0", optional = true }
-deno_resolver = "=0.90.0"
-deno_runtime = { version = "=0.267.0", features = ["transpile"] }
+deno_resolver = "=0.91.0"
+deno_runtime = { version = "=0.268.0", features = ["transpile"] }
 deno_semver = "=0.10.1"
 deno_terminal = { version = "=0.2.3", features = ["colors"] }
 import_map = "=0.25.0"
@@ -40,7 +40,7 @@ inka-format = { path = "../inka-format" }
 laufey = { version = "=0.7.0", optional = true }
 notify = { version = "=8.2.0", optional = true }
 raw-window-handle = { version = "=0.6.2", optional = true }
-node_resolver = "=0.97.0"
+node_resolver = "=0.98.0"
 oxc_resolver = "=11.24.3"
 serde = { version = "1", features = ["derive"] }
 sys_traits = { version = "=0.1.28", features = ["real", "filetime", "getrandom"] }
@@ -56,5 +56,5 @@ sys_traits = { version = "=0.1.28", features = ["libc"] }
 sys_traits = { version = "=0.1.28", features = ["winapi"] }
 
 [build-dependencies]
-deno_core = "=0.412.0"
-deno_runtime = { version = "=0.267.0", features = ["snapshot"] }
+deno_core = "=0.413.0"
+deno_runtime = { version = "=0.268.0", features = ["snapshot"] }

@@ -15,7 +15,7 @@ TOML="$ROOT/crates/inka-runtime/Cargo.toml"
 
 # The engine and laufey the vendored JS was last synced from. Bump these in the
 # same commit that re-vendors desktop_js.rs.
-VENDORED_DENO_RUNTIME="0.267.0"
+VENDORED_DENO_RUNTIME="0.268.0"
 VENDORED_LAUFEY="0.7.0"
 
 DENO="$(sed -n 's/.*deno_runtime = { version = "=\([0-9][0-9.]*\)".*/\1/p' "$TOML" | head -1)"

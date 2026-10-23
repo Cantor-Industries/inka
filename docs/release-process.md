@@ -86,7 +86,7 @@ so the tagged commit carries the notes.
   are checksum-pinned in `LAUFEY_SUMS`. Bumping laufey means updating the
   `LAUFEY_VERSION`/`LAUFEY_SUMS` constants, the `laufey = "=X.Y.Z"` pins, and the
   API-version assert in the runtime when the ABI changes.
-- `crates/inka-runtime/src/desktop_js.rs` vendors Deno 2.9.7's desktop JS
+- `crates/inka-runtime/src/desktop_js.rs` vendors Deno 2.9.8's desktop JS
   (byte-for-byte except the `serde_json` path); re-sync it when `deno_runtime` or
   laufey is bumped.
 - Attribution: laufey is MIT (Copyright (c) Divy Srivastava); the desktop JS and

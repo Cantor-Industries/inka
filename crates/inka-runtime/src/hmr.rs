@@ -1,5 +1,5 @@
 // Simplified HMR (hot module replacement) for the inka desktop runtime,
-// adapted from Deno 2.9.7 `cli/rt/hmr.rs` (MIT, Copyright (c) the Deno
+// adapted from Deno 2.9.8 `cli/rt/hmr.rs` (MIT, Copyright (c) the Deno
 // authors). Watches source files on disk, transpiles changed
 // TypeScript/TSX/JSX files with `deno_ast`, and hot-replaces them via V8's
 // `Debugger.setScriptSource`, falling back to a window reload when a change

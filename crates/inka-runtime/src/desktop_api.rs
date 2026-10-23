@@ -1,5 +1,5 @@
-// Adapted from Deno 2.9.7 `cli/rt_desktop/lib.rs` (MIT, Copyright 2018-2026
-// the Deno authors). Pinned to laufey 0.7.0 / deno_runtime 0.267.0.
+// Adapted from Deno 2.9.8 `cli/rt_desktop/lib.rs` (MIT, Copyright 2018-2026
+// the Deno authors). Pinned to laufey 0.7.0 / deno_runtime 0.268.0.
 
 use std::collections::HashMap;
 use std::collections::HashSet;

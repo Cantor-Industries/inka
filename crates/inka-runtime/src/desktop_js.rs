@@ -1,4 +1,4 @@
-// Desktop JS surface vendored from Deno 2.9.7 `cli/rt/desktop.rs`
+// Desktop JS surface vendored from Deno 2.9.8 `cli/rt/desktop.rs`
 // (MIT, Copyright 2018-2026 the Deno authors). Kept byte-for-byte except for
 // `serde_json` -> `deno_core::serde_json`. This anchors desktop API parity to
 // the `deno_runtime`/`laufey` versions inka pins.

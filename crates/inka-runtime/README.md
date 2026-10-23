@@ -3,7 +3,7 @@
 The real engine: a `cdylib` built on Deno (`deno_runtime`/`deno_core`) that the
 launcher (and `inka run`) dlopen. One installed runtime file = one version
 tuple: `libinka_runtime-<v>.so`, where `<v>` is the `deno_runtime` base
-(`0.xxx.0`, e.g. `0.267.0` ↔ Deno 2.9.7) plus an inka runtime revision (`.1`,
+(`0.xxx.0`, e.g. `0.268.0` ↔ Deno 2.9.8) plus an inka runtime revision (`.1`,
 `.2`, …), tracked in `runtime-version`. Artifacts never embed it — they load the
 best matching installed tuple.
 
@@ -73,7 +73,7 @@ the source, so an ESM file inside a package root passes through unchanged.
 ## Tuple updates
 
 The Deno crates are not a stable API, so the runtime pins them exactly
-(`deno_runtime = "=0.267.0"` and friends) and touches them only through the
+(`deno_runtime = "=0.268.0"` and friends) and touches them only through the
 `node_services.rs` / `resolver.rs` seams and `build.rs`. To bump a tuple, see
 [`docs/runtime-tuple-update.md`](../../docs/runtime-tuple-update.md).
 
