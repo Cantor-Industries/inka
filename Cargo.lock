@@ -4616,7 +4616,7 @@ checksum = "f4200d433cbd5178df7797c9c2e75b348b728e39631cf14520d1e2fc424201f4"
 
 [[package]]
 name = "inka"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "cab",
@@ -4647,7 +4647,7 @@ dependencies = [
 
 [[package]]
 name = "inka-bundler"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "anyhow",
  "deno_cache_dir",
@@ -4669,7 +4669,7 @@ dependencies = [
 
 [[package]]
 name = "inka-desktop-shim"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "filetime",
  "fslock",
@@ -4681,7 +4681,7 @@ dependencies = [
 
 [[package]]
 name = "inka-format"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "libsui",
  "windows-sys 0.61.2",
@@ -4689,7 +4689,7 @@ dependencies = [
 
 [[package]]
 name = "inka-launcher"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "inka-format",
  "libloading 0.8.9",
@@ -4697,7 +4697,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime"
-version = "0.8.1"
+version = "0.8.2"
 dependencies = [
  "async-trait",
  "deno_ast",
@@ -4726,7 +4726,7 @@ dependencies = [
 
 [[package]]
 name = "inka-runtime-stub"
-version = "0.8.1"
+version = "0.8.2"
 
 [[package]]
 name = "inotify"
