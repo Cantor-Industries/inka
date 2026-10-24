@@ -15,6 +15,7 @@ use std::path::Path;
 #[cfg(feature = "bundle")]
 use std::path::PathBuf;
 
+#[cfg(feature = "bundle")]
 use inka_format::ArchiveEntry;
 
 #[cfg(feature = "bundle")]
@@ -60,6 +61,7 @@ pub(crate) fn is_executable(_md: &fs::Metadata) -> bool {
 }
 
 /// Stat `path` (following symlinks) and report whether it is executable.
+#[cfg(feature = "bundle")]
 pub(crate) fn is_executable_path(path: &Path) -> bool {
     fs::metadata(path)
         .map(|md| is_executable(&md))
