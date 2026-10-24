@@ -19,6 +19,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use inka_format::ArchiveEntry;
+
 use crate::help::{self, Mode};
 use crate::platform;
 use crate::ui;
@@ -1485,27 +1487,52 @@ fn zip_dir(src: &Path, dest: &Path) -> Result<(), String> {
 }
 
 /// Collect a staging directory into archive entries (relative paths, `/`
-/// separators).
-fn collect_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
-    fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) -> Result<(), String> {
+/// separators). Symlinks are followed only when their realpath stays inside the
+/// staging tree; an output tree that links to `/etc/...` must not be embedded.
+fn collect_files(root: &Path) -> Result<Vec<ArchiveEntry>, String> {
+    let root_real = fs::canonicalize(root)
+        .map_err(|e| format!("cannot resolve staging {}: {e}", root.display()))?;
+
+    fn walk(
+        base: &Path,
+        root_real: &Path,
+        dir: &Path,
+        out: &mut Vec<ArchiveEntry>,
+        ancestors: &mut Vec<PathBuf>,
+    ) -> Result<(), String> {
+        let canon = fs::canonicalize(dir).map_err(|e| e.to_string())?;
+        if !canon.starts_with(root_real) || ancestors.iter().any(|a| a == &canon) {
+            return Ok(());
+        }
+        ancestors.push(canon);
         for ent in fs::read_dir(dir).map_err(|e| e.to_string())?.flatten() {
             let p = ent.path();
-            if p.is_dir() {
-                walk(base, &p, out)?;
-            } else if p.is_file() {
+            // Follow symlinks for type/contents, but require the realpath to
+            // stay inside the staging tree.
+            let md = fs::metadata(&p).map_err(|e| format!("stat {}: {e}", p.display()))?;
+            if md.is_dir() {
+                walk(base, root_real, &p, out, ancestors)?;
+            } else if md.is_file() {
+                let real = fs::canonicalize(&p).map_err(|e| e.to_string())?;
+                if !real.starts_with(root_real) {
+                    continue;
+                }
                 let rel = p
                     .strip_prefix(base)
                     .map_err(|_| "path outside staging".to_string())?
                     .to_string_lossy()
                     .replace('\\', "/");
                 let data = fs::read(&p).map_err(|e| format!("read {}: {e}", p.display()))?;
-                out.push((rel, data));
+                let exec = crate::embed::is_executable(&md);
+                out.push(ArchiveEntry::new(rel, data, exec));
             }
         }
+        ancestors.pop();
         Ok(())
     }
+
     let mut out = Vec::new();
-    walk(root, root, &mut out)?;
+    walk(root, &root_real, root, &mut out, &mut Vec::new())?;
     Ok(out)
 }
 
@@ -1514,7 +1541,7 @@ fn collect_files(root: &Path) -> Result<Vec<(String, Vec<u8>)>, String> {
 fn pack_shim(
     shim: &Path,
     dest: &Path,
-    files: &[(String, Vec<u8>)],
+    files: &[ArchiveEntry],
     manifest: &str,
 ) -> Result<(), String> {
     let image = fs::read(shim).map_err(|e| format!("cannot read {}: {e}", shim.display()))?;
@@ -1815,6 +1842,34 @@ mod tests {
         d
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn collect_files_confines_symlinks_and_records_exec() {
+        let base = scratch("collect");
+        let staging = base.join("staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(staging.join("main.js"), b"console.log(1);\n").unwrap();
+        fs::write(staging.join("run.sh"), b"#!/bin/sh\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(staging.join("run.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let secret = base.join("secret.txt");
+        fs::write(&secret, b"SECRET\n").unwrap();
+        std::os::unix::fs::symlink(&secret, staging.join("leak.txt")).unwrap();
+
+        let files = collect_files(&staging).unwrap();
+        let main = files.iter().find(|e| e.path == "main.js").unwrap();
+        assert!(!main.exec);
+        let run = files.iter().find(|e| e.path == "run.sh").unwrap();
+        assert!(run.exec);
+        assert!(
+            !files.iter().any(|e| e.path == "leak.txt"),
+            "out-of-tree symlink was embedded: {files:?}"
+        );
+        let _ = fs::remove_dir_all(&base);
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn embedded_payload_section_roundtrips() {
@@ -1827,7 +1882,11 @@ mod tests {
             .find_map(|p| fs::read(p).ok())
             .or_else(|| fs::read("/proc/self/exe").ok())
             .expect("a small ELF to embed into");
-        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let files = vec![ArchiveEntry::new(
+            "main.js",
+            b"console.log(1)".to_vec(),
+            false,
+        )];
         let manifest = "module=main.js\napp-name=Demo\n";
         let payload = inka_format::encode_section_payload(&files, manifest.as_bytes());
         let out = crate::payload::embed(&image, &payload).expect("embed payload section");

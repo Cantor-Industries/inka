@@ -1110,7 +1110,7 @@ mod tests {
             .iter()
             .map(|(p, b)| (p.to_string(), b.to_vec()))
             .collect();
-        let archive = inka_format::encode_archive(&owned);
+        let archive = inka_format::encode_archive_v1(&owned);
         let mut image = vec![0x7f, b'E', b'L', b'F'];
         image.extend_from_slice(&archive);
         image.extend_from_slice(manifest.as_bytes());
@@ -1145,7 +1145,11 @@ mod tests {
         // The current format: embed the payload into a real host image with the
         // same writer `inka build` uses, then inspect it.
         let base = fs::read(std::env::current_exe().unwrap()).unwrap();
-        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let files = vec![inka_format::ArchiveEntry::new(
+            "main.js",
+            b"console.log(1)".to_vec(),
+            false,
+        )];
         let payload = inka_format::encode_section_payload(&files, b"module=main.js\n");
         let image = crate::payload::embed(&base, &payload).unwrap();
 

@@ -142,19 +142,65 @@ pub fn validate_rel_path(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Walk the archive entries, calling `f(path, data)` for each. Both slices borrow
-/// from `blob`, so the metadata-only caller never copies payload bytes.
-fn walk_archive<'a>(blob: &'a [u8], mut f: impl FnMut(&'a str, &'a [u8])) -> Result<(), String> {
-    let mut rest: &'a [u8] = blob;
+/// One archive entry: a path, its bytes, and whether the file was executable
+/// on the build host. Only the exec bit is carried; extraction normalizes the
+/// final mode to `0755`/`0644`, so a package can never smuggle setuid/setgid,
+/// sticky, or world-writable bits through the artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveEntry {
+    pub path: String,
+    pub data: Vec<u8>,
+    pub exec: bool,
+}
+
+impl ArchiveEntry {
+    pub fn new(path: impl Into<String>, data: Vec<u8>, exec: bool) -> Self {
+        Self {
+            path: path.into(),
+            data,
+            exec,
+        }
+    }
+}
+
+/// Archive v2 begins with this marker; v1 archives start directly with an
+/// entry header (a `u64` path length), so a valid v1 archive can never collide
+/// with the marker.
+const ARCHIVE_V2_MAGIC: &[u8; 8] = b"INKARC2\0";
+/// The only defined v2 flag. Unknown bits are rejected so a future format
+/// change cannot be silently misinterpreted.
+const ARCHIVE_FLAG_EXEC: u8 = 0x01;
+
+/// Walk the archive entries, calling `f(path, data, exec)` for each. Both
+/// slices borrow from `blob`, so the metadata-only caller never copies payload
+/// bytes. v2 entries carry a flags byte; v1 entries are always non-executable.
+fn walk_archive<'a>(
+    blob: &'a [u8],
+    mut f: impl FnMut(&'a str, &'a [u8], bool),
+) -> Result<(), String> {
+    let (v2, mut rest): (bool, &'a [u8]) = match blob.strip_prefix(ARCHIVE_V2_MAGIC.as_slice()) {
+        Some(rest) => (true, rest),
+        None => (false, blob),
+    };
+    let header_len = if v2 { 17 } else { 16 };
     while !rest.is_empty() {
-        if rest.len() < 16 {
+        if rest.len() < header_len {
             return Err("malformed archive entry header".into());
         }
         let path_len = usize::try_from(u64::from_le_bytes(rest[0..8].try_into().unwrap()))
             .map_err(|_| "archive entry path length out of range".to_string())?;
         let data_len = usize::try_from(u64::from_le_bytes(rest[8..16].try_into().unwrap()))
             .map_err(|_| "archive entry data length out of range".to_string())?;
-        rest = &rest[16..];
+        let flags = if v2 {
+            let flags = rest[16];
+            if flags & !ARCHIVE_FLAG_EXEC != 0 {
+                return Err(format!("unsupported archive entry flags 0x{flags:02x}"));
+            }
+            flags
+        } else {
+            0
+        };
+        rest = &rest[header_len..];
         let end = path_len
             .checked_add(data_len)
             .ok_or_else(|| "archive entry lengths overflow".to_string())?;
@@ -164,17 +210,17 @@ fn walk_archive<'a>(blob: &'a [u8], mut f: impl FnMut(&'a str, &'a [u8])) -> Res
         let path = std::str::from_utf8(&rest[..path_len])
             .map_err(|_| "archive entry path is not valid UTF-8".to_string())?;
         validate_rel_path(path)?;
-        f(path, &rest[path_len..end]);
+        f(path, &rest[path_len..end], flags & ARCHIVE_FLAG_EXEC != 0);
         rest = &rest[end..];
     }
     Ok(())
 }
 
 /// Decode the full archive, copying every payload.
-pub fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+pub fn parse_archive(blob: &[u8]) -> Result<Vec<ArchiveEntry>, String> {
     let mut out = Vec::new();
-    walk_archive(blob, |path, data| {
-        out.push((path.to_string(), data.to_vec()))
+    walk_archive(blob, |path, data, exec| {
+        out.push(ArchiveEntry::new(path, data.to_vec(), exec))
     })?;
     Ok(out)
 }
@@ -182,12 +228,30 @@ pub fn parse_archive(blob: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
 /// Decode only entry names and payload lengths (no copies), for inspection.
 pub fn archive_index(blob: &[u8]) -> Result<Vec<(String, usize)>, String> {
     let mut out = Vec::new();
-    walk_archive(blob, |path, data| out.push((path.to_string(), data.len())))?;
+    walk_archive(blob, |path, data, _exec| {
+        out.push((path.to_string(), data.len()))
+    })?;
     Ok(out)
 }
 
-/// Encode files as `{path_len u64}{data_len u64}{path}{data}` entries.
-pub fn encode_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+/// Encode entries in the current (v2) format:
+/// `MAGIC_V2 {path_len u64}{data_len u64}{flags u8}{path}{data}...`.
+pub fn encode_archive(entries: &[ArchiveEntry]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(ARCHIVE_V2_MAGIC.len());
+    out.extend_from_slice(ARCHIVE_V2_MAGIC);
+    for entry in entries {
+        out.extend_from_slice(&(entry.path.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(entry.data.len() as u64).to_le_bytes());
+        out.push(if entry.exec { ARCHIVE_FLAG_EXEC } else { 0 });
+        out.extend_from_slice(entry.path.as_bytes());
+        out.extend_from_slice(&entry.data);
+    }
+    out
+}
+
+/// Encode the legacy v1 format (`{path_len u64}{data_len u64}{path}{data}...`).
+/// Kept for compatibility tests and for constructing old artifacts.
+pub fn encode_archive_v1(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     let mut out = Vec::new();
     for (path, data) in files {
         out.extend_from_slice(&(path.len() as u64).to_le_bytes());
@@ -214,7 +278,7 @@ pub struct SectionPayload<'a> {
 /// Encode a desktop payload as `[manifest_len u64 LE][manifest][archive]`.
 /// Unlike the launcher's trailing artifact footer, this lives inside a binary
 /// section, so the image bytes before it are never modified or re-scanned.
-pub fn encode_section_payload(files: &[(String, Vec<u8>)], manifest: &[u8]) -> Vec<u8> {
+pub fn encode_section_payload(files: &[ArchiveEntry], manifest: &[u8]) -> Vec<u8> {
     let archive = encode_archive(files);
     let mut out = Vec::with_capacity(8 + manifest.len() + archive.len());
     out.extend_from_slice(&(manifest.len() as u64).to_le_bytes());
@@ -663,7 +727,7 @@ pub fn read_layout(bytes: &[u8]) -> Result<Layout, String> {
 
 /// The decoded artifact: extracted files plus the raw manifest bytes.
 pub struct Trailer<'a> {
-    pub files: Vec<(String, Vec<u8>)>,
+    pub files: Vec<ArchiveEntry>,
     pub manifest: &'a [u8],
 }
 
@@ -976,11 +1040,15 @@ mod tests {
         v
     }
 
+    fn ae(path: &str, data: &[u8], exec: bool) -> ArchiveEntry {
+        ArchiveEntry::new(path, data.to_vec(), exec)
+    }
+
     #[test]
     fn archive_roundtrip() {
         let files = vec![
-            ("main.js".to_string(), b"hi".to_vec()),
-            ("node_modules/x/index.js".to_string(), b"x".to_vec()),
+            ae("main.js", b"hi", false),
+            ae("node_modules/x/bin/tool", b"x", true),
         ];
         let blob = encode_archive(&files);
         assert_eq!(parse_archive(&blob).unwrap(), files);
@@ -988,9 +1056,43 @@ mod tests {
             archive_index(&blob).unwrap(),
             vec![
                 ("main.js".to_string(), 2),
-                ("node_modules/x/index.js".to_string(), 1),
+                ("node_modules/x/bin/tool".to_string(), 1),
             ]
         );
+    }
+
+    #[test]
+    fn legacy_v1_archive_is_non_executable() {
+        let files = vec![
+            ("main.js".to_string(), b"hi".to_vec()),
+            ("bin/tool".to_string(), b"x".to_vec()),
+        ];
+        let blob = encode_archive_v1(&files);
+        let parsed = parse_archive(&blob).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert!(parsed.iter().all(|entry| !entry.exec));
+    }
+
+    #[test]
+    fn archive_v2_rejects_unknown_flags() {
+        let mut blob = ARCHIVE_V2_MAGIC.to_vec();
+        blob.extend_from_slice(&(4u64).to_le_bytes());
+        blob.extend_from_slice(&(1u64).to_le_bytes());
+        blob.push(0x02);
+        blob.extend_from_slice(b"main");
+        blob.extend_from_slice(b"x");
+        assert!(parse_archive(&blob).is_err());
+    }
+
+    #[test]
+    fn archive_v2_rejects_parent_dir() {
+        let mut blob = ARCHIVE_V2_MAGIC.to_vec();
+        blob.extend_from_slice(&(6u64).to_le_bytes());
+        blob.extend_from_slice(&(1u64).to_le_bytes());
+        blob.push(0);
+        blob.extend_from_slice(b"../evil");
+        blob.extend_from_slice(b"x");
+        assert!(parse_archive(&blob).is_err());
     }
 
     #[test]
@@ -1010,8 +1112,8 @@ mod tests {
     #[test]
     fn section_payload_roundtrip() {
         let files = vec![
-            ("main.js".to_string(), b"console.log(1)".to_vec()),
-            ("assets/a.txt".to_string(), b"a".to_vec()),
+            ae("main.js", b"console.log(1)", false),
+            ae("assets/run.sh", b"#!/bin/sh\n", true),
         ];
         let manifest = "module=main.js\napp-name=Demo\n";
         let payload = encode_section_payload(&files, manifest.as_bytes());
@@ -1034,7 +1136,7 @@ mod tests {
 
     #[test]
     fn footer_roundtrip_and_magic() {
-        let files = vec![("main.js".to_string(), b"hello".to_vec())];
+        let files = vec![ae("main.js", b"hello", false)];
         let archive = encode_archive(&files);
         let manifest = b"module=main.js\n";
         let mut image = vec![0x7f, 0x45, 0x4c, 0x46]; // launcher bytes
@@ -1267,7 +1369,7 @@ mod tests {
     fn locate_section_roundtrips_native_embed() {
         // Embed with the same libsui writer the CLI uses, then read it back.
         let image = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let files = vec![ae("main.js", b"console.log(1)", false)];
         let payload = encode_section_payload(&files, b"module=main.js\napp=Demo\n");
 
         let out: Vec<u8> = {
@@ -1300,10 +1402,7 @@ mod tests {
 
     #[test]
     fn locate_section_reads_macho_intel_sentinel() {
-        let payload = encode_section_payload(
-            &[("main.js".to_string(), b"x".to_vec())],
-            b"module=main.js\n",
-        );
+        let payload = encode_section_payload(&[ae("main.js", b"x", false)], b"module=main.js\n");
         // A 64-bit x86_64 Mach-O (not arm64) takes the sentinel path.
         let mut image = vec![0u8; 32];
         image[0..4].copy_from_slice(&0xFEED_FACFu32.to_le_bytes());
@@ -1317,7 +1416,7 @@ mod tests {
 
     #[test]
     fn locate_section_reads_macho_arm64_segment() {
-        let files = vec![("main.js".to_string(), b"console.log(1)".to_vec())];
+        let files = vec![ae("main.js", b"console.log(1)", false)];
         let payload = encode_section_payload(&files, b"module=main.js\n");
         let data_off = 32 + 152; // header + one LC_SEGMENT_64 (72 + 80)
         let mut image = vec![0u8; 32];

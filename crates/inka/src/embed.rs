@@ -4,7 +4,9 @@
 // the remaining files: `--embed-dir` (the whole cwd tree) and `--external`
 // package trees from `node_modules`.
 //
-// Entries are returned as `(path-relative-to-cwd, bytes)` pairs.
+// Entries are returned as `ArchiveEntry` values: a cwd-relative path, bytes,
+// and whether the source file was executable. The exec bit is carried into the
+// artifact archive so extraction can restore it.
 
 #[cfg(feature = "bundle")]
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -12,6 +14,8 @@ use std::fs;
 use std::path::Path;
 #[cfg(feature = "bundle")]
 use std::path::PathBuf;
+
+use inka_format::ArchiveEntry;
 
 #[cfg(feature = "bundle")]
 const IGNORE_DIRS: [&str; 5] = [".git", "target", "node_modules", ".inka", "dist"];
@@ -42,19 +46,52 @@ fn normalize_rel(rel: &Path) -> String {
         .join("/")
 }
 
+/// Whether a source file is executable on this host. On Windows there is no
+/// meaningful exec bit; `.exe`/`.cmd` execution is extension-based.
+#[cfg(unix)]
+pub(crate) fn is_executable(md: &fs::Metadata) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    md.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+pub(crate) fn is_executable(_md: &fs::Metadata) -> bool {
+    false
+}
+
+/// Stat `path` (following symlinks) and report whether it is executable.
+pub(crate) fn is_executable_path(path: &Path) -> bool {
+    fs::metadata(path)
+        .map(|md| is_executable(&md))
+        .unwrap_or(false)
+}
+
+/// True when `bytes` look like an inka artifact (current section format or
+/// legacy INKFOOT5 trailer). `--embed-dir` skips these: embedding a previous
+/// build recursively bloats the output and is never an intended asset.
+#[cfg(feature = "bundle")]
+fn is_inka_artifact(bytes: &[u8]) -> bool {
+    inka_format::locate_section(bytes).is_ok() || inka_format::read_layout(bytes).is_ok()
+}
+
 /// Embed the whole cwd tree minus ignore dirs (`--embed-dir`). The entry is
 /// returned first for deterministic ordering.
 #[cfg(feature = "bundle")]
-pub fn collect_directory(cwd: &Path, entry_rel: &str) -> Result<Vec<(String, Vec<u8>)>, String> {
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+pub fn collect_directory(
+    cwd: &Path,
+    entry_rel: &str,
+    exclude_rel: Option<&str>,
+) -> Result<Vec<ArchiveEntry>, String> {
+    let mut files: BTreeMap<String, ArchiveEntry> = BTreeMap::new();
     walk(cwd, cwd, &mut files)?;
-    let mut out: Vec<(String, Vec<u8>)> = Vec::new();
-    if let Some(b) = files.remove(entry_rel) {
-        out.push((entry_rel.to_string(), b));
+    if let Some(exclude) = exclude_rel {
+        files.remove(exclude);
     }
-    for (k, v) in files {
-        out.push((k, v));
+    let mut out: Vec<ArchiveEntry> = Vec::new();
+    if let Some(entry) = files.remove(entry_rel) {
+        out.push(entry);
     }
+    out.extend(files.into_values());
     Ok(out)
 }
 
@@ -80,7 +117,7 @@ pub fn collect_package(
     cwd: &Path,
     entry_dir: &Path,
     pkg: &str,
-) -> Result<Vec<(String, Vec<u8>)>, String> {
+) -> Result<Vec<ArchiveEntry>, String> {
     if !valid_package_name(pkg) {
         return Err(format!("invalid external package name '{pkg}'"));
     }
@@ -103,7 +140,7 @@ pub fn collect_package(
         ));
     }
 
-    let mut files: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut files: BTreeMap<String, ArchiveEntry> = BTreeMap::new();
     let mut name_to_folder: HashMap<String, PathBuf> = HashMap::new();
     let mut visited: HashSet<(PathBuf, String)> = HashSet::new();
     let mut queue: VecDeque<(PathBuf, String)> = VecDeque::new();
@@ -133,7 +170,7 @@ pub fn collect_package(
         }
     }
 
-    Ok(files.into_iter().collect())
+    Ok(files.into_values().collect())
 }
 
 /// A valid npm package name: `name` or `@scope/name`, with no path separators,
@@ -230,7 +267,7 @@ fn resolve_dep(tree: &Path, referrer: &Path, name: &str) -> Option<PathBuf> {
 }
 
 #[cfg(feature = "bundle")]
-fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result<(), String> {
+fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, ArchiveEntry>) -> Result<(), String> {
     let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
     for ent in rd.flatten() {
         let name = ent.file_name().to_string_lossy().into_owned();
@@ -245,8 +282,15 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
             }
             walk(cwd, &path, files)?;
         } else if ft.is_file() {
-            if let (Ok(bytes), Ok(rel)) = (fs::read(&path), path.strip_prefix(cwd)) {
-                files.insert(normalize_rel(rel), bytes);
+            if let (Ok(bytes), Ok(rel), Ok(md)) =
+                (fs::read(&path), path.strip_prefix(cwd), fs::metadata(&path))
+            {
+                if is_inka_artifact(&bytes) {
+                    continue;
+                }
+                let rel = normalize_rel(rel);
+                let exec = is_executable(&md);
+                files.insert(rel.clone(), ArchiveEntry::new(rel, bytes, exec));
             }
         }
     }
@@ -261,7 +305,7 @@ fn walk(cwd: &Path, dir: &Path, files: &mut BTreeMap<String, Vec<u8>>) -> Result
 fn walk_package(
     dir: &Path,
     prefix: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
+    files: &mut BTreeMap<String, ArchiveEntry>,
     allowed: &Path,
 ) -> Result<(), String> {
     walk_package_inner(dir, prefix, files, &mut HashSet::new(), allowed)
@@ -271,12 +315,15 @@ fn walk_package(
 fn walk_package_inner(
     dir: &Path,
     prefix: &Path,
-    files: &mut BTreeMap<String, Vec<u8>>,
-    visited: &mut HashSet<PathBuf>,
+    files: &mut BTreeMap<String, ArchiveEntry>,
+    visited: &mut HashSet<(PathBuf, PathBuf)>,
     allowed: &Path,
 ) -> Result<(), String> {
     let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
-    if !canon.starts_with(allowed) || !visited.insert(canon) {
+    // Key by both the real directory and the output prefix. Two symlink
+    // prefixes can legitimately point at the same real directory; only a
+    // repeated (real dir, prefix) pair is a cycle.
+    if !canon.starts_with(allowed) || !visited.insert((canon, prefix.to_path_buf())) {
         return Ok(());
     }
     let rd = fs::read_dir(dir).map_err(|e| format!("cannot read dir {}: {e}", dir.display()))?;
@@ -303,7 +350,9 @@ fn walk_package_inner(
                 }
             }
             if let Ok(bytes) = fs::read(&path) {
-                files.insert(normalize_rel(&prefix.join(&name)), bytes);
+                let rel = normalize_rel(&prefix.join(&name));
+                let exec = is_executable(&md);
+                files.insert(rel.clone(), ArchiveEntry::new(rel, bytes, exec));
             }
         }
     }
@@ -330,6 +379,16 @@ mod tests {
         std::fs::write(p, body).unwrap();
     }
 
+    fn mk_exec(cwd: &Path, rel: &str, body: &str) {
+        mk(cwd, rel, body);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(cwd.join(rel), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+
     #[test]
     fn collect_package_includes_nested_node_modules() {
         let cwd = scratch();
@@ -342,7 +401,7 @@ mod tests {
             "module.exports = 2;\n",
         );
         let files = collect_package(&cwd, &cwd, "pkg").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/pkg/index.js".to_string()),
             "{rels:?}"
@@ -360,12 +419,99 @@ mod tests {
         mk(&cwd, "app.js", "console.log(1);\n");
         mk(&cwd, "assets/logo.txt", "hi\n");
         mk(&cwd, "node_modules/pkg/index.js", "x\n");
-        let files = collect_directory(&cwd, "app.js").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let files = collect_directory(&cwd, "app.js", None).unwrap();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert_eq!(rels[0], "app.js", "{rels:?}");
         assert!(rels.contains(&"assets/logo.txt".to_string()), "{rels:?}");
         assert!(
             !rels.iter().any(|r| r.starts_with("node_modules")),
+            "{rels:?}"
+        );
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_package_records_exec_bits() {
+        let cwd = scratch();
+        mk(&cwd, "node_modules/pkg/package.json", "{}");
+        mk(&cwd, "node_modules/pkg/index.js", "module.exports = 1;\n");
+        mk_exec(&cwd, "node_modules/pkg/bin/tool", "#!/bin/sh\n");
+        let files = collect_package(&cwd, &cwd, "pkg").unwrap();
+        let tool = files
+            .iter()
+            .find(|e| e.path == "node_modules/pkg/bin/tool")
+            .unwrap();
+        assert_eq!(tool.exec, cfg!(unix));
+        let index = files
+            .iter()
+            .find(|e| e.path == "node_modules/pkg/index.js")
+            .unwrap();
+        assert!(!index.exec);
+        let _ = std::fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_directory_excludes_output() {
+        let cwd = scratch();
+        mk(&cwd, "app.js", "console.log(1);\n");
+        mk(&cwd, "asset.txt", "hi\n");
+        mk(&cwd, "app", "previous artifact");
+        let files = collect_directory(&cwd, "app.js", Some("app")).unwrap();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
+        assert_eq!(rels[0], "app.js");
+        assert!(rels.contains(&"asset.txt".to_string()), "{rels:?}");
+        assert!(!rels.contains(&"app".to_string()), "{rels:?}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    fn collect_directory_skips_previous_artifacts() {
+        let cwd = scratch();
+        mk(&cwd, "app.js", "console.log(1);\n");
+        mk(&cwd, "asset.txt", "hi\n");
+        // A plausible legacy artifact: magic footer + archive + manifest.
+        let files = vec![("main.js".to_string(), b"x".to_vec())];
+        let archive = inka_format::encode_archive_v1(&files);
+        let manifest = b"module=main.js\n";
+        let mut image = vec![0x7f, b'E', b'L', b'F'];
+        image.extend_from_slice(&archive);
+        image.extend_from_slice(manifest);
+        image.extend_from_slice(&inka_format::encode_footer(
+            archive.len() as u64,
+            manifest.len() as u64,
+        ));
+        fs::write(cwd.join("old-app"), image).unwrap();
+
+        let files = collect_directory(&cwd, "app.js", None).unwrap();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
+        assert!(rels.contains(&"asset.txt".to_string()), "{rels:?}");
+        assert!(!rels.contains(&"old-app".to_string()), "{rels:?}");
+        let _ = fs::remove_dir_all(&cwd);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn collect_package_embeds_same_dir_under_two_prefixes() {
+        let cwd = scratch();
+        mk(&cwd, "node_modules/pkg/package.json", "{}");
+        mk(
+            &cwd,
+            "node_modules/pkg/shared/file.js",
+            "module.exports = 1;\n",
+        );
+        std::os::unix::fs::symlink(
+            cwd.join("node_modules/pkg/shared"),
+            cwd.join("node_modules/pkg/alias"),
+        )
+        .unwrap();
+        let files = collect_package(&cwd, &cwd, "pkg").unwrap();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
+        assert!(
+            rels.contains(&"node_modules/pkg/shared/file.js".to_string()),
+            "{rels:?}"
+        );
+        assert!(
+            rels.contains(&"node_modules/pkg/alias/file.js".to_string()),
             "{rels:?}"
         );
         let _ = fs::remove_dir_all(&cwd);
@@ -429,7 +575,7 @@ mod tests {
         .unwrap();
 
         let files = collect_package(&cwd, &cwd, "pkg").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/pkg/index.js".to_string()),
             "{rels:?}"
@@ -462,7 +608,7 @@ mod tests {
         );
         mk(&cwd, "node_modules/ms/index.js", "module.exports = 1;\n");
         let files = collect_package(&cwd, &cwd, "dbg").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/dbg/index.js".to_string()),
             "{rels:?}"
@@ -499,7 +645,7 @@ mod tests {
         std::fs::create_dir_all(&entry_dir).unwrap();
 
         let files = collect_package(&cwd, &entry_dir, "@scope/other").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/@scope/other/src/index.ts".to_string()),
             "{rels:?}"
@@ -542,7 +688,7 @@ mod tests {
         .unwrap();
 
         let files = collect_package(&cwd, &cwd, "a").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/a/index.js".to_string()),
             "{rels:?}"
@@ -588,7 +734,7 @@ mod tests {
             "module.exports = 2;\n",
         );
         let files = collect_package(&cwd, &cwd, "top").unwrap();
-        let rels: Vec<String> = files.iter().map(|(r, _)| r.clone()).collect();
+        let rels: Vec<String> = files.iter().map(|e| e.path.clone()).collect();
         assert!(
             rels.contains(&"node_modules/dep/index.js".to_string()),
             "{rels:?}"

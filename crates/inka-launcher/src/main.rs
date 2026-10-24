@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use inka_format::{
     constraint_allows, parse_manifest, parse_section_trailer, parse_trailer, parse_version,
-    Manifest, Version,
+    ArchiveEntry, Manifest, Version,
 };
 
 /// Per-tree marker recording the pid that created it, so a later run can reap
@@ -286,7 +286,7 @@ fn current_euid() -> Option<u32> {
 /// Materialize the embedded archive under a fresh, exclusive temp dir (mode
 /// 0700), mirroring paths. Files are created with `create_new` (never following
 /// a planted symlink), and the tree is removed when the guard drops.
-fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
+fn extract_tree(files: &[ArchiveEntry]) -> Result<TempTree, String> {
     let base = std::env::temp_dir();
     let mut root = None;
     for _ in 0..8 {
@@ -308,8 +308,11 @@ fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
     }
     // Cover exits that skip Drop (the runtime may call exit() itself).
     tree_cleanup::arm(&root);
-    for (path, data) in files {
-        let target = root.join(path);
+    for entry in files {
+        // `parse_archive` already validates; keep the extraction boundary
+        // defensive in case a caller ever constructs entries another way.
+        inka_format::validate_rel_path(&entry.path)?;
+        let target = root.join(&entry.path);
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)
                 .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
@@ -319,8 +322,18 @@ fn extract_tree(files: &[(String, Vec<u8>)]) -> Result<TempTree, String> {
             .create_new(true)
             .open(&target)
             .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-        std::io::Write::write_all(&mut f, data)
+        std::io::Write::write_all(&mut f, &entry.data)
             .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        // Set the mode on the open descriptor (`fchmod`) so a concurrent
+        // symlink swap cannot redirect the chmod. Only the normalized exec
+        // bit is honored; setuid/setgid/sticky/world-write never survive.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if entry.exec { 0o755 } else { 0o644 };
+            f.set_permissions(fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("cannot set mode on {}: {e}", target.display()))?;
+        }
     }
     // Record the owning pid (after the payload, so an archive entry can never
     // collide with it) so a later run can reap this tree if we die without
@@ -630,6 +643,13 @@ fn main() {
     // anything writes to stderr (Windows only; a no-op elsewhere).
     inka_format::platform::ensure_stdio_open();
     let args: Vec<String> = env::args().skip(1).collect();
+    // `inka build` probes this before embedding a payload, so a launcher that
+    // predates archive v2 is rejected instead of producing an artifact only
+    // the new parser could read.
+    if args.first().map(String::as_str) == Some("--archive-formats") {
+        println!("1,2");
+        std::process::exit(0);
+    }
     let me = env::current_exe().expect("cannot locate the launcher executable");
     let bytes = fs::read(&me).expect("read own executable");
 
@@ -726,8 +746,8 @@ mod tests {
     #[test]
     fn extract_tree_creates_and_cleans_up() {
         let files = vec![
-            ("main.js".to_string(), b"console.log(1)".to_vec()),
-            ("node_modules/x/index.js".to_string(), b"x".to_vec()),
+            ArchiveEntry::new("main.js", b"console.log(1)".to_vec(), false),
+            ArchiveEntry::new("node_modules/x/index.js", b"x".to_vec(), false),
         ];
         let root;
         {
@@ -747,8 +767,31 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn extract_tree_applies_normalized_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let files = vec![
+            ArchiveEntry::new("main.js", b"x".to_vec(), false),
+            ArchiveEntry::new("bin/tool", b"y".to_vec(), true),
+        ];
+        let tree = extract_tree(&files).unwrap();
+        let normal = fs::metadata(tree.path().join("main.js"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let exec = fs::metadata(tree.path().join("bin/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(normal, 0o644);
+        assert_eq!(exec, 0o755);
+    }
+
+    #[test]
     fn extract_tree_uses_distinct_roots() {
-        let files = vec![("a".to_string(), b"a".to_vec())];
+        let files = vec![ArchiveEntry::new("a", b"a".to_vec(), false)];
         let t1 = extract_tree(&files).unwrap();
         let t2 = extract_tree(&files).unwrap();
         assert_ne!(t1.path(), t2.path());
@@ -756,7 +799,7 @@ mod tests {
 
     #[test]
     fn extracted_tree_carries_owner_marker() {
-        let files = vec![("main.js".to_string(), b"x".to_vec())];
+        let files = vec![ArchiveEntry::new("main.js", b"x".to_vec(), false)];
         let tree = extract_tree(&files).unwrap();
         let marker = fs::read_to_string(tree.path().join(OWNER_MARKER)).unwrap();
         assert_eq!(marker, std::process::id().to_string());

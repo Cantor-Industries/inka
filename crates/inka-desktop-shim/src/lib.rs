@@ -73,6 +73,44 @@ fn lock_payload(dir: &Path) {
     }
 }
 
+/// A staging dir is also reaped once it is clearly old, even on platforms
+/// without a reliable pid probe.
+const STALE_TMP_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+/// Staging dirs are named `<hash>.tmp<pid>`. A live pid means another process
+/// is still extracting; leave it alone. Unparseable names are treated as live
+/// (conservative) so we never delete a directory we do not understand.
+fn staging_owner_is_alive(path: &Path) -> bool {
+    let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+    match name.rsplit_once(".tmp") {
+        Some((_, pid)) => pid.parse::<u32>().map(pid_alive).unwrap_or(true),
+        None => true,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    pid == std::process::id() || Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(windows)]
+fn pid_alive(pid: u32) -> bool {
+    pid == std::process::id() || inka_format::platform::windows::process_image_path(pid).is_some()
+}
+
+#[cfg(not(any(target_os = "linux", windows)))]
+fn pid_alive(_pid: u32) -> bool {
+    true
+}
+
+fn older_than(path: &Path, age: std::time::Duration) -> bool {
+    std::fs::metadata(path)
+        .and_then(|md| md.modified())
+        .ok()
+        .and_then(|modified| modified.elapsed().ok())
+        .is_some_and(|elapsed| elapsed > age)
+}
+
 /// Bound the payload cache: remove interrupted-extraction staging dirs and the
 /// oldest unlocked extracted payloads beyond [`CACHE_KEEP`]. The currently
 /// active payload is always skipped.
@@ -89,7 +127,12 @@ fn prune_cache(root: &Path, current: &Path) {
         let name = ent.file_name();
         let name = name.to_string_lossy();
         if name.contains(".tmp") {
-            let _ = std::fs::remove_dir_all(&path);
+            // A live process may be extracting into this staging dir. Only
+            // reap it once its recorded pid is gone (SIGKILL/power loss).
+            let stale = !staging_owner_is_alive(&path) || older_than(&path, STALE_TMP_AGE);
+            if stale {
+                let _ = std::fs::remove_dir_all(&path);
+            }
             continue;
         }
         let mtime = ent
@@ -167,6 +210,44 @@ fn find_runtime(self_dir: &Path) -> Result<PathBuf, String> {
     })
 }
 
+/// Materialize payload entries under `staging`, applying the normalized mode
+/// on the open descriptor (`fchmod`). Shared by the cache path so the mode
+/// policy is testable without touching the environment-dependent cache root.
+fn extract_payload(files: &[inka_format::ArchiveEntry], staging: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(staging)
+        .map_err(|e| format!("cannot create {}: {e}", staging.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(staging, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("cannot secure {}: {e}", staging.display()))?;
+    }
+    for entry in files {
+        inka_format::validate_rel_path(&entry.path)?;
+        let target = staging.join(&entry.path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
+        }
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&target)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        use std::io::Write;
+        f.write_all(&entry.data)
+            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = if entry.exec { 0o755 } else { 0o644 };
+            f.set_permissions(std::fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("cannot set mode on {}: {e}", target.display()))?;
+        }
+    }
+    Ok(())
+}
+
 /// Extract the embedded `inka` section payload (if present) and return its
 /// on-disk root; otherwise fall back to a sibling `app/` directory (dev).
 fn resolve_payload(embedded: Option<&[u8]>, self_dir: &Path) -> Result<PathBuf, String> {
@@ -184,6 +265,10 @@ fn resolve_payload(embedded: Option<&[u8]>, self_dir: &Path) -> Result<PathBuf, 
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(section.archive);
+    // The manifest carries app metadata and, in future, other payload-level
+    // properties. Include it so a cached extraction can never be reused with
+    // different execution metadata.
+    hasher.update(section.manifest);
     let key: String = hasher.finalize()[..8]
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -198,16 +283,7 @@ fn resolve_payload(embedded: Option<&[u8]>, self_dir: &Path) -> Result<PathBuf, 
     }
     let staging = root.with_extension(format!("tmp{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&staging);
-    for (rel, data) in &files {
-        inka_format::validate_rel_path(rel)?;
-        let target = staging.join(rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&target, data)
-            .map_err(|e| format!("cannot write {}: {e}", target.display()))?;
-    }
+    extract_payload(&files, &staging)?;
     std::fs::write(staging.join(".ok"), b"ok").map_err(|e| e.to_string())?;
     let _ = std::fs::remove_dir_all(&root);
     std::fs::rename(&staging, &root)
@@ -395,6 +471,41 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn extract_payload_applies_normalized_modes() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!(
+            "inka-shim-modes-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let files = vec![
+            inka_format::ArchiveEntry::new("main.js", b"x".to_vec(), false),
+            inka_format::ArchiveEntry::new("bin/tool", b"y".to_vec(), true),
+        ];
+        extract_payload(&files, &dir).unwrap();
+        let normal = std::fs::metadata(dir.join("main.js"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let exec = std::fs::metadata(dir.join("bin/tool"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(normal, 0o644);
+        assert_eq!(exec, 0o755);
+        let dir_mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn prune_removes_stale_tmp_and_oldest_unlocked() {
         let root = std::env::temp_dir().join(format!("inka-shim-prune-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
@@ -403,7 +514,17 @@ mod tests {
         let current = root.join("current");
         std::fs::create_dir_all(&current).unwrap();
         std::fs::write(current.join(".ok"), b"ok").unwrap();
-        std::fs::create_dir_all(root.join("abc.tmp999")).unwrap();
+        let dead_staging = root.join("abc.tmp999999");
+        std::fs::create_dir_all(&dead_staging).unwrap();
+        filetime::set_file_mtime(
+            &dead_staging,
+            filetime::FileTime::from_system_time(
+                std::time::SystemTime::now() - std::time::Duration::from_secs(10_000),
+            ),
+        )
+        .unwrap();
+        let live_staging = root.join(format!("live.tmp{}", std::process::id()));
+        std::fs::create_dir_all(&live_staging).unwrap();
 
         let base = std::time::SystemTime::now() - std::time::Duration::from_secs(10_000);
         let mut dirs = Vec::new();
@@ -425,9 +546,10 @@ mod tests {
 
         prune_cache(&root, &current);
 
+        assert!(!dead_staging.exists(), "stale staging dir pruned");
         assert!(
-            !root.join("abc.tmp999").exists(),
-            "stale staging dir pruned"
+            live_staging.exists(),
+            "a live process's staging dir must be preserved"
         );
         assert!(current.exists(), "current skipped");
         assert!(dirs[0].exists(), "locked payload kept");

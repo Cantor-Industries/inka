@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(feature = "bundle")]
 use inka_format::encode_section_payload;
+#[cfg(feature = "bundle")]
+use inka_format::ArchiveEntry;
 use inka_format::{manifest_has_key, manifest_set_key};
 
 use crate::help::{self, Mode};
@@ -298,10 +300,11 @@ fn pack(
             ui::warn(w);
         }
 
-        let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        files.push(("main.js".to_string(), code.into_bytes()));
+        let mut files: Vec<ArchiveEntry> = Vec::new();
+        files.push(ArchiveEntry::new("main.js", code.into_bytes(), false));
         for (rel, bytes) in embedded {
-            push_unique(&mut files, rel, bytes);
+            let exec = crate::embed::is_executable_path(&cwd.join(&rel));
+            push_unique(&mut files, ArchiveEntry::new(rel, bytes, exec));
         }
         let entry_dir = cwd.join(entry_rel);
         let entry_dir = entry_dir.parent().unwrap_or(cwd);
@@ -316,22 +319,23 @@ fn pack(
             }
         }
         for pkg in &embed_pkgs {
-            for (rel, bytes) in
+            for entry in
                 crate::embed::collect_package(cwd, entry_dir, pkg).unwrap_or_else(|e| err(&e))
             {
-                push_unique(&mut files, rel, bytes);
+                push_unique(&mut files, entry);
             }
         }
         if embed_dir {
-            for (rel, bytes) in
-                crate::embed::collect_directory(cwd, entry_rel).unwrap_or_else(|e| err(&e))
+            let output_rel = output_rel_in_cwd(cwd, output);
+            for entry in crate::embed::collect_directory(cwd, entry_rel, output_rel.as_deref())
+                .unwrap_or_else(|e| err(&e))
             {
-                push_unique(&mut files, rel, bytes);
+                push_unique(&mut files, entry);
             }
         }
 
         let module = "main.js";
-        let bundle_len = files[0].1.len();
+        let bundle_len = files[0].data.len();
         let mut manifest_payload = manifest_bytes;
         manifest_set_key(&mut manifest_payload, "module", module);
 
@@ -339,7 +343,7 @@ fn pack(
         // these (optional symbol) and the launcher verifies them; the floor is
         // also raised so an old runtime is rejected by version too.
         let mut features: Vec<String> = Vec::new();
-        if files.iter().any(|(rel, _)| rel.ends_with(".node")) {
+        if files.iter().any(|entry| entry.path.ends_with(".node")) {
             features.push("native-addon".to_string());
         }
         if !embed_pkgs.is_empty() {
@@ -358,6 +362,15 @@ fn pack(
                 "runtime",
                 &format!("inka_runtime>={floor}"),
             );
+        }
+
+        let exec_files: Vec<&str> = files
+            .iter()
+            .filter(|entry| entry.exec)
+            .map(|entry| entry.path.as_str())
+            .collect();
+        if !exec_files.is_empty() {
+            warn_if_run_not_granted(&manifest_payload);
         }
 
         let launcher = find_launcher();
@@ -384,6 +397,9 @@ fn pack(
         ui::section("Bundle");
         ui::row("code", ui::human_size(bundle_len as u64));
         ui::row("embedded", format!("{} file(s)", files.len() - 1));
+        if !exec_files.is_empty() {
+            ui::row("executable", format!("{} file(s)", exec_files.len()));
+        }
         ui::row("manifest", ui::human_size(manifest_payload.len() as u64));
         ui::row("artifact", ui::human_size(out.len() as u64));
         ui::status_ok(format!(
@@ -395,9 +411,51 @@ fn pack(
 }
 
 #[cfg(feature = "bundle")]
-fn push_unique(files: &mut Vec<(String, Vec<u8>)>, rel: String, bytes: Vec<u8>) {
-    if !files.iter().any(|(r, _)| r == &rel) {
-        files.push((rel, bytes));
+fn push_unique(files: &mut Vec<ArchiveEntry>, entry: ArchiveEntry) {
+    if !files.iter().any(|existing| existing.path == entry.path) {
+        files.push(entry);
+    }
+}
+
+/// The output path relative to the build cwd (with `/` separators), when it is
+/// inside the tree. `--embed-dir` must not embed the artifact it is about to
+/// replace (otherwise a rebuild doubles the artifact size).
+#[cfg(feature = "bundle")]
+fn output_rel_in_cwd(cwd: &Path, output: &Path) -> Option<String> {
+    let abs = if output.is_absolute() {
+        output.to_path_buf()
+    } else {
+        cwd.join(output)
+    };
+    let canon_cwd = fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+    let abs = fs::canonicalize(&abs).unwrap_or(abs);
+    let rel = abs.strip_prefix(&canon_cwd).ok()?;
+    Some(
+        rel.components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
+}
+
+/// Embedded native executables still need a runtime `run` grant. Path-scoped
+/// grants cannot match the launcher's random temp tree, so the grant has to be
+/// unscoped. Warn rather than silently widening the artifact's permissions.
+#[cfg(feature = "bundle")]
+fn warn_if_run_not_granted(manifest: &[u8]) {
+    let text = String::from_utf8_lossy(manifest);
+    let grants_run = text.lines().any(|line| {
+        let line = line.trim();
+        // `allow-run=*` is the unscoped category grant; a path-scoped list
+        // cannot match the launcher's random temp tree.
+        line == "permissions=all" || line == "allow-run=*"
+    });
+    let denies_run = text.lines().any(|line| line.trim().starts_with("deny-run"));
+    if !grants_run || denies_run {
+        ui::warn(
+            "embedded executable files need an unscoped run grant at runtime \
+             (--allow-run or -A); a path-scoped grant cannot match the artifact's temp tree",
+        );
     }
 }
 
@@ -529,11 +587,35 @@ fn manifest_has_allow_import(bytes: &[u8]) -> bool {
         .any(|l| l.trim_start().starts_with("allow-import="))
 }
 
+/// Refuse a launcher that cannot read the v2 archive this build emits. A
+/// mismatched `$INKA_LAUNCHER` would otherwise produce an artifact that fails
+/// at run time with a confusing malformed-archive error.
+#[cfg(feature = "bundle")]
+fn require_archive_v2(launcher: &Path) {
+    let output = std::process::Command::new(launcher)
+        .arg("--archive-formats")
+        .output();
+    let supports_v2 = match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .split(',')
+            .any(|part| part.trim() == "2"),
+        _ => false,
+    };
+    if !supports_v2 {
+        err(&format!(
+            "launcher {} predates archive v2; rebuild it with `cargo build --release -p inka-launcher` \
+             (or point INKA_LAUNCHER at the rebuilt binary)",
+            launcher.display()
+        ));
+    }
+}
+
 #[cfg(feature = "bundle")]
 fn find_launcher() -> PathBuf {
     if let Ok(p) = env::var("INKA_LAUNCHER") {
         let p = PathBuf::from(p);
         if p.is_file() {
+            require_archive_v2(&p);
             return p;
         }
         err(&format!(
@@ -545,6 +627,7 @@ fn find_launcher() -> PathBuf {
         if let Some(dir) = exe.parent() {
             let adjacent = dir.join(platform::launcher_name());
             if adjacent.is_file() {
+                require_archive_v2(&adjacent);
                 return adjacent;
             }
         }
