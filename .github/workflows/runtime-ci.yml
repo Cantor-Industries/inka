@@ -58,6 +58,9 @@ jobs:
       - name: Desktop JS vendor drift
         run: scripts/ci/desktop-js-pins.sh
 
+      - name: Vendored patch drift
+        run: scripts/ci/vendor-patches.sh
+
       - name: Build fast crates + runtime (release)
         run: |
           set -euo pipefail

@@ -47,6 +47,9 @@ jobs:
       - name: Deno pin drift
         run: scripts/ci/deno-pins.sh
 
+      - name: Vendor patch drift
+        run: scripts/ci/vendor-patches.sh
+
       - name: Rust components
         run: rustup component add clippy rustfmt
 
