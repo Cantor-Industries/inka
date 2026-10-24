@@ -11,9 +11,10 @@ Each unit is a directory directly under `patches/`:
 
 ```text
 patches/<unit>/
-  metadata.env       # sourceable shell metadata
-  series             # ordered patch file names, one per line
-  0001-*.patch       # unified diff, applied with `patch -p1`
+  metadata.env         # sourceable shell metadata
+  series               # ordered patch paths, one per line
+  <version>/           # optional version/tag subdirectory
+    0001-*.patch       # unified diff, applied with `patch -p1`
 ```
 
 `metadata.env` fields:
@@ -32,9 +33,10 @@ patches/<unit>/
 | `LOCAL_SHA256` | sha256 of the current local file (optional) |
 | `EXCLUDE` | comma-separated paths to ignore when diffing a crate |
 
-Patches use repo-relative `a/<path>` / `b/<path>` headers so they apply with
-`patch -p1` from either the extracted crate root (for `crate` units) or a
-temporary checkout root (for `file` units).
+Patch paths are relative to the patch root: `crate` units use crate-root paths
+(for example `ops/fs.rs`), while `file` units use repo-relative paths (for
+example `crates/inka-runtime/src/desktop_js.rs`). `series` entries may include a
+version subdirectory.
 
 ## Verify
 
