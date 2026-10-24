@@ -29,9 +29,8 @@ adds a permission model that we do not need for this case.
 Remove this vendor directory once a released `deno_runtime` contains an
 equivalent fix; the Cargo patch and this note should go together.
 
-The containing runtime tuple must advance before this ships (for example
-`0.268.1` → `0.268.2-beta.1`); `crates/inka-runtime/runtime-version` is
-intentionally unchanged on the feature branch until the release build is cut.
+The containing runtime tuple is `0.268.2-beta.1` in this release branch. The
+official `0.268.1` tuple remains the stable rollback path.
 
 > Formal patch tracking (base hashes, patch series, upstream links) is a
 > follow-up after this runtime change lands.

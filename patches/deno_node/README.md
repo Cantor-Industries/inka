@@ -17,5 +17,7 @@ cache, close, or take ownership of the fd; Windows keeps the named-pipe path.
 - A focused upstream fix should add a spec test for synchronous
   `child_process` stdio fd I/O.
 
+Current release tuple: `0.268.2-beta.1`.
+
 Remove this unit (and `[patch.crates-io] deno_node` in the workspace
 `Cargo.toml`) once a released `deno_runtime` contains an equivalent fix.

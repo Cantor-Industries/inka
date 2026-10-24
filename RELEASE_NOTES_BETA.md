@@ -55,11 +55,10 @@ Native executables still need an **unscoped** run grant at run time
 (`--allow-run` or `-A`); a path-scoped grant cannot match the artifact's random
 temp tree. `inka build` warns when executable files are embedded without one.
 
-> **TypeScript 7 `typescript/sync` remains unsupported on the current runtime
-> tuple.** The exec fix lets the native `tsc` start, but Deno 2.9.8 lacks
-> synchronous I/O on child-process pipes (`Bad file descriptor`). Use
-> `typescript/async` on this tuple; a follow-up runtime tuple addresses the sync
-> path.
+> **TypeScript 7 `typescript/sync` works on the `{{RUNTIME}}` runtime tuple.**
+> Stock Deno 2.9.8 lacks synchronous I/O on uv-owned child-process pipes
+> (`Bad file descriptor`); this tuple carries a narrow `deno_node` patch for
+> those pipes. On older runtime tuples, use `typescript/async` instead.
 
 ### `inka desktop` on Windows: the CEF backend, sharing one Chromium runtime
 

@@ -93,9 +93,10 @@ transpiled away and unaffected.
 > `fs.readSync`/`writeSync` over child-process pipes. Stock Deno 2.9.8 does not
 > support sync I/O on its uv-owned child pipes (plain `deno run` fails the same
 > way with `Bad file descriptor`). On the current released runtime tuple, use
-> `typescript/async`; it uses streams and works inside an inka artifact. The next
-> inka runtime tuple carries a narrow `deno_node` patch for these uv-owned child
-> pipes, after which `typescript/sync` works without a new permission.
+> `typescript/async`; it uses streams and works inside an inka artifact. The
+> `0.268.2-beta.1` runtime tuple (or newer) carries a narrow `deno_node` patch
+> for these uv-owned child pipes, after which `typescript/sync` works without a
+> new permission.
 
 The result is a single executable with the bundle (and any embedded files)
 stored in its `inka` binary section, so it needs no `node_modules` or Deno cache

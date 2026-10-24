@@ -76,11 +76,11 @@ toolchain; the archive now carries a per-entry exec flag. If the path is
 
 **`Bad file descriptor (os error 9)` from `typescript/sync`.** This is a Deno
 node-compat limitation on POSIX child-process pipes, not an inka permission or
-exec-bit problem (plain `deno run` reproduces it on Deno 2.9.8). On the stock
-runtime tuple use `typescript/async` and `await using api = new API()`; inka's
-next runtime tuple carries a narrow `deno_node` patch for uv-owned child pipes
-and enables the sync client. `typescript/async` must be closed (`await using` /
-`await api.close()`) or the child keeps the process alive.
+exec-bit problem (plain `deno run` reproduces it on Deno 2.9.8). On older
+runtime tuples use `typescript/async` and `await using api = new API()`;
+`0.268.2-beta.1` (or newer) carries a narrow `deno_node` patch for uv-owned
+child pipes and enables the sync client. `typescript/async` must be closed
+(`await using` / `await api.close()`) or the child keeps the process alive.
 
 **Embedded native executable is not found (`ENOENT`).** A package that spawns a
 native binary must be embedded with `--external <pkg>`; bundling only carries the
