@@ -1,0 +1,197 @@
+--- a/ops/fs.rs
++++ b/ops/fs.rs
+@@ -923,6 +923,98 @@
+   Ok(())
+ }
+ 
++/// True when `fd` is tracked by `FdTable` but has no `File` backing it. This
++/// is the `UvOwned` case: libuv owns a pipe/socket fd created for a child
++/// process, and `FdTable::get` deliberately returns `None` for it.
++#[cfg(unix)]
++fn uv_owned_fd(state: &OpState, fd: i32) -> bool {
++  let table = state.borrow::<deno_io::FdTable>();
++  table.contains(fd) && table.get(fd).is_none()
++}
++
++/// Block until `fd` is ready for `events` (POLLIN/POLLOUT). Sync Node fs I/O
++/// on a uv-owned fd must look blocking to the caller even if libuv left the
++/// descriptor non-blocking.
++#[cfg(unix)]
++fn wait_uv_owned(fd: i32, events: libc::c_short) -> Result<(), FsError> {
++  let mut pfd = libc::pollfd {
++    fd,
++    events,
++    revents: 0,
++  };
++  loop {
++    // SAFETY: pfd is a valid pollfd with a live fd for the duration of the
++    // call; timeout -1 waits indefinitely, matching synchronous I/O.
++    let ready = unsafe { libc::poll(&mut pfd, 1, -1) };
++    if ready >= 0 {
++      return Ok(());
++    }
++    let err = std::io::Error::last_os_error();
++    if err.raw_os_error() == Some(libc::EINTR) {
++      continue;
++    }
++    return Err(err.into());
++  }
++}
++
++/// Synchronous read from a uv-owned fd. No dup, no FdTable mutation, and no
++/// ownership transfer: libuv remains responsible for closing the fd.
++#[cfg(unix)]
++fn read_uv_owned(fd: i32, buf: &mut [u8]) -> Result<u32, FsError> {
++  loop {
++    // SAFETY: the buffer is valid for writes of buf.len() bytes and fd is a
++    // live descriptor owned by this process.
++    let nread = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
++    if nread >= 0 {
++      return Ok(nread as u32);
++    }
++    let err = std::io::Error::last_os_error();
++    match err.raw_os_error() {
++      Some(libc::EINTR) => continue,
++      Some(libc::EAGAIN) => {
++        wait_uv_owned(fd, libc::POLLIN)?;
++        continue;
++      }
++      _ => return Err(err.into()),
++    }
++  }
++}
++
++/// Synchronous write to a uv-owned fd. Handles partial writes and EAGAIN.
++/// No dup, no FdTable mutation, and no ownership transfer.
++#[cfg(unix)]
++fn write_uv_owned(fd: i32, buf: &[u8]) -> Result<u32, FsError> {
++  let mut total = 0usize;
++  while total < buf.len() {
++    // SAFETY: the remaining slice is valid and fd is a live descriptor owned
++    // by this process.
++    let written = unsafe {
++      libc::write(
++        fd,
++        buf[total..].as_ptr().cast(),
++        buf.len() - total,
++      )
++    };
++    if written > 0 {
++      total += written as usize;
++      continue;
++    }
++    if written == 0 {
++      break;
++    }
++    let err = std::io::Error::last_os_error();
++    match err.raw_os_error() {
++      Some(libc::EINTR) => continue,
++      Some(libc::EAGAIN) => {
++        wait_uv_owned(fd, libc::POLLOUT)?;
++        continue;
++      }
++      _ => return Err(err.into()),
++    }
++  }
++  Ok(total as u32)
++}
++
+ /// Read from a raw OS fd using libc. No dup, no clone -- the read uses the
+ /// fd number directly, so closing the fd from another thread interrupts the
+ /// Positioned read: if position >= 0, uses pread to read without moving the
+@@ -949,8 +1041,19 @@
+   #[buffer] buf: &mut [u8],
+   #[bigint] position: i64,
+ ) -> Result<u32, FsError> {
+-  let file = file_for_fd(state, fd)?;
+-  read_with_position(file, buf, position)
++  match file_for_fd(state, fd) {
++    Ok(file) => read_with_position(file, buf, position),
++    Err(err) => {
++      // `child_process` stdio pipes are tracked as UvOwned (no File). Support
++      // synchronous reads on them for Node's sync RPC transports. Only the
++      // already-owned fd is used; no permission or FdTable mutation.
++      #[cfg(unix)]
++      if position < 0 && uv_owned_fd(state, fd) {
++        return read_uv_owned(fd, buf);
++      }
++      Err(err)
++    }
++  }
+ }
+ 
+ /// Async read for node:fs. Runs a blocking read on a spawned thread using
+@@ -1012,8 +1115,16 @@
+   #[buffer] buf: &[u8],
+   #[number] position: i64,
+ ) -> Result<u32, FsError> {
+-  let file = file_for_fd(state, fd)?;
+-  write_with_position(file, buf, position)
++  match file_for_fd(state, fd) {
++    Ok(file) => write_with_position(file, buf, position),
++    Err(err) => {
++      #[cfg(unix)]
++      if position < 0 && uv_owned_fd(state, fd) {
++        return write_uv_owned(fd, buf);
++      }
++      Err(err)
++    }
++  }
+ }
+ 
+ /// Async write for node:fs. Performs the write synchronously but resolves
+@@ -3577,6 +3688,54 @@
+ mod tests {
+   use super::is_src_subdir;
+ 
++  #[cfg(unix)]
++  #[test]
++  fn uv_owned_fd_detection_and_io() {
++    let mut fds = [0i32; 2];
++    // SAFETY: pipe writes two valid fds on success.
++    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
++
++    let mut state = deno_core::OpState::new(None);
++    state.put(deno_io::FdTable::new());
++    state
++      .borrow_mut::<deno_io::FdTable>()
++      .register_uv_owned(fds[1]);
++    state
++      .borrow_mut::<deno_io::FdTable>()
++      .register_uv_owned(fds[0]);
++
++    assert!(super::uv_owned_fd(&state, fds[0]));
++    assert!(super::uv_owned_fd(&state, fds[1]));
++    assert!(super::file_for_fd(&state, fds[0]).is_err());
++    assert_eq!(super::write_uv_owned(fds[1], b"hello").unwrap(), 5);
++    let mut buf = [0u8; 8];
++    assert_eq!(super::read_uv_owned(fds[0], &mut buf).unwrap(), 5);
++    assert_eq!(&buf[..5], b"hello");
++
++    // SAFETY: both fds were created by pipe above and are not used again.
++    unsafe {
++      libc::close(fds[0]);
++      libc::close(fds[1]);
++    }
++  }
++
++  #[cfg(unix)]
++  #[test]
++  fn uv_owned_pipe_roundtrip() {
++    let mut fds = [0i32; 2];
++    // SAFETY: pipe writes two valid fds on success.
++    assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
++    assert_eq!(super::write_uv_owned(fds[1], b"hello").unwrap(), 5);
++    let mut buf = [0u8; 8];
++    assert_eq!(super::read_uv_owned(fds[0], &mut buf).unwrap(), 5);
++    assert_eq!(&buf[..5], b"hello");
++    // SAFETY: both fds were created by pipe above and are not used again.
++    unsafe {
++      libc::close(fds[0]);
++      libc::close(fds[1]);
++    }
++  }
++
+   #[test]
+   fn test_is_src_subdir() {
+     let base = std::env::temp_dir().join("deno_is_src_subdir_test");
