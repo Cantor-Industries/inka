@@ -88,13 +88,14 @@ installed TypeScript version works, with no version-specific lib list. It adds
 ~20 MB only when `typescript` is imported at run time; type-only usage is
 transpiled away and unaffected.
 
-> **TypeScript 7 sync API on Deno 2.9.8.** The native `tsc` executable is
-> embedded and made executable, but TypeScript's `typescript/sync` client relies
-> on synchronous `fs.readSync`/`writeSync` over child-process pipes. Deno 2.9.8
-> does not support sync I/O on its uv-owned child pipes (plain `deno run` fails
-> the same way with `Bad file descriptor`). Use `typescript/async` on this tuple;
-> the async client uses streams and works inside an inka artifact. A runtime
-> tuple with the node-compat fix is a separate change.
+> **TypeScript 7 sync API.** The native `tsc` executable is embedded and made
+> executable, but TypeScript's `typescript/sync` client relies on synchronous
+> `fs.readSync`/`writeSync` over child-process pipes. Stock Deno 2.9.8 does not
+> support sync I/O on its uv-owned child pipes (plain `deno run` fails the same
+> way with `Bad file descriptor`). On the current released runtime tuple, use
+> `typescript/async`; it uses streams and works inside an inka artifact. The next
+> inka runtime tuple carries a narrow `deno_node` patch for these uv-owned child
+> pipes, after which `typescript/sync` works without a new permission.
 
 The result is a single executable with the bundle (and any embedded files)
 stored in its `inka` binary section, so it needs no `node_modules` or Deno cache

@@ -111,6 +111,33 @@ case "$out" in
     *) echo "smoke: --external artifact failed ($out)" >&2; exit 1 ;;
 esac
 
+echo "== node sync child-pipe fs (UvOwned deno_node patch) =="
+mkdir -p "$SCRATCH/syncfd" && cd "$SCRATCH/syncfd"
+cat > main.mjs <<'JS'
+import { spawn } from "node:child_process";
+import { readSync, writeSync } from "node:fs";
+
+const child = spawn("/bin/sh", ["-c", "read x; echo got:$x"], {
+  stdio: ["pipe", "pipe", "inherit"],
+});
+const wfd = child.stdin._handle.fd;
+const rfd = child.stdout._handle.fd;
+child.stdin._handle.setBlocking?.(true);
+child.stdout._handle.setBlocking?.(true);
+writeSync(wfd, "hello\n");
+child.stdin.end();
+const buf = Buffer.alloc(1024);
+const n = readSync(rfd, buf, 0, buf.length, null);
+console.log("syncfd", buf.subarray(0, n).toString().trim());
+child.kill();
+JS
+"$INKA" build -A main.mjs -o app
+out="$("$SCRATCH/syncfd/app")"
+case "$out" in
+    *"syncfd got:hello"*) ;;
+    *) echo "smoke: node sync child-pipe failed ($out)" >&2; exit 1 ;;
+esac
+
 echo "== build with an import map -> jsr (offline at run time) =="
 if command -v deno >/dev/null 2>&1; then
     mkdir -p "$SCRATCH/jsr" && cd "$SCRATCH/jsr"
