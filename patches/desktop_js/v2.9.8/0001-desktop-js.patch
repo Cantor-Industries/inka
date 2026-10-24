@@ -1,0 +1,437 @@
+--- a/crates/inka-runtime/src/desktop_js.rs
++++ b/crates/inka-runtime/src/desktop_js.rs
+@@ -1,20 +1,10 @@
+-// Copyright 2018-2026 the Deno authors. MIT license.
++// Desktop JS surface vendored from Deno 2.9.8 `cli/rt/desktop.rs`
++// (MIT, Copyright 2018-2026 the Deno authors). Kept byte-for-byte except for
++// `serde_json` -> `deno_core::serde_json`. This anchors desktop API parity to
++// the `deno_runtime`/`laufey` versions inka pins.
++#![allow(clippy::all)]
++#![allow(dead_code)]
+ 
+-//! Desktop window management for `deno compile --desktop`.
+-//!
+-//! The ops are defined in `deno_runtime::ops::desktop` and included in the
+-//! V8 snapshot. This module re-exports the key types and provides the JS
+-//! initialization code.
+-
+-use std::sync::Arc;
+-
+-use deno_core::OpState;
+-// Re-export from runtime so denort_desktop can use them.
+-pub use deno_runtime::ops::desktop::AutoUpdateState;
+-pub use deno_runtime::ops::desktop::DesktopApi;
+-pub use deno_runtime::ops::desktop::MenuItem;
+-
+-/// JS code that exposes desktop APIs via `Deno.BrowserWindow` and `Deno.desktop`.
+ pub const DESKTOP_JS: &str = r#"
+ (() => {
+   const internals = Deno[Deno.internal];
+@@ -1020,15 +1010,13 @@
+ })();
+ "#;
+ 
+-/// JS code that initializes auto-update APIs. Executed separately so
+-/// version and rollback state can be baked in as literals.
+ pub fn desktop_auto_update_js(
+-  version: Option<&str>,
+-  rolled_back: bool,
+-  release_base_url: Option<&str>,
++    version: Option<&str>,
++    rolled_back: bool,
++    release_base_url: Option<&str>,
+ ) -> String {
+-  format!(
+-    r#"(() => {{
++    format!(
++        r#"(() => {{
+   const {{
+     op_desktop_apply_patch,
+     op_desktop_verify_ed25519,
+@@ -1203,21 +1191,19 @@
+   }});
+ }})();
+ "#,
+-    version = serde_json::to_string(&version).unwrap(),
+-    rolled_back = if rolled_back { "true" } else { "false" },
+-    release_base_url = serde_json::to_string(&release_base_url).unwrap(),
+-  )
++        version = deno_core::serde_json::to_string(&version).unwrap(),
++        rolled_back = if rolled_back { "true" } else { "false" },
++        release_base_url = deno_core::serde_json::to_string(&release_base_url).unwrap(),
++    )
+ }
+ 
+ /// JS code that initializes error reporting. Installs `"error"` and
+ /// `"unhandledrejection"` listeners that show a native alert and
+ /// optionally POST error reports to a configured URL.
+-pub fn desktop_error_reporting_js(
+-  url: Option<&str>,
+-  version: Option<&str>,
+-) -> String {
+-  format!(
+-    r#"(() => {{
++
++pub fn desktop_error_reporting_js(url: Option<&str>, version: Option<&str>) -> String {
++    format!(
++        r#"(() => {{
+   const {{ op_desktop_alert_async, op_desktop_send_error_report }} = Deno[Deno.internal].core.ops;
+   const _errorReportingUrl = {url};
+   const _appVersion = {version};
+@@ -1306,353 +1292,7 @@
+   }});
+ }})();
+ "#,
+-    url = serde_json::to_string(&url).unwrap(),
+-    version = serde_json::to_string(&version).unwrap(),
+-  )
+-}
+-
+-pub use deno_runtime::ops::desktop::DesktopEvent;
+-pub use deno_runtime::ops::desktop::DesktopEventReceiver;
+-pub use deno_runtime::ops::desktop::DesktopEventSender;
+-pub use deno_runtime::ops::desktop::DesktopEventTx;
+-pub use deno_runtime::ops::desktop::InitialWindowId;
+-pub use deno_runtime::ops::desktop::PendingBindCall;
+-pub use deno_runtime::ops::desktop::PendingBindResponses;
+-pub use deno_runtime::ops::desktop::create_desktop_event_channel;
+-pub use deno_runtime::ops::desktop::register_bind_call;
+-
+-/// Place the DesktopApi and optional AutoUpdateState into OpState.
+-/// The ops are already registered in the snapshot; this just provides
+-/// the runtime implementation.
+-pub fn init_desktop_state(
+-  state: &mut OpState,
+-  api: Box<dyn DesktopApi>,
+-  auto_update: Option<AutoUpdateState>,
+-) {
+-  let api: Arc<dyn DesktopApi> = Arc::from(api);
+-  state.put::<Arc<dyn DesktopApi>>(api);
+-  if let Some(au) = auto_update {
+-    state.put::<AutoUpdateState>(au);
+-  }
+-}
+-
+-pub use deno_lib::util::net::allocate_random_port;
+-
+-#[cfg(test)]
+-mod tests {
+-  use super::DESKTOP_JS;
+-  use super::desktop_auto_update_js;
+-  use super::desktop_error_reporting_js;
+-
+-  // --- DESKTOP_JS structural invariants ---
+-  //
+-  // DESKTOP_JS is an 800+ line string baked into the binary. We can't
+-  // cheaply exec it in a v8 isolate from here, but the asserts below
+-  // pin the regressions that motivated this whole fix: the "Deno.env
+-  // throws NotCapable and aborts the IIFE" bug from May 2026.
+-
+-  #[test]
+-  fn desktop_js_wraps_binding_trace_env_read_in_try_catch() {
+-    // The original bug: `Deno.env.get("DENO_DESKTOP_MUX_WS")` threw
+-    // NotCapable when --allow-env wasn't granted, aborting the rest of
+-    // DESKTOP_JS. The fix is to wrap that read in try/catch and let it
+-    // soft-fail. A regression that removed the try/catch would
+-    // reintroduce the "blank window where nothing works" failure mode.
+-    let near = locate_around(DESKTOP_JS, "DENO_DESKTOP_MUX_WS");
+-    assert!(
+-      near.contains("try {") || near.contains("try{"),
+-      "DENO_DESKTOP_MUX_WS read must be wrapped in try/catch; got:\n{near}"
+-    );
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_alert_confirm_prompt_overrides() {
+-    // The renderer reaches `op_desktop_alert/confirm/prompt` through
+-    // these globalThis overrides; the assignment lines must survive.
+-    // Each must reference its op so a stub/no-op replacement would
+-    // fail the check.
+-    assert!(DESKTOP_JS.contains("op_desktop_alert"));
+-    assert!(DESKTOP_JS.contains("op_desktop_confirm"));
+-    assert!(DESKTOP_JS.contains("op_desktop_prompt"));
+-    assert!(DESKTOP_JS.contains("globalThis"));
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_recv_event_loop() {
+-    // The event-loop IIFE at the bottom polls `op_desktop_recv_event`
+-    // and dispatches to BrowserWindow listeners. Without this code path
+-    // mouse / keyboard / focus / resize events would never reach JS,
+-    // exactly the symptom from the original bug report.
+-    assert!(
+-      DESKTOP_JS.contains("op_desktop_recv_event"),
+-      "DESKTOP_JS must call op_desktop_recv_event"
+-    );
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_notification_permission_getter() {
+-    // Notification.permission is a synchronous spec-mandated getter.
+-    // A regression that turned the property definition into a plain
+-    // value would break feature-detection in user code.
+-    assert!(DESKTOP_JS.contains("Notification"));
+-    assert!(DESKTOP_JS.contains("permission"));
+-    assert!(DESKTOP_JS.contains("requestPermission"));
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_navigator_permissions() {
+-    assert!(DESKTOP_JS.contains("navigator"));
+-    assert!(DESKTOP_JS.contains("permissions"));
+-    assert!(DESKTOP_JS.contains("PermissionStatus"));
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_navigator_clipboard() {
+-    // Assert on code, not prose: every one of "navigator", "clipboard",
+-    // "readText" and "writeText" also appears in the comment block above the
+-    // implementation, so substring checks on those words alone would still
+-    // pass with the whole class deleted.
+-    assert!(
+-      DESKTOP_JS.contains("class Clipboard extends EventTarget"),
+-      "Clipboard must be a real EventTarget subclass"
+-    );
+-    assert!(
+-      DESKTOP_JS.contains("async readText()"),
+-      "readText must be defined on the class"
+-    );
+-    assert!(
+-      DESKTOP_JS.contains("async writeText(data)"),
+-      "writeText must be defined on the class"
+-    );
+-    // Installed as a prototype getter on Navigator, as in browsers, rather
+-    // than an own data property on the instance.
+-    assert!(
+-      DESKTOP_JS.contains("defineProperty(NavigatorPrototype, \"clipboard\""),
+-      "clipboard must be installed on Navigator.prototype"
+-    );
+-    // The constructor is not reachable, and the receiver is checked.
+-    assert!(
+-      DESKTOP_JS.contains("webidl.illegalConstructor()"),
+-      "Clipboard must not be constructible"
+-    );
+-    assert!(
+-      DESKTOP_JS.contains("webidl.assertBranded(this, ClipboardPrototype)"),
+-      "the text methods must assert a branded receiver"
+-    );
+-  }
+-
+-  #[test]
+-  fn desktop_js_clipboard_awaits_the_ops() {
+-    // The ops are async so a slow clipboard owner can't freeze the runtime
+-    // (see op_desktop_read_clipboard_text). That only holds if the JS side
+-    // actually awaits them — dropping the `await` would return a pending
+-    // promise as the text and silently break `readText()`.
+-    assert!(
+-      DESKTOP_JS.contains("await op_desktop_read_clipboard_text()"),
+-      "readText must await the op"
+-    );
+-    assert!(
+-      DESKTOP_JS.contains("await op_desktop_write_clipboard_text(data)"),
+-      "writeText must await the op"
+-    );
+-  }
+-
+-  #[test]
+-  fn desktop_js_installs_browser_window_constructor() {
+-    assert!(DESKTOP_JS.contains("Deno.BrowserWindow"));
+-    // The original BrowserWindow is wrapped so per-window state is
+-    // recorded.
+-    assert!(DESKTOP_JS.contains("windows.set"));
+-    assert!(DESKTOP_JS.contains(
+-      "internals.defineEventHandler(BrowserWindowPrototype, \"load\")"
+-    ));
+-    assert!(DESKTOP_JS.contains("case \"pageLoad\""));
+-    assert!(DESKTOP_JS.contains("dispatchEvent(new Event(\"load\"))"));
+-  }
+-
+-  #[test]
+-  fn desktop_js_interposes_on_native_registry_methods() {
+-    assert!(
+-      DESKTOP_JS.contains("BrowserWindowPrototype.bind = function(name, fn)")
+-    );
+-    assert!(
+-      DESKTOP_JS.contains("BrowserWindowPrototype.unbind = function(name)")
+-    );
+-    assert!(DESKTOP_JS.contains("TrayPrototype.destroy = function()"));
+-    assert!(DESKTOP_JS.contains(
+-      "const privateDesktopBind = Symbol.for(\"Deno_privateDesktopBind\")"
+-    ));
+-    assert!(DESKTOP_JS.contains(
+-      "const privateDesktopUnbind = Symbol.for(\"Deno_privateDesktopUnbind\")"
+-    ));
+-    assert!(
+-      DESKTOP_JS.contains(
+-        "BrowserWindowPrototype[privateDesktopBind].call(this, name)"
+-      )
+-    );
+-    assert!(DESKTOP_JS.contains(
+-      "BrowserWindowPrototype[privateDesktopUnbind].call(this, name)"
+-    ));
+-    assert!(DESKTOP_JS.contains("Deno_privateDesktopTrayDestroy"));
+-    assert!(
+-      DESKTOP_JS
+-        .contains("TrayPrototype[privateDesktopTrayDestroy].call(this)")
+-    );
+-  }
+-
+-  // --- desktop_auto_update_js ---
+-
+-  #[test]
+-  fn auto_update_js_inlines_version_as_json_literal() {
+-    let js = desktop_auto_update_js(Some("1.2.3"), false, None);
+-    // The version must be a JSON-quoted string, not a bare identifier:
+-    // we feed it through serde_json::to_string. A regression that
+-    // dropped the quoting would produce invalid JS for any non-trivial
+-    // version (e.g. `1.2.3-alpha`).
+-    assert!(
+-      js.contains(r#""1.2.3""#),
+-      "version must be quoted; got: {js}"
+-    );
+-    assert!(js.contains("const _version ="));
+-    assert!(js.contains("const _rolledBack = false"));
+-  }
+-
+-  #[test]
+-  fn auto_update_js_serializes_none_as_null_literal() {
+-    let js = desktop_auto_update_js(None, true, None);
+-    assert!(js.contains("const _version = null"));
+-    assert!(js.contains("const _rolledBack = true"));
+-    assert!(js.contains("const _releaseBaseUrl = null"));
+-  }
+-
+-  #[test]
+-  fn auto_update_js_inlines_release_base_url() {
+-    // The configured `desktop.release.baseUrl` is baked in as the default
+-    // `url` for `Deno.autoUpdate`, so a no-arg call uses it.
+-    let js = desktop_auto_update_js(
+-      Some("1.0.0"),
+-      false,
+-      Some("https://releases.example/app"),
+-    );
+-    assert!(
+-      js.contains(r#"const _releaseBaseUrl = "https://releases.example/app""#),
+-      "release base url must be quoted; got: {js}"
+-    );
+-    assert!(js.contains("url = _releaseBaseUrl"));
+-  }
+-
+-  #[test]
+-  fn auto_update_js_blocks_non_https_manifest_url() {
+-    // Anti-downgrade defence: the auto-update path must refuse to
+-    // fetch its manifest over http://, gopher://, file://, etc. A
+-    // change that loosened this check is a security regression.
+-    let js = desktop_auto_update_js(Some("1.0.0"), false, None);
+-    assert!(js.contains("isHttpsUrl"));
+-    assert!(js.contains("https:"));
+-  }
+-
+-  // --- desktop_error_reporting_js ---
+-
+-  #[test]
+-  fn error_reporting_js_quotes_url_and_version() {
+-    let js =
+-      desktop_error_reporting_js(Some("https://err.example/r"), Some("0.1.0"));
+-    assert!(js.contains(r#""https://err.example/r""#));
+-    assert!(js.contains(r#""0.1.0""#));
+-    // The URL must be referenced by the script body — otherwise the
+-    // emitted code would silently never POST.
+-    assert!(js.contains("_errorReportingUrl"));
+-  }
+-
+-  #[test]
+-  fn error_reporting_js_handles_none_url() {
+-    let js = desktop_error_reporting_js(None, None);
+-    // null both — the handler short-circuits the POST but still shows
+-    // the alert.
+-    assert!(js.contains("const _errorReportingUrl = null"));
+-    assert!(js.contains("const _appVersion = null"));
+-  }
+-
+-  #[test]
+-  fn error_reporting_js_never_blocks_the_js_thread() {
+-    // The error dialog must go through the async op: the blocking
+-    // `op_desktop_alert` parks the JS thread until the dialog is dismissed,
+-    // which wedged the entire runtime (timers, servers, signal handlers)
+-    // whenever nobody could click it — hidden window, headless child
+-    // (#36393). Errors must also always reach stderr, because in those runs
+-    // the dialog is invisible and stderr is the only surface left.
+-    let js = desktop_error_reporting_js(None, None);
+-    assert!(js.contains("op_desktop_alert_async"));
+-    assert!(!js.contains("op_desktop_alert(\"Application Error\""));
+-    assert!(js.contains("console.error"));
+-  }
+-
+-  #[test]
+-  fn error_reporting_js_holds_the_process_open_for_the_dialog() {
+-    // The dialog is only reached by awaiting the op, so the handler has to
+-    // stop the runtime tearing down the moment it returns — otherwise the
+-    // dialog (and the exit that follows it) races process teardown and the
+-    // user sees nothing. `preventDefault()` hands us the default handling;
+-    // the exit below is then ours to perform.
+-    let js = desktop_error_reporting_js(None, None);
+-    assert!(
+-      js.contains("ev.preventDefault()"),
+-      "handler must prevent the runtime from terminating before the dialog"
+-    );
+-    assert!(
+-      js.contains("Deno.exit(1)"),
+-      "having prevented the default, the handler owns the exit"
+-    );
+-    // Both listeners must pass the event through, or `preventDefault` above
+-    // is unreachable for one of them. Counting `addEventListener` and
+-    // `handleError(` separately rather than matching an indented literal:
+-    // the previous form pinned the exact whitespace inside the template and
+-    // would have broken on a reformat that changed nothing real.
+-    assert_eq!(
+-      js.matches("addEventListener(").count(),
+-      2,
+-      "both the `error` and `unhandledrejection` listeners must be installed"
+-    );
+-    assert_eq!(
+-      js.matches("handleError(").count(),
+-      3,
+-      "one definition plus one call from each listener"
+-    );
+-    assert!(
+-      js.contains("function handleError(ev, err, message, stack)"),
+-      "the handler must receive the event so it can prevent the default"
+-    );
+-  }
+-
+-  #[test]
+-  fn error_reporting_js_listens_for_unhandledrejection() {
+-    // Both `error` and `unhandledrejection` events must be hooked
+-    // — missing either would let half of all user-code failures fall
+-    // out the bottom of the runtime without notification.
+-    let js = desktop_error_reporting_js(None, None);
+-    assert!(js.contains("\"error\""));
+-    assert!(js.contains("\"unhandledrejection\""));
+-  }
+-
+-  // --- helpers ---
+-
+-  /// Return a window of DESKTOP_JS around the first occurrence of `needle`,
+-  /// covering ~10 lines on each side. Useful for asserting "the region
+-  /// near this token contains a try/catch" without coupling the test
+-  /// to a precise line range.
+-  fn locate_around(hay: &str, needle: &str) -> String {
+-    // The first occurrence of DENO_DESKTOP_MUX_WS in DESKTOP_JS is
+-    // inside a comment block; the *code* occurrence is the second. We
+-    // want the window around the code path, so search after the first.
+-    let first = hay.find(needle).unwrap_or_else(|| {
+-      panic!("needle {needle:?} not found in DESKTOP_JS");
+-    });
+-    let idx = hay[first + needle.len()..]
+-      .find(needle)
+-      .map(|i| first + needle.len() + i)
+-      .unwrap_or(first);
+-    let start = idx.saturating_sub(500);
+-    let end = (idx + needle.len() + 500).min(hay.len());
+-    hay[start..end].to_string()
+-  }
++        url = deno_core::serde_json::to_string(&url).unwrap(),
++        version = deno_core::serde_json::to_string(&version).unwrap(),
++    )
+ }
