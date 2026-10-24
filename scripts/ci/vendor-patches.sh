@@ -160,7 +160,7 @@ for unit_dir in "${units[@]}"; do
             patch_file="${patch_file%%#*}"
             patch_file="$(printf '%s' "$patch_file" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
             [ -z "$patch_file" ] && continue
-            if ! patch -s -p1 -d "$patch_root" < "$unit_dir/$patch_file"; then
+            if ! patch -s -t -p1 -d "$patch_root" < "$unit_dir/$patch_file"; then
                 echo "error: $name failed to apply $patch_file" >&2
                 exit 1
             fi
