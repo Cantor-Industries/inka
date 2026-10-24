@@ -60,23 +60,6 @@ temp tree. `inka build` warns when executable files are embedded without one.
 > (`Bad file descriptor`); this tuple carries a narrow `deno_node` patch for
 > those pipes. On older runtime tuples, use `typescript/async` instead.
 
-### `inka desktop` on Windows: the CEF backend, sharing one Chromium runtime
-
-`inka desktop <entry> --backend cef` now packages apps on
-`x86_64-pc-windows-msvc`, matching the Linux CEF path:
-
-- The pinned laufey `cef` backend is downloaded once and checksum-verified, and
-  the Chromium runtime (`libcef.dll`, `*.pak`, `icudtl.dat`, `locales/`, helper
-  executables) is installed once per machine under
-  `%LOCALAPPDATA%\cef\<laufey-version>\<target>\`.
-- Each app directory gets the runtime as **hard links** into that shared install
-  — one physical copy, shared with every CEF app on the machine, and with no
-  admin rights required (Windows symlinks need Developer Mode). When linking is
-  not possible (a different volume, or a non-NTFS filesystem), inka falls back to
-  copying the runtime into the app, exactly as Deno's Windows packager does.
-- The release mirrors the pinned Windows `laufey-cef-*.zip`, so CEF packaging
-  works offline from a release.
-
 ## Assets
 
 - `inka-toolchain-{{REL}}-x86_64-unknown-linux-gnu.tar.gz` — CLI + launcher +
