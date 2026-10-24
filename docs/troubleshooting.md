@@ -69,6 +69,24 @@ uncached package errors.
 (`inka build --external <pkg>`) so their files are embedded, and the artifact must
 grant `ffi` (plus `sys` for platform detection) at run time.
 
+**`spawn ... EACCES` from an embedded binary.** Older artifacts dropped the
+executable bit when embedding packages. Rebuild the artifact with a current
+toolchain; the archive now carries a per-entry exec flag. If the path is
+`.../node_modules/.../lib/tsc`, this was the TypeScript 7 platform package.
+
+**`Bad file descriptor (os error 9)` from `typescript/sync`.** This is a Deno
+node-compat limitation on POSIX child-process pipes, not an inka permission or
+exec-bit problem (plain `deno run` reproduces it on Deno 2.9.8). Use
+`typescript/async` and `await using api = new API()`, or wait for a runtime tuple
+with synchronous child-pipe fd support. `typescript/async` must be closed
+(`await using` / `await api.close()`) or the child keeps the process alive.
+
+**Embedded native executable is not found (`ENOENT`).** A package that spawns a
+native binary must be embedded with `--external <pkg>`; bundling only carries the
+package's JavaScript. The same applies to scripts whose shebang names an
+interpreter that is not present at run time (`#!/usr/bin/env node`); inka does
+not provide a standalone `node` executable.
+
 **`ReferenceError: <name> is not defined` from inside `eval`.** A source module
 uses **direct `eval`** whose string references a module-scope binding (a local,
 an imported name like `factory`/`ts`, …). `inka run` gives each module its own

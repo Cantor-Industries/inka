@@ -25,8 +25,17 @@ the binary section named `inka`, using Deno's `libsui`:
 ```
 [ launcher bytes, with an appended `inka` section ]
   section payload: [ manifest length u64 LE | manifest | archive ]
-  archive entry:   [ path length u64 LE | data length u64 LE | path | data ]
+  archive v2:      [ "INKARC2\0" | entry... ]
+  archive entry:   [ path length u64 LE | data length u64 LE | flags u8 | path | data ]
 ```
+
+Flags bit 0 means the file was executable on the build host. Extraction
+normalizes it to mode `0755` (and non-executable files to `0644`) on Unix,
+applying `fchmod` to the already-open descriptor. Only the exec bit is carried:
+setuid/setgid/sticky/world-writable bits are never preserved. A v1 archive (no
+magic, 16-byte headers) is still accepted; every v1 entry is non-executable, so
+artifacts built before v2 remain readable but old native-executable artifacts
+must be rebuilt.
 
 `libsui` grafts the section in the format-correct way per target: an ELF
 `PT_NOTE` (name `SUI`) on Linux, an `RCDATA` resource named `inka` on Windows,
