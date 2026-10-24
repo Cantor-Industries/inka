@@ -37,6 +37,30 @@ newest beta.
 
 ## Changed since the previous beta
 
+### Embedded native executables: archive v2 preserves the exec bit
+
+Artifacts now record whether each embedded file was executable on the build
+host. External packages (`--external`), `--embed-dir` assets, and desktop
+payloads are extracted with normalized modes (`0755` for executables, `0644`
+otherwise); setuid/setgid/sticky/world-writable bits are never preserved. This
+fixes `spawn ... EACCES` for packages such as TypeScript 7's native platform
+`tsc`.
+
+Legacy v1 artifacts still run, but artifacts that embedded native executables
+must be rebuilt with this toolchain. A build now refuses a launcher that predates
+archive v2. `--embed-dir` also skips the current output and previous inka
+artifacts, so a rebuild cannot recursively embed the previous executable.
+
+Native executables still need an **unscoped** run grant at run time
+(`--allow-run` or `-A`); a path-scoped grant cannot match the artifact's random
+temp tree. `inka build` warns when executable files are embedded without one.
+
+> **TypeScript 7 `typescript/sync` remains unsupported on the current runtime
+> tuple.** The exec fix lets the native `tsc` start, but Deno 2.9.8 lacks
+> synchronous I/O on child-process pipes (`Bad file descriptor`). Use
+> `typescript/async` on this tuple; a follow-up runtime tuple addresses the sync
+> path.
+
 ### `inka desktop` on Windows: the CEF backend, sharing one Chromium runtime
 
 `inka desktop <entry> --backend cef` now packages apps on
