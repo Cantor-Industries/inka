@@ -1,0 +1,32 @@
+--- a/build.rs
++++ b/build.rs
+@@ -4,18 +4,24 @@
+ use std::path::PathBuf;
+ 
+ fn main() {
+-  println!("cargo:rustc-env=TARGET={}", env::var("TARGET").unwrap());
++  let target = env::var("TARGET").unwrap();
++  println!("cargo:rustc-env=TARGET={target}");
+ 
+   // Compile llhttp (Node.js HTTP/1.1 parser)
+   let llhttp_dir = PathBuf::from("ops/llhttp/c");
+-  cc::Build::new()
++  let mut build = cc::Build::new();
++  build
+     .files([
+       llhttp_dir.join("llhttp.c"),
+       llhttp_dir.join("http.c"),
+       llhttp_dir.join("api.c"),
+     ])
+     .include(&llhttp_dir)
+-    .std("c99")
+-    .warnings(false)
+-    .compile("llhttp");
++    .warnings(false);
++  // MSVC's cl does not understand GCC's -std=c99 and warns (D9002) before
++  // compiling in its default C mode.
++  if !target.contains("msvc") {
++    build.std("c99");
++  }
++  build.compile("llhttp");
+ }

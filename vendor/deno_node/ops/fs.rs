@@ -36,6 +36,7 @@ use crate::ops::constant::UV_FS_COPYFILE_EXCL;
 const VIRTUAL_FD_START: i32 = 1_000_000_000;
 static NEXT_VIRTUAL_FD: AtomicI32 = AtomicI32::new(VIRTUAL_FD_START);
 
+#[allow(deprecated)]
 fn next_virtual_fd() -> i32 {
   NEXT_VIRTUAL_FD
     .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
